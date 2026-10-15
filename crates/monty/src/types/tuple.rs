@@ -168,6 +168,12 @@ impl<'h> HeapRead<'h, Tuple> {
         self.get(vm.heap).items[index].clone_with_heap(vm)
     }
 
+    /// Clones owned items into a plain vector for consumers such as list slice assignment.
+    /// The caller must release or transfer every cloned reference.
+    pub(crate) fn cloned_items(&self, vm: &mut VM<'h>) -> RunResult<Vec<Value>> {
+        Ok(self.clone_all_items(vm)?.into_vec())
+    }
+
     /// Clones all items from this tuple with proper refcount management.
     ///
     /// Preflights the slot bytes so an over-budget clone raises a graceful
