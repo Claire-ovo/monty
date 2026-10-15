@@ -4,6 +4,8 @@
 //! successful sort applies the permutation. No total-order contract is imposed
 //! on user comparisons, which may be inconsistent, mutate objects, or raise.
 
+use std::mem::size_of_val;
+
 use crate::{
     args::{ArgValues, FromArgs, LaxBool},
     bytecode::VM,
@@ -49,6 +51,9 @@ pub fn sort_values(
     reverse: bool,
     vm: &mut VM<'_>,
 ) -> RunResult<()> {
+    vm.heap
+        .tracker
+        .check_allocation(values.len().saturating_mul(size_of::<usize>()))?;
     let mut indices = (0..values.len()).collect::<Vec<_>>();
     if let Some(f) = key_fn {
         let keys: Vec<Value> = Vec::with_capacity(values.len());
@@ -76,6 +81,7 @@ pub fn sort_indices(indices: &mut [usize], values: &[Value], reverse: bool, vm: 
     if reverse {
         indices.reverse();
     }
+    vm.heap.tracker.check_allocation(size_of_val(indices))?;
     let mut scratch = indices.to_vec();
     let mut comparisons = 0;
     let mut width = 1;
