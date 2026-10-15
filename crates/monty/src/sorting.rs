@@ -6,6 +6,8 @@
 
 use std::mem::size_of_val;
 
+use smallvec::SmallVec;
+
 use crate::{
     args::{ArgValues, FromArgs, LaxBool},
     bytecode::VM,
@@ -13,6 +15,9 @@ use crate::{
     exception_private::RunResult,
     value::Value,
 };
+
+/// Maximum sort length using inline indices and no merge scratch buffer.
+const INSERTION_SORT_THRESHOLD: usize = 8;
 
 /// Shared `sorted`/`list.sort` keywords. The `sort` name matches CPython's
 /// argument errors, and `LaxBool` truth-tests rather than type-checks `reverse`.
@@ -51,10 +56,13 @@ pub fn sort_values(
     reverse: bool,
     vm: &mut VM<'_>,
 ) -> RunResult<()> {
-    vm.heap
-        .tracker
-        .check_allocation(values.len().saturating_mul(size_of::<usize>()))?;
-    let mut indices = (0..values.len()).collect::<Vec<_>>();
+    if values.len() > INSERTION_SORT_THRESHOLD {
+        vm.heap
+            .tracker
+            .check_allocation(values.len().saturating_mul(size_of::<usize>()))?;
+    }
+    let mut indices = SmallVec::<[usize; INSERTION_SORT_THRESHOLD]>::with_capacity(values.len());
+    indices.extend(0..values.len());
     if let Some(f) = key_fn {
         let keys: Vec<Value> = Vec::with_capacity(values.len());
         defer_drop_mut!(keys, vm);
@@ -81,6 +89,31 @@ pub fn sort_indices(indices: &mut [usize], values: &[Value], reverse: bool, vm: 
     if reverse {
         indices.reverse();
     }
+    if indices.len() <= INSERTION_SORT_THRESHOLD {
+        insertion_sort_indices(indices, values, vm)?;
+    } else {
+        merge_sort_indices(indices, values, vm)?;
+    }
+    if reverse {
+        indices.reverse();
+    }
+    Ok(())
+}
+
+/// Insertion-sorts small index buffers without allocating or moving owned values.
+fn insertion_sort_indices(indices: &mut [usize], values: &[Value], vm: &mut VM<'_>) -> RunResult<()> {
+    for unsorted in 1..indices.len() {
+        let mut current = unsorted;
+        while current > 0 && values[indices[current]].py_lt_operator(&values[indices[current - 1]], vm)? {
+            indices.swap(current, current - 1);
+            current -= 1;
+        }
+    }
+    Ok(())
+}
+
+/// Merge-sorts larger index buffers with periodic time checks during comparisons.
+fn merge_sort_indices(indices: &mut [usize], values: &[Value], vm: &mut VM<'_>) -> RunResult<()> {
     vm.heap.tracker.check_allocation(size_of_val(indices))?;
     let mut scratch = indices.to_vec();
     let mut comparisons = 0;
@@ -113,9 +146,6 @@ pub fn sort_indices(indices: &mut [usize], values: &[Value], reverse: bool, vm: 
         }
         indices.copy_from_slice(&scratch);
         width = width.saturating_mul(2);
-    }
-    if reverse {
-        indices.reverse();
     }
     Ok(())
 }

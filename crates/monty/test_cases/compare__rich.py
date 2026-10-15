@@ -265,11 +265,18 @@ def sort_key(x):
 
 assert sorted([5, 3, 1, 4, 2], key=sort_key) == [3, 1, 4, 5, 2]
 assert key_calls == [5, 3, 1, 4, 2]
-for n in (7, 31, 64, 127):
+for n in (0, 1, 2, 7, 8, 9, 31, 64, 127):
     values = [(i * 19) % 37 for i in range(n)]
     ascending = sorted(values)
     assert ascending == [v for v in range(37) for x in values if v == x]
     assert sorted(values, reverse=True) == list(reversed(ascending))
+
+for n in (8, 9):
+    tagged = [Sortable(i % 3, i) for i in range(n)]
+    for reverse in (False, True):
+        keys = (2, 1, 0) if reverse else (0, 1, 2)
+        expected = [i for key in keys for i in range(n) if i % 3 == key]
+        assert [item.label for item in sorted(tagged, reverse=reverse)] == expected
 
 
 # Comparison callbacks see a detached list and mutation is rejected.
