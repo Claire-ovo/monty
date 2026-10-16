@@ -348,7 +348,12 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
     /// override only need a single trait impl, not parallel `StaticStrings::Foo`
     /// arms in their `py_call_attr` body. New dunder methods plug into the
     /// dispatch table here without touching individual types.
-    fn call_attr(&mut self, obj: Value<H>, name_id: StringId, args: ArgValues<H>) -> Result<CallResult<H>, RunError> {
+    pub(crate) fn call_attr(
+        &mut self,
+        obj: Value<H>,
+        name_id: StringId,
+        args: ArgValues<H>,
+    ) -> Result<CallResult<H>, RunError> {
         let this = self;
         let attr = EitherStr::Interned(name_id);
 

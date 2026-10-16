@@ -14,6 +14,10 @@ publish = false
 worker-alloc = ["dep:monty-alloc"]
 # Measures retained and peak allocator-requested bytes, separately from timing benchmarks.
 heap-memory = ["dep:dhat"]
+# Set by the CodSpeed workflow: report through `codspeed-criterion-compat` and
+# leave out the CPython comparisons. A feature rather than `cfg(codspeed)`,
+# which `cargo codspeed` sets only for simulation builds, not walltime ones.
+codspeed = []
 
 [dependencies]
 monty = { workspace = true, features = ["test-hooks"] }
@@ -26,7 +30,7 @@ monty-proto = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 pyo3 = { workspace = true, features = ["auto-initialize"] }
 tempfile = { workspace = true }
-codspeed-criterion-compat = { version = "4.2.1", features = ["async_tokio"] }
+codspeed-criterion-compat = { version = "5.0.1", features = ["async_tokio"] }
 criterion = { version = "0.5", features = ["async_tokio"] }
 dhat = { version = "0.3.3", optional = true }
 

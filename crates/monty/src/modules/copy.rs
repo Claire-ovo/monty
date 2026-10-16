@@ -352,6 +352,7 @@ fn classify<H: RuntimeRef>(output: &HeapReadOutput<'_, H>) -> Copyability {
         | HeapReadOutput::CallableIterator(_)
         | HeapReadOutput::DirScan(_)
         | HeapReadOutput::Itertools(_)
+        | HeapReadOutput::Csv(_)
         | HeapReadOutput::Module(_)
         | HeapReadOutput::Coroutine(_)
         | HeapReadOutput::GatherFuture(_)

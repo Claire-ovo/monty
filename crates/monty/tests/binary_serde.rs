@@ -551,9 +551,7 @@ ext_fn(0)
         MontyObject::string("repeat('x', 1)".to_owned()),
     ]);
 
-    // Both are resumed: an unresumed `RunProgress` leaves its globals' refs
-    // unreleased, aborting under `memory-model-checks`. Pre-existing and not
-    // itertools-specific (a plain `x = [1, 2]` global does it too).
+    // Resume both copies to check iterator state before and after relocation.
     let original = progress.into_function_call().expect("should be at function call");
     assert_eq!(original.function_name, "ext_fn");
     let from_original = original.resume(MontyObject::int(0), PrintWriter::Stdout).unwrap();
@@ -562,6 +560,55 @@ ext_fn(0)
     let call = loaded.into_function_call().expect("should be at function call");
     let from_loaded = call.resume(MontyObject::int(0), PrintWriter::Stdout).unwrap();
     assert_eq!(from_loaded.into_complete().unwrap(), expected);
+}
+
+/// CSV payloads retain iterator positions, dialects and shared bound-method targets after relocation.
+#[test]
+fn run_progress_round_trip_preserves_csv_objects() {
+    let code = r"
+import csv
+
+class Sink:
+    def __init__(self):
+        self.lines = []
+
+    def write(self, text):
+        self.lines.append(text)
+        return len(text)
+
+dialect = csv.get_dialect('excel')
+reader = csv.reader(['a,b\n', 'c,d\n'], dialect)
+dict_reader = csv.DictReader(['a,b\n', 'x,y\n'])
+next(reader)
+assert dict_reader.fieldnames == ['a', 'b']
+sink = Sink()
+writer = csv.writer(sink, dialect)
+dict_writer = csv.DictWriter(sink, ['a', 'b'], dialect=dialect)
+ext_fn()
+writer.writerow(next(reader))
+dict_writer.writerow(next(dict_reader))
+assert sink.lines == ['c,d\r\n', 'x,y\r\n']
+assert reader.line_num == 2
+assert dict_reader.line_num == 2
+assert writer.dialect.delimiter == dialect.delimiter
+None
+";
+    let runner = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let progress = resolve_name_lookups(
+        runner
+            .start(vec![], ResourceTracker::default(), PrintWriter::Disabled)
+            .unwrap(),
+    )
+    .unwrap();
+    let restored = round_trip_progress(&progress);
+    for progress in [progress, restored] {
+        let result = progress
+            .into_function_call()
+            .unwrap()
+            .resume(MontyObject::none(), PrintWriter::Disabled)
+            .unwrap();
+        assert_eq!(result.into_complete().unwrap(), MontyObject::none());
+    }
 }
 
 /// A live `functools.partial` on the heap survives a round-trip with its bound

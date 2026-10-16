@@ -47,6 +47,7 @@ use crate::{
     args::ArgValues,
     bytecode::{CallResult, VM},
     exception_private::{ExcType, ExcTypeExt, RunResult},
+    modules::csv,
     types::Type,
     value::Value,
 };
@@ -100,6 +101,8 @@ impl<H: RuntimeRef> Builtins<H> {
         match self {
             Self::Function(b) => b.call(vm, args),
             Self::ExcType(exc) => exc.call(vm, args).map(CallResult::Value),
+            // `DictReader(f)` on an unread file yields the read that loads it.
+            Self::Type(Type::CsvDictReader) => csv::dict_reader_call(vm, args),
             Self::Type(t) => t.call(vm, args).map(CallResult::Value),
         }
     }

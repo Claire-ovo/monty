@@ -1,8 +1,8 @@
 //! Reference-heavy execution and graph relocation benchmarks for heap representations.
 
-#[cfg(codspeed)]
+#[cfg(feature = "codspeed")]
 use codspeed_criterion_compat::{Bencher, Criterion, black_box, criterion_group, criterion_main};
-#[cfg(not(codspeed))]
+#[cfg(not(feature = "codspeed"))]
 use criterion::{Bencher, Criterion, black_box, criterion_group, criterion_main};
 use monty::{Dump, MontyRun, SessionRef, dump};
 use monty_bench::{

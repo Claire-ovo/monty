@@ -1180,8 +1180,9 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
         self.finish_host_turn(result)
     }
 
-    /// Epilogue for every host-boundary execution window (here and
-    /// `MontyRepl::call_function`): re-checks both resource limits so an
+    /// Epilogue for every host-boundary execution window (here, and the
+    /// uncaught branch of `resume_with_exception`, which ends a turn without
+    /// entering the loop): re-checks both resource limits so an
     /// overshoot that arose after the run loop's last amortized check — or
     /// was swallowed by a truncating caller (repr's `...[timeout]`) — cannot
     /// escape as a successful result. Consumes a discarded success so its
@@ -2193,8 +2194,16 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
                 apply_file_next(file_id, default, value, self).map(Some)
             }
             Some(PendingEffect::Post(PostConversionEffect::WritePosition {
-                file_id, text_length, ..
-            })) => apply_write_position(file_id, text_length, value, self).map(Some),
+                file_id,
+                text_length,
+                result_none,
+                ..
+            })) => apply_write_position(file_id, text_length, result_none, value, self).map(Some),
+            Some(PendingEffect::Post(PostConversionEffect::LoadThenCall {
+                file_id,
+                callable,
+                args,
+            })) => return self.resume_load_then_call(file_id, callable, args, value),
             Some(PendingEffect::Post(PostConversionEffect::OpenName { name, newline })) => {
                 apply_open_name(name, newline, value, self).map(Some)
             }
@@ -2218,6 +2227,45 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
                     self.push(value);
                 }
                 self.run_external()
+            }
+            Err(err) => self.resume_with_exception(err),
+        }
+    }
+
+    /// `LoadThenCall` resume: installs the host content, then replays the call
+    /// that found its file unread. The call's own outcome decides what happens
+    /// next, since the replay may itself suspend (a second unread file).
+    fn resume_load_then_call(
+        &mut self,
+        file_id: H,
+        callable: Value<H>,
+        args: ArgValues<H>,
+        value: Value<H>,
+    ) -> Result<FrameExit<H>, RunError> {
+        if let Err(err) = apply_buffer_load(file_id, value, self) {
+            callable.drop_with(self);
+            args.drop_with(self);
+            return self.resume_with_exception(err);
+        }
+        // The replay runs Python (a `fieldnames` iterator, a dialect object's attributes)
+        // outside `run_external`, so it needs its own execution-clock window.
+        self.heap.tracker.on_execution_start();
+        let result = self.call_function(&callable, args);
+        self.heap.tracker.on_execution_stop();
+        callable.drop_with(self);
+        match result {
+            Ok(CallResult::Value(value)) => {
+                self.push(value);
+                self.run_external()
+            }
+            Ok(CallResult::FramePushed) => self.run_external(),
+            Ok(CallResult::OsCall(call)) => self.suspend_again(call, None),
+            Ok(CallResult::OsCallWithEffect { call, effect }) => self.suspend_again(call, Some(effect)),
+            Ok(other) => {
+                other.drop_with(self);
+                Err(RunError::internal(
+                    "LoadThenCall: replayed call produced an unexpected result",
+                ))
             }
             Err(err) => self.resume_with_exception(err),
         }
@@ -2289,6 +2337,7 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
                 PendingEffect::Post(
                     effect @ (PostConversionEffect::BufferLoad { .. }
                     | PostConversionEffect::FileNext { .. }
+                    | PostConversionEffect::LoadThenCall { .. }
                     | PostConversionEffect::SeedRandom { .. }),
                 ) => effect.release(self.heap),
                 PendingEffect::Post(PostConversionEffect::SleepResult { result }) => result.drop_with(self),
@@ -2316,7 +2365,9 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
         // Use the normal exception handling mechanism
         // handle_exception returns None if caught, Some(error) if not caught
         if let Some(uncaught_error) = self.handle_exception(error) {
-            return Err(uncaught_error);
+            // The turn ends here without entering the run loop, so this is its
+            // only chance at the limit re-check every host turn ends with.
+            return self.finish_host_turn(Err(uncaught_error));
         }
         yield_if_parked!(self);
         // Exception was caught, continue execution

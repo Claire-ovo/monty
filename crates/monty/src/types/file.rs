@@ -773,6 +773,7 @@ impl<'h, H: RuntimeRef> HeapObjectRead<'h, H, OpenFile<H>> {
             previous_position: self.get(vm.heap).position,
             previous_length: self.get(vm.heap).file_length,
             text_length,
+            result_none: false,
         }
         .into();
         Ok(CallResult::OsCallWithEffect { call, effect })
@@ -1108,10 +1109,11 @@ fn next_line<'h, H: RuntimeRef>(
 /// read (`list(f)`, `enumerate(f)`, …); only `for` and `next()` issue it.
 ///
 /// TODO: `enumerate`, `zip`, `map`, `filter` and `sorted` go away from this
-/// list once they are bytecode, since they then iterate through `ForIter`.
+/// list once they are bytecode, since they then iterate through `ForIter`
+/// (<https://github.com/pydantic/monty/issues/1041>).
 /// The Rust-side consumers that remain (`list(f)`, `''.join(f)`, `sum(f)`, …)
-/// need a call-boundary retry: stash the call in a `PostConversionEffect`
-/// like `SeedRandom { retry }`, yield the load, replay the call on resume.
+/// need the `LoadThenCall` effect `csv.reader(f)` uses: yield the load with
+/// the call stashed, replay the call on resume.
 fn unloaded_iteration_error<H: RuntimeRef>(file_type: Type<H>) -> RunError {
     ExcType::not_implemented(format!(
         "iterating an unread {file_type} is only supported by 'for' loops and next(); call seek(0) first to load it"
@@ -1127,14 +1129,16 @@ fn unloaded_iteration_error<H: RuntimeRef>(file_type: Type<H>) -> RunError {
 /// values returned by Monty's filesystem backends and CPython's `write()`.
 ///
 /// `text_length` replaces the host's count as the return value when newline
-/// translation lengthened the payload (see [`Newline::translate_write`]);
-/// the logical position still advances by what reached the file.
+/// translation lengthened the payload (see [`Newline::translate_write`]), and
+/// `result_none` replaces it with `None` (`csv.writer.writerows()`); the
+/// logical position still advances by what reached the file.
 ///
 /// As with [`apply_buffer_store`], the pending-file-effect pin on `file_id`
 /// is released by `defer_drop!` regardless of which path the function takes.
 pub(crate) fn apply_write_position<H: RuntimeRef>(
     file_id: H,
     text_length: Option<u64>,
+    result_none: bool,
     result: Value<H>,
     vm: &mut VM<'_, H>,
 ) -> RunResult<Value<H>> {
@@ -1172,6 +1176,10 @@ pub(crate) fn apply_write_position<H: RuntimeRef>(
 
     let (result, vm) = result_guard.into_parts();
     match text_length {
+        _ if result_none => {
+            result.drop_with(vm);
+            Ok(Value::None)
+        }
         Some(length) => {
             result.drop_with(vm);
             Ok(Value::Int(
