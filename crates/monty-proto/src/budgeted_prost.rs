@@ -106,9 +106,8 @@ pub mod encoding {
     pub mod string {
         pub use prost::encoding::string::{encode, encode_repeated, encoded_len, encoded_len_repeated};
 
-        use crate::decode_budget::{charge, exhausted};
-
         use super::{BudgetVec, Buf, DecodeContext, DecodeError, WireType, check_wire_type, decode_varint, error};
+        use crate::decode_budget::{charge, exhausted};
 
         /// Window size for validating and copying a string payload.
         const UTF8_WINDOW: usize = 4 * 1024 * 1024;
