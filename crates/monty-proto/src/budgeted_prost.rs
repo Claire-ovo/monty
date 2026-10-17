@@ -104,6 +104,8 @@ pub mod encoding {
 
     /// UTF-8 strings backed by a fallible byte buffer during decoding.
     pub mod string {
+        use std::str;
+
         pub use prost::encoding::string::{encode, encode_repeated, encoded_len, encoded_len_repeated};
 
         use super::{BudgetVec, Buf, DecodeContext, DecodeError, WireType, check_wire_type, decode_varint, error};
@@ -123,7 +125,7 @@ pub mod encoding {
                     }
                 }
                 value.push_str(
-                    std::str::from_utf8(&src[pos..end])
+                    str::from_utf8(&src[pos..end])
                         .map_err(|_| error("invalid string value: data is not UTF-8 encoded"))?,
                 );
                 pos = end;
