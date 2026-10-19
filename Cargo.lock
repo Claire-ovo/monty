@@ -2755,6 +2755,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "monty-js-runtime"
+version = "1.2.0"
+dependencies = [
+ "clap",
+ "monty-alloc",
+ "monty-ecma",
+ "monty-proto",
+ "monty-types",
+]
+
+[[package]]
 name = "monty-macros"
 version = "1.2.0"
 dependencies = [

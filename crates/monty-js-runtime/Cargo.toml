@@ -1,0 +1,27 @@
+[package]
+name = "monty-js-runtime"
+version = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+description = "The `monty-js` worker binary: Monty's JavaScript sandbox behind the same protocol as `monty`"
+keywords = ["javascript", "interpreter", "sandbox", "embedded"]
+categories = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+readme = "README.md"
+
+[[bin]]
+name = "monty-js"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+monty-alloc = { workspace = true, features = ["exit-code"] }
+monty-ecma = { workspace = true }
+monty-proto = { workspace = true, features = ["worker"] }
+monty-types = { workspace = true, features = ["tzdb"] }
+
+[lints]
+workspace = true

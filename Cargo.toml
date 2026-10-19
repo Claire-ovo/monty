@@ -22,6 +22,7 @@ members = [
     "crates/monty-macros",
     "crates/monty-regexp",
     "crates/monty-ecma",
+    "crates/monty-js-runtime",
     "crates/fuzz"
 ]
 default-members = ["crates/monty-runtime"]
