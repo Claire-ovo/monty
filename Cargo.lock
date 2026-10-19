@@ -2518,6 +2518,7 @@ dependencies = [
  "libm",
  "memchr",
  "minicbor-serde",
+ "monty-heap",
  "monty-macros",
  "monty-types",
  "num-bigint",
@@ -2640,6 +2641,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "monty-heap"
+version = "1.2.0"
+dependencies = [
+ "minicbor-serde",
+ "monty-types",
+ "serde",
+ "smallvec",
+]
+
+[[package]]
 name = "monty-js"
 version = "1.2.0"
 dependencies = [
@@ -2711,6 +2722,10 @@ dependencies = [
  "serde_json",
  "strum 0.27.2",
 ]
+
+[[package]]
+name = "monty-regexp"
+version = "1.2.0"
 
 [[package]]
 name = "monty-runtime"

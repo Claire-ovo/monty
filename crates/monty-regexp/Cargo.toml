@@ -1,0 +1,22 @@
+[package]
+name = "monty-regexp"
+version = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+description = "ECMAScript regular-expression engine and Unicode tables over UTF-16 code units, for Monty's JavaScript sandbox"
+keywords = ["javascript", "regex", "regexp", "sandbox"]
+categories = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Exposes the thread-local allocation-failure hooks of the case and
+# normalization buffers to the engine's String tests.
+test-hooks = []

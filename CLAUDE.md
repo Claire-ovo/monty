@@ -204,6 +204,16 @@ The contract for crash detection: a child that exits or EOFs *without* a
 Pool and protocol design belong in their crate READMEs; host-API contracts belong in the relevant
 `docs/` topic and binding reference. Value-conversion divergences belong in `limitations/host-values.md`.
 
+## `monty-regexp` — ECMAScript regular expressions
+
+`crates/monty-regexp` is a vendored copy of quickjs-oxide's `oxide-regexp` (MIT; a safe-Rust port of QuickJS's
+`libregexp`/`libunicode`, `#![forbid(unsafe_code)]`, no dependencies): an ECMAScript `RegExp` compiler and
+backtracking executor over UTF-16 code units plus the Unicode 17 case, normalization and property tables. It exists for
+the JavaScript sandbox (see `.claude/plans/` for the design) and nothing links it yet. Its README records the upstream
+commit and how to sync; the generated tables under `src/unicode/generated/` stay byte-identical to upstream, so lint
+expectations for them sit on the `mod tables` declarations, never inside the generated files. Reference engines and
+corpora for that work are cloned under the gitignored `prior-art/` directory.
+
 ## Bytecode VM Architecture
 
 Monty is implemented as a bytecode VM, same as CPython.

@@ -19,6 +19,7 @@ members = [
     "crates/monty-type-checking",
     "crates/monty-typeshed",
     "crates/monty-macros",
+    "crates/monty-regexp",
     "crates/fuzz"
 ]
 default-members = ["crates/monty-runtime"]

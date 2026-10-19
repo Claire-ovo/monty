@@ -1,0 +1,216 @@
+//! Checksum-pinned Unicode 17 primitives used by the JavaScript lexer, the
+//! regular-expression compiler and the String intrinsics.
+//!
+//! QuickJS stores binary Unicode properties as alternating run lengths with a
+//! sparse 32-byte-block index. Keeping that representation avoids silently
+//! inheriting the Rust toolchain or host ICU Unicode version while preserving
+//! the pinned engine's exact table boundaries.
+
+mod ident_tables {
+    include!("generated/unicode/unicode_ident_tables.rs");
+}
+
+/// QuickJS reserves 30 bits for a string's UTF-16 code-unit length; case
+/// conversion and normalization never produce a longer result.
+pub const MAX_STRING_LEN: usize = (1 << 30) - 1;
+
+/// Why case conversion or normalization produced no string.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StringError {
+    /// The result would exceed the caller's length limit.
+    TooLong,
+    /// A buffer reservation failed.
+    OutOfMemory,
+}
+
+/// A produced string in its narrowest storage, as QuickJS's `StringBuffer`
+/// leaves it: Latin-1 bytes until a wider code unit arrives, then UTF-16.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CodeUnitBuf {
+    Latin1(Vec<u8>),
+    Utf16(Vec<u16>),
+}
+
+impl CodeUnitBuf {
+    /// The UTF-16 code units, widening Latin-1 storage.
+    #[must_use]
+    pub fn to_utf16(&self) -> Vec<u16> {
+        match self {
+            Self::Latin1(units) => units.iter().copied().map(u16::from).collect(),
+            Self::Utf16(units) => units.clone(),
+        }
+    }
+}
+
+/// String input as UTF-16 code units: `[u16]`, or `[u8]` holding Latin-1
+/// code units (each byte is one code unit below U+0100).
+pub trait CodeUnits {
+    /// The number of UTF-16 code units.
+    fn unit_len(&self) -> usize;
+    /// The code unit at `index`, or `None` past the end.
+    fn unit_at(&self, index: usize) -> Option<u16>;
+    /// Whether every code unit is below U+0100.
+    fn all_latin1(&self) -> bool;
+}
+
+impl CodeUnits for [u16] {
+    #[inline]
+    fn unit_len(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    fn unit_at(&self, index: usize) -> Option<u16> {
+        self.get(index).copied()
+    }
+
+    fn all_latin1(&self) -> bool {
+        self.iter().all(|unit| *unit < 0x100)
+    }
+}
+
+impl CodeUnits for [u8] {
+    #[inline]
+    fn unit_len(&self) -> usize {
+        self.len()
+    }
+
+    #[inline]
+    fn unit_at(&self, index: usize) -> Option<u16> {
+        self.get(index).copied().map(u16::from)
+    }
+
+    fn all_latin1(&self) -> bool {
+        true
+    }
+}
+
+const INDEX_BLOCK_LEN: usize = 32;
+const CODE_MASK: u32 = (1 << 21) - 1;
+
+#[must_use]
+pub fn is_id_start(code_point: u32) -> bool {
+    is_in_table(code_point, &ident_tables::ID_START_TABLE, &ident_tables::ID_START_INDEX)
+}
+
+#[must_use]
+pub fn is_id_continue(code_point: u32) -> bool {
+    is_id_start(code_point)
+        || is_in_table(
+            code_point,
+            &ident_tables::ID_CONTINUE_TABLE,
+            &ident_tables::ID_CONTINUE_INDEX,
+        )
+}
+
+fn is_in_table(code_point: u32, table: &[u8], index: &[u8]) -> bool {
+    let Some((mut code, mut position)) = index_position(code_point, index) else {
+        return false;
+    };
+    let mut included = false;
+    loop {
+        let byte = table[position];
+        position += 1;
+        if byte < 0x40 {
+            code += u32::from(byte >> 3) + 1;
+            if code_point < code {
+                return included;
+            }
+            included = !included;
+            code += u32::from(byte & 7) + 1;
+        } else if byte >= 0x80 {
+            code += u32::from(byte - 0x80) + 1;
+        } else if byte < 0x60 {
+            code += (u32::from(byte - 0x40) << 8) | u32::from(table[position]);
+            code += 1;
+            position += 1;
+        } else {
+            code += (u32::from(byte - 0x60) << 16) | (u32::from(table[position]) << 8) | u32::from(table[position + 1]);
+            code += 1;
+            position += 2;
+        }
+        if code_point < code {
+            return included;
+        }
+        included = !included;
+    }
+}
+
+fn index_position(code_point: u32, index: &[u8]) -> Option<(u32, usize)> {
+    debug_assert!(!index.is_empty() && index.len().is_multiple_of(3));
+    let entry_count = index.len() / 3;
+    let first = read_u24(index, 0);
+    let first_code = first & CODE_MASK;
+    if code_point < first_code {
+        return Some((0, 0));
+    }
+
+    let last = read_u24(index, entry_count - 1);
+    if code_point >= last & CODE_MASK {
+        return None;
+    }
+
+    let mut lower = 0;
+    let mut upper = entry_count - 1;
+    while upper - lower > 1 {
+        let middle = upper.midpoint(lower);
+        if code_point < read_u24(index, middle) & CODE_MASK {
+            upper = middle;
+        } else {
+            lower = middle;
+        }
+    }
+    let entry = read_u24(index, lower);
+    let code = entry & CODE_MASK;
+    let position = (lower + 1) * INDEX_BLOCK_LEN + (entry >> 21) as usize;
+    Some((code, position))
+}
+
+fn read_u24(index: &[u8], entry: usize) -> u32 {
+    let offset = entry * 3;
+    u32::from(index[offset]) | (u32::from(index[offset + 1]) << 8) | (u32::from(index[offset + 2]) << 16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_id_continue, is_id_start};
+
+    /// FNV-1a step over one little-endian `u32`, shared by the table
+    /// fingerprint tests that compare against pinned QuickJS C output.
+    pub(super) fn hash_u32(mut hash: u64, value: u32) -> u64 {
+        for byte in value.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+        hash
+    }
+
+    #[test]
+    fn unicode_17_identifier_tables_have_pinned_counts_and_boundaries() {
+        let mut start_count = 0;
+        let mut continue_count = 0;
+        for code_point in 0..=0x10_ffff {
+            let start = is_id_start(code_point);
+            let continuation = is_id_continue(code_point);
+            assert!(!start || continuation, "U+{code_point:04X}");
+            start_count += usize::from(start);
+            continue_count += usize::from(continuation);
+        }
+        assert_eq!(start_count, 145_916);
+        assert_eq!(continue_count, 149_240);
+
+        for code_point in [0x03c0, 0x10400, 0x33479] {
+            assert!(is_id_start(code_point), "U+{code_point:04X}");
+        }
+        for code_point in [0x0024, 0x0030, 0x0300, 0x1f600, 0x3347a] {
+            assert!(!is_id_start(code_point), "U+{code_point:04X}");
+        }
+        for code_point in [0x0030, 0x005f, 0x0300, 0x200c, 0x200d] {
+            assert!(is_id_continue(code_point), "U+{code_point:04X}");
+        }
+    }
+}
+
+pub mod case;
+pub mod normalize;
+pub mod property;

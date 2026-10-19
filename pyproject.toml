@@ -314,6 +314,8 @@ skip = [
 
     "crates/monty-typeshed/vendor/typeshed/stdlib/*",
     "crates/monty/src/types/str.rs",
+    # generated Unicode tables: four-letter ISO 15924 script codes read as typos
+    "crates/monty-regexp/src/unicode/generated/*",
 ]
 
 [tool.inline-snapshot]

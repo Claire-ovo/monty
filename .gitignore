@@ -38,3 +38,6 @@
 
 # env for performance tests
 .env
+
+# Reference engines and corpora cloned for the JavaScript sandbox design (see the plan in .claude/plans)
+/prior-art/
