@@ -1212,6 +1212,10 @@ jobs:
       - name: Differential JavaScript cases
         run: cargo run -p monty-js-datatest
 
+      # the same cases with the heap's leak detector: a feed must leave no unreachable entry
+      - name: Differential JavaScript cases with leak detection
+        run: cargo run -p monty-js-datatest --features ref-count-return
+
       # debug napi build + TypeScript; tests and the smoke test load it
       - name: Build
         run: npm run build:debug

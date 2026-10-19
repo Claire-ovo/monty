@@ -50,8 +50,9 @@ impl Vm<'_> {
     }
 }
 
-/// The deepest value the exporter follows.
-const MAX_EXPORT_DEPTH: usize = 1000;
+/// The deepest value the exporter follows and the importer builds: both
+/// recurse per level, so the bound keeps a pathological value off the stack.
+const MAX_DEPTH: usize = 1000;
 
 /// Builds the outgoing graph.
 struct Exporter {
@@ -83,7 +84,7 @@ impl Exporter {
             return Ok(*node);
         }
         // the export recurses per nesting level on the Rust stack
-        if self.path.len() >= MAX_EXPORT_DEPTH {
+        if self.path.len() >= MAX_DEPTH {
             return Err(vm.range_error("value is nested too deeply to send to the host"));
         }
         if self.path.contains(&id) {
@@ -230,6 +231,8 @@ pub(crate) struct Importer<'g> {
     graph: &'g MontyGraph,
     /// Containers already built, so a shared node imports once.
     seen: AHashMap<NodeId, HeapId>,
+    /// Containers currently being built, bounded by [`MAX_DEPTH`].
+    depth: usize,
 }
 
 impl<'g> Importer<'g> {
@@ -237,14 +240,28 @@ impl<'g> Importer<'g> {
         Self {
             graph,
             seen: AHashMap::new(),
+            depth: 0,
         }
     }
 
+    /// Builds the value for one node, sharing containers already built.
     pub(crate) fn value(&mut self, vm: &mut Vm<'_>, id: NodeId) -> RunResult<JsValue> {
         if let Some(existing) = self.seen.get(&id) {
             vm.session.heap.inc_ref(*existing);
             return Ok(JsValue::Ref(*existing));
         }
+        if self.depth >= MAX_DEPTH {
+            return Err(vm.range_error("value from the host is nested too deeply"));
+        }
+        // an error abandons the importer, so the depth need not unwind on `?`
+        self.depth += 1;
+        let value = self.node(vm, id);
+        self.depth -= 1;
+        value
+    }
+
+    /// Builds an unshared node; containers recurse through [`Self::value`].
+    fn node(&mut self, vm: &mut Vm<'_>, id: NodeId) -> RunResult<JsValue> {
         Ok(match self.graph.node(id) {
             MontyNode::None | MontyNode::Ellipsis | MontyNode::NotImplemented => JsValue::Null,
             MontyNode::Bool(b) => JsValue::Bool(*b),

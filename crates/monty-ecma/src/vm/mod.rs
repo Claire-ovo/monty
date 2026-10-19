@@ -475,7 +475,10 @@ impl<'p> Vm<'p> {
             this.drop_with(&mut self.session.heap);
             return Err(self.internal_error("super() outside a constructor"));
         };
-        if self.derived_this() != JsValue::Hole {
+        let existing = self.derived_this();
+        let already_called = existing != JsValue::Hole;
+        existing.drop_with(&mut self.session.heap);
+        if already_called {
             this.drop_with(&mut self.session.heap);
             return Err(self.throw_error(ErrorKind::ReferenceError, "Super constructor may only be called once"));
         }

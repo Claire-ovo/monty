@@ -243,7 +243,10 @@ Monty runs JavaScript as a second language behind the same wire protocol and poo
     `monty-ecma` and through `node --input-type=module` (so both sides are strict modules), and stdout plus the
     uncaught `Name: message` must match. Cases follow the Python conventions (one consolidated file per feature,
     `// === Section ===` comments, `console.log` of the values under test, errors caught and their
-    `constructor.name` and `message` printed; a `// /// monty` header configures a case). Run with `make test-js-cases`.
+    `constructor.name` and `message` printed; a `// /// monty` header configures a case). Run with `make test-js-cases`;
+    `make test-ref-count-return` runs them again with `monty-ecma`'s `ref-count-return` feature, failing any case whose
+    feed leaves a heap entry unreachable from the realm and script scope (`JsRepl::leaked_entries`), so a missed
+    `drop_with` in the engine fails CI.
     V8's error messages are the oracle, so an engine message that differs is a bug to fix, not to document; every
     remaining divergence from Node goes in `limitations/javascript.md`.
 - `crates/monty-regexp` — a vendored copy of quickjs-oxide's `oxide-regexp` (MIT; a safe-Rust port of QuickJS's

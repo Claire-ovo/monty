@@ -7,6 +7,7 @@ use std::{fs, process::ExitCode, time::Duration};
 use monty_ecma::{JsProgress, JsRepl, JsSuspensionKind};
 use monty_types::{
     ExcType, ExtFunctionResult, Language, MontyException, NameLookupResult, NamedValues, PrintWriter, ResourceLimits,
+    memory_limit_with_headroom,
 };
 
 use crate::Cli;
@@ -44,6 +45,9 @@ pub(crate) fn run(cli: &Cli) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // `max_memory` is only a soft limit until the allocator's hard ceiling is armed
+    let hard_memory_limit = memory_limit_with_headroom(limits.max_memory, false);
+    monty_alloc::set_hard_limit(hard_memory_limit).expect("monty-js-runtime must install LimitedAllocator globally");
     let repl = match JsRepl::new(&name, limits) {
         Ok(repl) => repl,
         Err(err) => {

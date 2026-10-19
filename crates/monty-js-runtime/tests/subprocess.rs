@@ -245,6 +245,41 @@ fn type_checking_is_refused_on_configure() {
 }
 
 #[test]
+fn deeply_nested_input_is_a_range_error() {
+    let mut child = ChildProc::spawn();
+    child.create_repl();
+    let nested = (0..20_000).fold(MontyObject::int(1), |inner, _| MontyObject::list([inner]));
+    let mut inputs = NamedValues::new();
+    inputs.push("deep", nested);
+    let (_, event) = child.feed_with("deep", inputs);
+    let exception = expect_error(event);
+    assert_eq!(exception.exc_type, "RangeError");
+    assert_eq!(
+        exception.message.as_deref(),
+        Some("value from the host is nested too deeply")
+    );
+    // the session survives the refused input
+    assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2));
+}
+
+#[test]
+fn memory_limit_too_small_for_the_realm_is_an_error_not_a_crash() {
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(pb::Configure {
+        limits: Some(pb::ResourceLimits {
+            max_memory_bytes: Some(1),
+            ..Default::default()
+        }),
+        ..configure()
+    });
+    let (_, event) = child.feed("1");
+    assert_eq!(expect_error(event).exc_type, "MemoryError");
+    // the configuration was dropped, so the host can configure a workable session
+    child.create_repl();
+    assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2));
+}
+
+#[test]
 fn recursion_limit_is_a_catchable_range_error() {
     let mut child = ChildProc::spawn();
     child.create_repl();

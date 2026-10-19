@@ -34,6 +34,8 @@ struct Outcome {
     stdout: String,
     /// `Name: message` of an uncaught error, or `None` when the script completed.
     error: Option<String>,
+    /// Heap entries the feed left unreachable (only with `ref-count-return`).
+    leaks: Vec<String>,
 }
 
 /// A difference between the two runs, rendered as a line diff.
@@ -85,6 +87,14 @@ fn run_case(path: &Path) -> Result<(), Box<dyn Error>> {
             monty: monty.error.unwrap_or_else(|| "<completed>".to_owned()),
         }));
     }
+    if !monty.leaks.is_empty() {
+        return Err(format!(
+            "the feed leaked {} heap entries: {}",
+            monty.leaks.len(),
+            monty.leaks.join(", ")
+        )
+        .into());
+    }
     Ok(())
 }
 
@@ -95,10 +105,10 @@ fn run_monty(path: &Path, code: &str) -> Outcome {
     let mut streams = CollectedStreams::default();
     let mut progress = repl.feed(code, &NamedValues::new(), PrintWriter::collect_streams(&mut streams));
     // there is no host: an unknown name is unknown, as it is in Node
-    let error = loop {
+    let (error, mut repl) = loop {
         progress = match progress {
-            JsProgress::Complete { .. } => break None,
-            JsProgress::Failed { error, .. } => break Some(error.summary()),
+            JsProgress::Complete { repl, .. } => break (None, repl),
+            JsProgress::Failed { error, repl } => break (Some(error.summary()), repl),
             JsProgress::Suspended(mut suspension) => match suspension.kind() {
                 JsSuspensionKind::FunctionCall { function_name, .. } => {
                     let name = function_name.to_owned();
@@ -127,7 +137,22 @@ fn run_monty(path: &Path, code: &str) -> Outcome {
         .filter(|(stream, _)| *stream == PrintStream::Stdout)
         .map(|(_, text)| text)
         .collect();
-    Outcome { stdout, error }
+    Outcome {
+        stdout,
+        error,
+        leaks: leaked_entries(&mut repl),
+    }
+}
+
+/// Heap entries the feed left unreachable, when the leak detector is compiled in.
+#[cfg(feature = "ref-count-return")]
+fn leaked_entries(repl: &mut JsRepl) -> Vec<String> {
+    repl.leaked_entries()
+}
+
+#[cfg(not(feature = "ref-count-return"))]
+fn leaked_entries(_: &mut JsRepl) -> Vec<String> {
+    Vec::new()
 }
 
 /// Runs the case under `node` as an ES module (strict mode and a module
@@ -175,7 +200,11 @@ fn run_node(code: &str) -> Result<Outcome, Box<dyn Error>> {
     } else {
         Some(node_error_summary(&stderr))
     };
-    Ok(Outcome { stdout, error })
+    Ok(Outcome {
+        stdout,
+        error,
+        leaks: Vec::new(),
+    })
 }
 
 /// The `Name: message` line of Node's uncaught-error report: the first line

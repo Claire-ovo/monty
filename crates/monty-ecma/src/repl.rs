@@ -10,6 +10,8 @@ use monty_types::{
 use oxc_allocator::Allocator;
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "ref-count-return")]
+use crate::heap::{HeapReader, JsHeapData};
 use crate::{
     builtins,
     compile::compile,
@@ -211,6 +213,31 @@ impl fmt::Display for JsStartError {
 impl Error for JsStartError {}
 
 impl JsRepl {
+    /// Heap entries no root reaches, as `kind (id n)`: references the engine
+    /// dropped without releasing. Garbage cycles are collected first; the roots
+    /// are the realm's intrinsics and the script scope's bindings (everything
+    /// else hangs off `globalThis`), so an idle session has none. The
+    /// differential harness asserts that per case.
+    #[cfg(feature = "ref-count-return")]
+    pub fn leaked_entries(&mut self) -> Vec<String> {
+        let session = &mut self.session;
+        session.heap.collect_cycles();
+        let bindings = session.script.values.iter().filter_map(JsValue::heap_id);
+        let roots: Vec<HeapId> = session.realm.ids().chain(bindings).collect();
+        let unreachable = HeapReader::with(&mut session.heap, &mut (), |heap, ()| heap.unreachable_entries(roots));
+        unreachable
+            .into_iter()
+            .map(|id| {
+                let kind = match session.heap.get(id) {
+                    JsHeapData::String(_) => "string",
+                    JsHeapData::Object(_) => "object",
+                    JsHeapData::Cell(_) => "cell",
+                };
+                format!("{kind} (id {})", id.index())
+            })
+            .collect()
+    }
+
     /// Creates a session with its intrinsics; `script_name` labels tracebacks.
     pub fn new(script_name: &str, limits: ResourceLimits) -> Result<Self, JsStartError> {
         let tracker = ResourceTracker::new(limits);

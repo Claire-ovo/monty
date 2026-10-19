@@ -46,12 +46,20 @@ impl Engine for JsEngine {
         false
     }
 
-    fn create_repl(&mut self, script_name: &str, limits: ResourceLimits, os_policy: OsPolicy) -> JsRepl {
-        // the intrinsics cannot exceed a sane limit; a failure here means the
-        // host configured one too small to run anything
+    fn create_repl(
+        &mut self,
+        script_name: &str,
+        limits: ResourceLimits,
+        os_policy: OsPolicy,
+    ) -> Result<JsRepl, Box<pb::ChildEvent>> {
+        // the intrinsics need a few hundred heap entries, so only a memory limit
+        // too small to run anything fails here; the host learns why
         JsRepl::new(script_name, limits)
-            .unwrap_or_else(|err| panic!("cannot create the JavaScript session: {err}"))
-            .with_os_policy(os_policy)
+            .map(|repl| repl.with_os_policy(os_policy))
+            .map_err(|err| {
+                let exc = MontyException::new(ExcType::MemoryError, Some(err.to_string()));
+                Box::new(error_event_from(&exc))
+            })
     }
 
     fn check_source(repl: &JsRepl, code: &str) -> Result<(), MontyException> {

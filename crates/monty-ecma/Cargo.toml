@@ -42,6 +42,8 @@ insta = { workspace = true }
 default = []
 # Collect on every GC-tracked allocation, to shake out missed releases.
 memory-model-checks = ["monty-heap/memory-model-checks"]
+# Per-entry reference counts and the leak detector (`JsRepl::leaked_entries`).
+ref-count-return = ["monty-heap/ref-count-return"]
 
 [lints]
 workspace = true

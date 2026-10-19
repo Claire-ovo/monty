@@ -40,6 +40,12 @@ fn deeply_nested_source_is_a_syntax_error() {
     assert_eq!(outcome(&format!("{}1", "!".repeat(n))), too_deep);
     assert_eq!(outcome(&format!("{}1", "1 + ".repeat(n))), too_deep);
     assert_eq!(outcome(&format!("{}2", "a ? 1 : ".repeat(n))), too_deep);
+    let labels = (0..n).fold(String::new(), |mut out, i| {
+        let _ = write!(out, "l{i}: ");
+        out
+    });
+    assert_eq!(outcome(&format!("{labels}0;")), too_deep);
+    assert_eq!(outcome(&format!("{labels}while (false) {{}}")), too_deep);
     assert_eq!(
         outcome(&format!("let x = 0; {}{{}}", "if (x) {} else if (x) ".repeat(n))),
         too_deep
@@ -83,6 +89,21 @@ fn ordinary_breadth_is_not_nesting() {
         None
     );
     assert_eq!(outcome(&format!("'{}'.length", "(".repeat(5000))), None);
+    let keys = (0..1000).fold(String::new(), |mut out, i| {
+        let _ = write!(out, "k{i}: {i}, ");
+        out
+    });
+    assert_eq!(outcome(&format!("Object.keys({{{keys}}}).length")), None);
+    let cases = (0..1000).fold(String::new(), |mut out, i| {
+        let _ = write!(out, "case {i}: ");
+        out
+    });
+    assert_eq!(
+        outcome(&format!(
+            "let hit = 0; switch (999) {{ {cases} hit = 1; break; default: hit = 2; }}\nhit"
+        )),
+        None
+    );
 }
 
 #[test]

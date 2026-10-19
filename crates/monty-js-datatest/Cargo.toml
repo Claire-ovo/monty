@@ -15,5 +15,9 @@ monty-types = { workspace = true }
 datatest-stable = "0.2"
 similar = "2.7.0"
 
+[features]
+# Fail a case whose feed leaves heap entries no root reaches (a missed release).
+ref-count-return = ["monty-ecma/ref-count-return"]
+
 [lints]
 workspace = true

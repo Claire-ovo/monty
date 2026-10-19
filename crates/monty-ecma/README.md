@@ -37,5 +37,11 @@ dicts, `Set`s to sets, `Date`s to aware datetimes, and an uncaught error to the 
   `Symbol`, the `Error` family, `Promise` and timers, `Date`, generators and `console`.
 - `object_bridge.rs` — `MontyObject` import and export; `dump.rs` — session snapshots.
 
+## Features
+
+- `memory-model-checks`: collect on every GC-tracked allocation, to shake out missed releases.
+- `ref-count-return`: per-entry reference counts and `JsRepl::leaked_entries`, the heap entries no root reaches after a
+  feed; the differential harness asserts there are none for every case.
+
 The engine is the second user of `monty-heap` and depends on `monty-types`, never on the Python interpreter.
 `docs/limitations/javascript.md` in the repository records every divergence from Node.

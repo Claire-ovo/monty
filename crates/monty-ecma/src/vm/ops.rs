@@ -388,10 +388,15 @@ impl Vm<'_> {
         if !self.is_callable_id(*constructor) {
             return Err(self.type_error("Right-hand side of 'instanceof' is not callable"));
         }
-        let target = match self.object(*constructor).map(|o| &o.class) {
-            Some(ObjectClass::Function(FunctionObject::Bound { target, .. })) => JsValue::Ref(*target),
-            _ => rhs.clone_with_heap(&self.session.heap),
-        };
+        // a bound function tests against its target (through any chain of bindings)
+        let mut target_id = *constructor;
+        while let Some(ObjectClass::Function(FunctionObject::Bound { target, .. })) =
+            self.object(target_id).map(|o| &o.class)
+        {
+            target_id = *target;
+        }
+        self.session.heap.inc_ref(target_id);
+        let target = JsValue::Ref(target_id);
         let prototype = self.get(&target, PropertyKey::Atom(StaticAtom::Prototype.id()));
         target.drop_with(&mut self.session.heap);
         let prototype = prototype?;

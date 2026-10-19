@@ -74,6 +74,8 @@ struct Scanner<'s> {
     newline: bool,
     /// An `else` is waiting to see whether `if` or `{` follows.
     after_else: bool,
+    /// A `case` test is open, so the next `:` ends it rather than labelling a statement.
+    in_case: bool,
 }
 
 impl<'s> Scanner<'s> {
@@ -92,6 +94,7 @@ impl<'s> Scanner<'s> {
             prev_block_end: false,
             newline: false,
             after_else: false,
+            in_case: false,
         }
     }
 
@@ -242,8 +245,9 @@ impl<'s> Scanner<'s> {
                         }
                     }
                     b"else" => self.after_else = true,
-                    b"return" | b"throw" | b"case" | b"default" | b"break" | b"continue" | b"var" | b"let"
-                    | b"const" | b"export" | b"import" | b"extends" => {}
+                    b"case" => self.in_case = true,
+                    b"return" | b"throw" | b"default" | b"break" | b"continue" | b"var" | b"let" | b"const"
+                    | b"export" | b"import" | b"extends" => {}
                     _ => ends_operand = true,
                 }
             }
@@ -273,7 +277,16 @@ impl<'s> Scanner<'s> {
                     self.pos += 1;
                 }
             }
-            b':' | b'#' | b'@' | b'\\' => self.pos += 1,
+            b':' => {
+                // a label (`l: statement`) nests the statement in the parser and the compiler;
+                // the `:` ending a `case` test does not, and charging a ternary's or an
+                // object key's only overcounts until the `,` or `;` releases it
+                if !mem::take(&mut self.in_case) && self.prev_operand {
+                    self.charge(1)?;
+                }
+                self.pos += 1;
+            }
+            b'#' | b'@' | b'\\' => self.pos += 1,
             _ => {
                 // a non-ASCII byte: part of an identifier or a string the lexer already skipped
                 self.pos += 1;

@@ -278,9 +278,18 @@ pub(super) fn splice(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool)
         .map(|a| a.clone_with_heap(&vm.session.heap))
         .collect();
     vm.tracker().check_allocation(inserted.len() * 16)?;
+    // coercing the arguments may have run code that resized the array
+    let (start, delete_count) = clamp_range(len(vm, array), start, delete_count);
     let object = vm.object_mut(array).expect("array");
     let removed: Vec<JsValue> = object.elements.splice(start..start + delete_count, inserted).collect();
     vm.new_array(removed)
+}
+
+/// Clamps `start..start + count` to an array that may have shrunk since
+/// `length` was read: coercing an index argument can run arbitrary code.
+fn clamp_range(length: usize, start: usize, count: usize) -> (usize, usize) {
+    let start = start.min(length);
+    (start, count.min(length - start))
 }
 
 /// The search for `indexOf` / `lastIndexOf` / `includes`.
@@ -815,8 +824,14 @@ pub(super) fn fill(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -
     for index in start..end.max(start) {
         let value = arg(args, 0).clone_with_heap(&vm.session.heap);
         let object = vm.object_mut(array).expect("array");
-        let old = mem::replace(&mut object.elements[index], value);
-        old.drop_with(&mut vm.session.heap);
+        if index < object.elements.len() {
+            let old = mem::replace(&mut object.elements[index], value);
+            old.drop_with(&mut vm.session.heap);
+        } else {
+            // the coercions may have run code that shrank the array; like `Set`, grow it back
+            object.elements.resize_with(index, || JsValue::Hole);
+            object.elements.push(value);
+        }
     }
     Ok(this.clone_with_heap(&vm.session.heap))
 }
@@ -828,7 +843,9 @@ pub(super) fn copy_within(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: 
     let target = relative_index(integer_arg(vm, args, 0, 0.0)?, length);
     let start = relative_index(integer_arg(vm, args, 1, 0.0)?, length);
     let end = relative_index(integer_arg(vm, args, 2, length as f64)?, length);
-    let count = end.saturating_sub(start).min(length - target);
+    let length = len(vm, array);
+    let (target, _) = clamp_range(length, target, 0);
+    let (start, count) = clamp_range(length, start, end.saturating_sub(start).min(length - target));
     let moved: Vec<JsValue> = (start..start + count).map(|i| raw_element(vm, array, i)).collect();
     for (offset, value) in moved.into_iter().enumerate() {
         let object = vm.object_mut(array).expect("array");
@@ -838,10 +855,11 @@ pub(super) fn copy_within(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: 
     Ok(this.clone_with_heap(&vm.session.heap))
 }
 
-/// The elements as a fresh vector with holes read as `undefined`, for the
-/// copying methods (`toSorted`, `toReversed`, `toSpliced`, `with`).
-fn copied_elements(vm: &mut Vm<'_>, array: HeapId) -> RunResult<Vec<JsValue>> {
-    let length = len(vm, array);
+/// The first `length` elements as a fresh vector with holes and missing
+/// elements read as `undefined`, for the copying methods (`toSorted`,
+/// `toReversed`, `toSpliced`, `with`): `length` is the one read before the
+/// arguments were coerced, which may have resized the array.
+fn copied_elements(vm: &mut Vm<'_>, array: HeapId, length: usize) -> RunResult<Vec<JsValue>> {
     vm.tracker().check_allocation(length * 16)?;
     Ok((0..length).map(|i| element(vm, array, i)).collect())
 }
@@ -850,7 +868,8 @@ pub(super) fn to_sorted(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bo
     let array = this_array(vm, this, "toSorted")?;
     let comparator = arg(args, 0);
     require_comparator(vm, comparator)?;
-    let items = copied_elements(vm, array)?;
+    let length = len(vm, array);
+    let items = copied_elements(vm, array, length)?;
     let copy = vm.new_array(items)?;
     let sorted = sort(vm, &copy, args, false);
     match sorted {
@@ -867,7 +886,8 @@ pub(super) fn to_sorted(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bo
 
 pub(super) fn to_reversed(vm: &mut Vm<'_>, this: &JsValue, _: &[JsValue], _: bool) -> RunResult<JsValue> {
     let array = this_array(vm, this, "toReversed")?;
-    let mut items = copied_elements(vm, array)?;
+    let length = len(vm, array);
+    let mut items = copied_elements(vm, array, length)?;
     items.reverse();
     vm.new_array(items)
 }
@@ -881,7 +901,7 @@ pub(super) fn to_spliced(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: b
         1 => length - start,
         _ => to_usize(integer_arg(vm, args, 1, 0.0)?).min(length - start),
     };
-    let mut items = copied_elements(vm, array)?;
+    let mut items = copied_elements(vm, array, length)?;
     let inserted: Vec<JsValue> = args
         .iter()
         .skip(2)
@@ -902,7 +922,7 @@ pub(super) fn with(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -
         let shown = number_to_string(relative);
         return Err(vm.range_error(&format!("Invalid index : {shown}")));
     }
-    let mut items = copied_elements(vm, array)?;
+    let mut items = copied_elements(vm, array, to_usize(length))?;
     let old = mem::replace(
         &mut items[to_usize(index)],
         arg(args, 1).clone_with_heap(&vm.session.heap),

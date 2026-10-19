@@ -217,6 +217,7 @@ impl Vm<'_> {
             let shown = len.min(MAX_ARRAY_LENGTH);
             let mut holes = 0usize;
             for index in 0..shown {
+                self.tracker().check_memory_time_every(index)?;
                 let element = self
                     .object(id)
                     .and_then(|o| o.elements.get(index))
@@ -251,7 +252,9 @@ impl Vm<'_> {
         }
         // named properties (enumerable only), then symbols
         let keys = self.own_keys(id, false);
-        for key in keys {
+        for (seen, key) in keys.into_iter().enumerate() {
+            // the output grows per key, outside the dispatch loop's checkpoint
+            self.tracker().check_memory_time_every(seen)?;
             if matches!(key, PropertyKey::Index(_)) && is_array {
                 continue;
             }
@@ -395,6 +398,7 @@ impl Vm<'_> {
         };
         let total = entries.len();
         for (shown, (key, value)) in entries.into_iter().enumerate() {
+            self.tracker().check_memory_time_every(shown)?;
             if shown >= MAX_ARRAY_LENGTH {
                 key.drop_with(&mut self.session.heap);
                 value.drop_with(&mut self.session.heap);

@@ -518,9 +518,10 @@ impl<E: Engine> Child<E> {
         } = *config;
         let limits = ResourceLimits::from(limits.unwrap_or_default());
         self.script_name = script_name;
+        // the config is already taken, so a failure leaves the worker reconfigurable
         let repl = self
             .engine
-            .create_repl(&self.script_name, limits, self.os_policy.clone());
+            .create_repl(&self.script_name, limits, self.os_policy.clone())?;
         self.state = SessionState::Ready(Box::new(repl));
         Ok(())
     }

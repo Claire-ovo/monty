@@ -173,6 +173,7 @@ test-memory-model-checks: ## Run rust tests with memory-model-checks enabled - T
 test-ref-count-return: ## Run rust tests with ref-count-return enabled
 	cargo test -p monty --features ref-count-return
 	cargo run -p monty-datatest --features ref-count-return
+	cargo run -p monty-js-datatest --features ref-count-return
 
 .PHONY: test-cases
 test-cases: ## Run tests cases only

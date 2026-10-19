@@ -25,7 +25,8 @@ The engine is at an early stage, so most entries are features that are not imple
 - Builtins that walk a structure recursively stop with `RangeError: Maximum call stack size exceeded` instead of
     overflowing: `JSON.stringify` and `JSON.parse` beyond 512 levels, and chains of builtins calling each other
     (`String` of arrays nested 200 deep, a `toString` that stringifies its own object); a value nested more than 1000
-    levels cannot be sent to the host (`RangeError: value is nested too deeply to send to the host`).
+    levels cannot be sent to the host (`RangeError: value is nested too deeply to send to the host`), and a host
+    value nested more than 1000 levels is refused the same way (`RangeError: value from the host is nested too deeply`).
     `Array.prototype.flat` walks any depth.
 - An uncaught throw ends the feed with the thrown error's nearest builtin class (`Error`, `TypeError`, `RangeError`,
     `ReferenceError`, `SyntaxError`, `EvalError`, `URIError`, `AggregateError`) and its `message`; a thrown non-error

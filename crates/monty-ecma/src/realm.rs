@@ -49,6 +49,46 @@ pub(crate) struct Realm {
 }
 
 impl Realm {
+    /// Every intrinsic the realm holds, as roots for the leak detector.
+    #[cfg(feature = "ref-count-return")]
+    pub fn ids(&self) -> impl Iterator<Item = HeapId> {
+        [
+            self.global,
+            self.array_values,
+            self.object_prototype,
+            self.function_prototype,
+            self.array_prototype,
+            self.string_prototype,
+            self.number_prototype,
+            self.boolean_prototype,
+            self.symbol_prototype,
+            self.iterator_prototype,
+            self.array_iterator_prototype,
+            self.error_prototype,
+            self.type_error_prototype,
+            self.range_error_prototype,
+            self.reference_error_prototype,
+            self.syntax_error_prototype,
+            self.eval_error_prototype,
+            self.uri_error_prototype,
+            self.aggregate_error_prototype,
+            self.map_prototype,
+            self.set_prototype,
+            self.weak_map_prototype,
+            self.weak_set_prototype,
+            self.map_iterator_prototype,
+            self.set_iterator_prototype,
+            self.regexp_prototype,
+            self.regexp_string_iterator_prototype,
+            self.generator_prototype,
+            self.generator_function_prototype,
+            self.promise_prototype,
+            self.async_function_prototype,
+            self.date_prototype,
+        ]
+        .into_iter()
+    }
+
     /// A realm whose every id is entry zero, for a session under construction:
     /// `builtins::create_realm` fills the fields before any of them is read.
     pub fn placeholder() -> Self {

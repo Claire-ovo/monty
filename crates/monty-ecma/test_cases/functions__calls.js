@@ -110,3 +110,26 @@ try {
 } catch (e) {
   console.log(e.constructor.name, e.message);
 }
+
+// === Bound functions: instanceof and repeated calls ===
+function Pt() {}
+const BoundPoint = Pt.bind(null);
+const ReboundPoint = BoundPoint.bind(null);
+const point = new Pt();
+let hits = 0;
+for (let i = 0; i < 50; i++) {
+  if (point instanceof BoundPoint && point instanceof ReboundPoint) hits++;
+}
+console.log(hits, Pt.name, new BoundPoint() instanceof Pt, [] instanceof BoundPoint);
+function Crate(v) {
+  this.v = v;
+}
+function addTo(a, b) {
+  return this.base + a + b;
+}
+let total = 0;
+for (let i = 0; i < 2000; i++) {
+  const addI = addTo.bind({ base: 1 }, i);
+  total += addI(1) + new (Crate.bind(null, i))().v;
+}
+console.log(total);

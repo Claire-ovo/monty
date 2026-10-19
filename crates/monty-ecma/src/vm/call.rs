@@ -86,7 +86,13 @@ impl Vm<'_> {
                 let text = self.callee_text();
                 Err(self.type_error(&format!("{text} is not a function")))
             }
-            Some(Callable::Bound { .. }) => {
+            Some(Callable::Bound {
+                this: bound_this,
+                args: bound_args,
+                ..
+            }) => {
+                // `call` re-reads the binding itself; release this probe's clones
+                self.drop_all(bound_this, bound_args);
                 let result = self.call(callee, this, args)?;
                 self.stack.push(result);
                 Ok(Step::Continue)
@@ -106,7 +112,13 @@ impl Vm<'_> {
                 let result = self.construct(callee, args);
                 self.native_step(result)
             }
-            Some(Callable::Bound { .. }) => {
+            Some(Callable::Bound {
+                this: bound_this,
+                args: bound_args,
+                ..
+            }) => {
+                // `construct` re-reads the binding itself; release this probe's clones
+                self.drop_all(bound_this, bound_args);
                 let result = self.construct(callee, args)?;
                 self.stack.push(result);
                 Ok(Step::Continue)
@@ -358,9 +370,16 @@ impl Vm<'_> {
         self.session.heap.inc_ref(parent);
         let this = self.construct_with(JsValue::Ref(parent), args, new_target)?;
         let result = this.clone_with_heap(&self.session.heap);
-        self.set_derived_this(this)?;
-        self.run_field_initializer(class, &result)?;
-        Ok(result)
+        let bound = self
+            .set_derived_this(this)
+            .and_then(|()| self.run_field_initializer(class, &result));
+        match bound {
+            Ok(()) => Ok(result),
+            Err(err) => {
+                result.drop_with(&mut self.session.heap);
+                Err(err)
+            }
+        }
     }
 
     /// `super.x`: the prototype of the running method's home object.
@@ -405,8 +424,7 @@ impl Vm<'_> {
                     JsValue::Null => None,
                     other => {
                         let shown = self.inspect_short(&other)?;
-                        other.drop_with(&mut self.session.heap);
-                        parent.drop_with(&mut self.session.heap);
+                        self.drop_all(other, vec![parent, constructor]);
                         return Err(self.type_error(&format!(
                             "Class extends value does not have valid prototype property {shown}"
                         )));
@@ -416,7 +434,7 @@ impl Vm<'_> {
             }
             other => {
                 let shown = self.inspect(other)?;
-                parent.drop_with(&mut self.session.heap);
+                self.drop_all(parent, vec![constructor]);
                 return Err(self.type_error(&format!("Class extends value {shown} is not a constructor or null")));
             }
         };

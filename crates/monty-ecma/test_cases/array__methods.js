@@ -81,3 +81,19 @@ for (const attempt of [() => [1, 2].with(2, 0), () => [1, 2].with(-3, 0), () => 
     console.log(err.constructor.name + ': ' + err.message);
   }
 }
+
+// === Index arguments that shrink the array ===
+const shrinking = (arr) => ({
+  valueOf() {
+    arr.length = 1;
+    return 0;
+  },
+});
+const filled = [1, 2, 3, 4, 5];
+console.log(filled.fill(0, shrinking(filled), 5));
+const gapped = [1, 2, 3, 4, 5];
+console.log(gapped.fill(0, 3, shrinking(gapped)), gapped.fill(7, shrinking(gapped), 5));
+const withed = [1, 2, 3, 4, 5];
+console.log(withed.with(shrinking(withed), 9));
+const toSpliced = [1, 2, 3, 4, 5];
+console.log(toSpliced.toSpliced(shrinking(toSpliced), 2, 'x'));

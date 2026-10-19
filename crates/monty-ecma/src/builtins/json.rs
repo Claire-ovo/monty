@@ -157,7 +157,10 @@ impl Serializer<'_> {
                     self.object(vm, &value, id, depth)
                 };
                 self.stack.pop();
-                result?;
+                if let Err(err) = result {
+                    value.drop_with(&mut vm.session.heap);
+                    return Err(err);
+                }
                 true
             }
             _ => false,

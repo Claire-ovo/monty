@@ -41,8 +41,15 @@ pub trait Engine: Default {
     /// Whether the session type checks fed snippets, for the host's budget report.
     fn type_checks(&self) -> bool;
 
-    /// Builds the idle session the first feed or dump materializes.
-    fn create_repl(&mut self, script_name: &str, limits: ResourceLimits, os_policy: OsPolicy) -> Self::Repl;
+    /// Builds the idle session the first feed or dump materializes. `Err` is the
+    /// turn-ending event (a limit too small for the realm); the child then forgets
+    /// the configuration so the host can send another.
+    fn create_repl(
+        &mut self,
+        script_name: &str,
+        limits: ResourceLimits,
+        os_policy: OsPolicy,
+    ) -> Result<Self::Repl, Box<pb::ChildEvent>>;
 
     /// Rejects a snippet before anything parses it (source nesting, size).
     fn check_source(repl: &Self::Repl, code: &str) -> Result<(), MontyException>;

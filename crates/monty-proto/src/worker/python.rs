@@ -88,7 +88,12 @@ impl Engine for PythonEngine {
         self.type_check.is_some()
     }
 
-    fn create_repl(&mut self, script_name: &str, limits: ResourceLimits, os_policy: OsPolicy) -> MontyRepl {
+    fn create_repl(
+        &mut self,
+        script_name: &str,
+        limits: ResourceLimits,
+        os_policy: OsPolicy,
+    ) -> Result<MontyRepl, Box<pb::ChildEvent>> {
         let config = self.config.take().unwrap_or_default();
         self.type_check = config.type_check.then(|| TypeCheckState {
             committed_stubs: config.type_check_stubs.unwrap_or_default(),
@@ -98,7 +103,7 @@ impl Engine for PythonEngine {
             pending_imports: String::new(),
             asked_modules: Vec::new(),
         });
-        MontyRepl::new(script_name, ResourceTracker::new(limits), config.options).with_os_policy(os_policy)
+        Ok(MontyRepl::new(script_name, ResourceTracker::new(limits), config.options).with_os_policy(os_policy))
     }
 
     fn check_source(repl: &MontyRepl, code: &str) -> Result<(), MontyException> {
