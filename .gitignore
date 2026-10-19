@@ -41,3 +41,6 @@
 
 # Reference engines and corpora cloned for the JavaScript sandbox design (see the plan in .claude/plans)
 /prior-art/
+
+# insta bookkeeping for inline snapshots, rewritten on every test run
+*.pending-snap
