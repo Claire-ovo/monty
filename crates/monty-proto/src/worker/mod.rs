@@ -34,6 +34,7 @@ mod engine;
 mod print;
 #[cfg(feature = "worker-python")]
 pub mod python;
+pub mod stdio;
 
 pub use engine::{Engine, Failed, Loaded, LoadedSession, Outcome, PreFeed, SessionRef, Step, Suspension};
 use print::ProtoPrint;
@@ -1027,8 +1028,12 @@ fn error_event(exc_type: ExcType, message: &str) -> pb::ChildEvent {
     }))
 }
 
-/// Preserves the exception's traceback in the error event.
-pub(crate) fn error_event_from(exc: &MontyException) -> pb::ChildEvent {
+/// Builds a turn-ending `Error` event from an exception, traceback included.
+///
+/// Public so an engine in another crate can answer `configure` or `load`
+/// with a sandbox-style error rather than a protocol violation.
+#[must_use]
+pub fn error_event_from(exc: &MontyException) -> pb::ChildEvent {
     event(pb::child_event::Kind::Error(pb::Error {
         exception: Some(exc.into()),
     }))
