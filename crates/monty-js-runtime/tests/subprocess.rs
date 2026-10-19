@@ -7,7 +7,7 @@ use monty_proto::{
     FrameReader, PROTOCOL_VERSION, WireFunctionCall, ext_result_to_proto, future_results_to_proto,
     named_values_to_proto, pb, write_frame,
 };
-use monty_types::{ExtFunctionResult, MontyObject, NameLookupResult, NamedValues};
+use monty_types::{DateTimeSource, ExtFunctionResult, MontyObject, NameLookupResult, NamedValues, OsPolicy};
 
 fn configure() -> pb::Configure {
     pb::Configure {
@@ -360,5 +360,58 @@ fn host_call_inside_a_builtin_callback_is_an_error() {
     assert_eq!(
         error.message.as_deref(),
         Some("Host function 'host' cannot be called from a callback run by a builtin")
+    );
+}
+
+// =============================================================================
+// OS policy
+// =============================================================================
+
+#[test]
+fn fixed_clock_drives_date() {
+    let mut child = ChildProc::spawn();
+    let os_policy = OsPolicy {
+        datetime: DateTimeSource::Fixed {
+            unix_seconds: 1_700_000_000,
+            microsecond: 250_000,
+        },
+        ..OsPolicy::default()
+    };
+    child.create_repl_with(pb::Configure {
+        os_policy: Some((&os_policy).into()),
+        ..configure()
+    });
+    assert_eq!(child.feed_complete("Date.now()"), MontyObject::int(1_700_000_000_250));
+    assert_eq!(
+        child.feed_complete("new Date().toISOString()"),
+        MontyObject::string("2023-11-14T22:13:20.250Z".to_owned())
+    );
+}
+
+#[test]
+fn host_clock_suspends_with_an_os_call() {
+    let mut child = ChildProc::spawn();
+    let os_policy = OsPolicy {
+        datetime: DateTimeSource::CallHost,
+        ..OsPolicy::default()
+    };
+    child.create_repl_with(pb::Configure {
+        os_policy: Some((&os_policy).into()),
+        ..configure()
+    });
+    let (_, event) = child.feed("Date.now() + 1");
+    let pb::child_event::Kind::OsCall(call) = event else {
+        panic!("expected OsCall, got {event:?}");
+    };
+    assert!(matches!(call.call, Some(pb::os_call::Call::Time(_))), "{call:?}");
+    let (_, event) = child.resume_call(call.call_id, ExtFunctionResult::Return(MontyObject::float(1.5)));
+    assert_eq!(expect_complete(event), MontyObject::int(1501));
+    // inside a builtin's callback the clock cannot suspend
+    let (_, event) = child.feed("[1].map(() => Date.now())");
+    let error = expect_error(event);
+    assert_eq!(error.exc_type, "TypeError");
+    assert_eq!(
+        error.message.as_deref(),
+        Some("The host clock cannot be read from a callback run by a builtin")
     );
 }
