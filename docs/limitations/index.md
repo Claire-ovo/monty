@@ -5,7 +5,7 @@ It implements enough Python for a model to express what it wants to do, and deli
 Everything it does implement is meant to behave exactly like CPython 3.14; everywhere it does not, the divergence is
 written down.
 
-This page gives you the shape of the subset.
+This page gives you the shape of the Python subset; the JavaScript sandbox has its own page, [javascript.md](javascript.md).
 The other pages in this section are the exhaustive record, one per builtin, module or construct.
 They list every known divergence, including the ones that feel obvious, so a behaviour missing from them can be
 assumed to match CPython 3.14.

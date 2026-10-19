@@ -84,6 +84,7 @@ nav:
       - Filesystem and sandbox boundary: 'limitations/filesystem.md'
       - Resource limits: 'limitations/resource_limits.md'
       - Host values: 'limitations/host-values.md'
+      - JavaScript sandbox: 'limitations/javascript.md'
   - API Docs:
       - Python:
           - Pools: 'api/python/pools.md'

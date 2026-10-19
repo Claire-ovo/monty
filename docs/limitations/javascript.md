@@ -92,17 +92,17 @@ Differences within the available builtins:
 The sandbox exchanges values with the host as the same graph the Python worker uses, so the mapping is lossy in
 both directions:
 
-| JavaScript                                | Host value (`MontyObject`)                                        |
-| ----------------------------------------- | ----------------------------------------------------------------- |
-| `undefined`, `null`                       | `None`                                                            |
-| integral number in the safe range, `-0`   | `int` (`-0` becomes `0`)                                          |
-| other numbers                             | `float`                                                           |
-| string                                    | `str` (a lone surrogate becomes U+FFFD)                           |
-| array, `arguments`                        | `list`                                                            |
+| JavaScript                                | Host value (`MontyObject`)                                         |
+| ----------------------------------------- | ------------------------------------------------------------------ |
+| `undefined`, `null`                       | `None`                                                             |
+| integral number in the safe range, `-0`   | `int` (`-0` becomes `0`)                                           |
+| other numbers                             | `float`                                                            |
+| string                                    | `str` (a lone surrogate becomes U+FFFD)                            |
+| array, `arguments`                        | `list`                                                             |
 | plain object                              | `dict` with `str` keys, own enumerable properties, insertion order |
-| `Error`                                   | exception of the nearest builtin class with its `message`         |
-| boxed primitive                           | the primitive                                                     |
-| function, symbol, iterator, anything else | `repr` string                                                     |
+| `Error`                                   | exception of the nearest builtin class with its `message`          |
+| boxed primitive                           | the primitive                                                      |
+| function, symbol, iterator, anything else | `repr` string                                                      |
 
 Inputs convert the other way: `list`, `tuple`, `set`, `frozenset` and named tuples become arrays, `dict` becomes a
 plain object (keys converted with `ToPropertyKey`), `bytes` becomes an array of numbers, `int`s beyond the double

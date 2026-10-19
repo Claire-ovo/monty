@@ -212,15 +212,43 @@ The contract for crash detection: a child that exits or EOFs *without* a
 Pool and protocol design belong in their crate READMEs; host-API contracts belong in the relevant
 `docs/` topic and binding reference. Value-conversion divergences belong in `limitations/host-values.md`.
 
-## `monty-regexp` — ECMAScript regular expressions
+## JavaScript sandbox (`monty-ecma`, `monty-js-runtime`, `monty-js-datatest`, `monty-regexp`)
 
-`crates/monty-regexp` is a vendored copy of quickjs-oxide's `oxide-regexp` (MIT; a safe-Rust port of QuickJS's
-`libregexp`/`libunicode`, `#![forbid(unsafe_code)]`, no dependencies): an ECMAScript `RegExp` compiler and
-backtracking executor over UTF-16 code units plus the Unicode 17 case, normalization and property tables. It exists for
-the JavaScript sandbox (see `.claude/plans/` for the design) and nothing links it yet. Its README records the upstream
-commit and how to sync; the generated tables under `src/unicode/generated/` stay byte-identical to upstream, so lint
-expectations for them sit on the `mod tables` declarations, never inside the generated files. Reference engines and
-corpora for that work are cloned under the gitignored `prior-art/` directory.
+Monty runs JavaScript as a second language behind the same wire protocol and pool, in its own worker binary:
+
+- `crates/monty-ecma` — the engine: oxc parses each feed as a strict ES module and `oxc_semantic` binds its scopes
+    (`parse.rs`); `resolve.rs` derives which bindings closures capture; `compile/` emits the engine's own bytecode
+    (`bytecode/op.rs`) with heap cells for captured bindings, fresh cells per `for (let …)` iteration and `finally`
+    blocks inlined on every exit path; `vm/` is the dispatch loop (`mod.rs`) plus the object model (`property.rs`),
+    conversions and operators (`ops.rs`), calls and closures (`call.rs`), number formatting (`number.rs`) and a port of
+    Node's `util.inspect` for `console.log` (`inspect.rs`); `builtins/` registers every native as a `NativeFn` variant
+    (a stable id, so function objects serialize without addresses) and builds the realm; `object_bridge.rs` maps values
+    to and from `MontyObject` graphs; `JsRepl` (`repl.rs`) is the session API. It instantiates `monty-heap` with
+    `JsHeapData` (`heap.rs`) and depends on `monty-types`, never on `monty`. Abstract-operation methods on `Vm` are
+    named `coerce_*` (`coerce_number`, `coerce_string`, `coerce_key`) because they take `&mut self` (they may call
+    back into JavaScript).
+- `crates/monty-js-runtime` — the `monty-js` binary: `engine.rs` implements `monty_proto::worker::Engine` over `JsRepl`,
+    `subprocess.rs` serves the protocol through the shared `monty_proto::worker::stdio` loop, `run.rs` is a
+    `node`-style standalone runner (`monty-js file.js`, `monty-js -e code`). Suspensions, dumps and type checking are
+    refused until the engine grows them (`TODO(ts-typecheck)`, `TODO(ts-syntax)`).
+- `crates/monty-js-datatest` — the differential harness: every `crates/monty-ecma/test_cases/*.js` runs through
+    `monty-ecma` and through `node --input-type=module` (so both sides are strict modules), and stdout plus the
+    uncaught `Name: message` must match. Cases follow the Python conventions (one consolidated file per feature,
+    `// === Section ===` comments, `console.log` of the values under test, errors caught and their
+    `constructor.name` and `message` printed; a `// /// monty` header configures a case). Run with `make test-js-cases`.
+    V8's error messages are the oracle, so an engine message that differs is a bug to fix, not to document; every
+    remaining divergence from Node goes in `limitations/javascript.md`.
+- `crates/monty-regexp` — a vendored copy of quickjs-oxide's `oxide-regexp` (MIT; a safe-Rust port of QuickJS's
+    `libregexp`/`libunicode`, `#![forbid(unsafe_code)]`, no dependencies): an ECMAScript `RegExp` compiler and
+    backtracking executor over UTF-16 code units plus the Unicode 17 case, normalization and property tables, for the
+    engine's `RegExp` (not wired up yet). Its README records the upstream commit and how to sync; the generated tables
+    under `src/unicode/generated/` stay byte-identical to upstream, so lint expectations for them sit on the
+    `mod tables` declarations, never inside the generated files.
+
+The design plan lives in `.claude/plans/`, and reference engines and corpora are cloned under the gitignored
+`prior-art/` directory. `monty_types::Language` names the runtimes (and later the per-feed language,
+`TODO(feed-language)`); `ExcType` carries the JavaScript error classes (`Error`, `ReferenceError`, `RangeError`,
+`EvalError`, `URIError`, `AggregateError`), which `ExcType::is_javascript` keeps out of Python's builtins.
 
 ## Bytecode VM Architecture
 
@@ -528,6 +556,7 @@ make test-no-features     Run rust tests without any features enabled
 make test-memory-model-checks Run rust tests with memory-model-checks enabled - THIS IS EXTREMELY SLOW, SHOULD MOSTLY BE RUN IN CI OR IF ABSOLUTELY NECESSARY
 make test-ref-count-return Run rust tests with ref-count-return enabled
 make test-cases           Run tests cases only
+make test-js-cases        Run the JavaScript test cases against monty-ecma and Node
 make test-type-checking   Run rust tests on monty-type-checking
 make pytest               Run Python tests with pytest
 make test-py              Build the python package (debug profile) and run tests
