@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::value::Constant;
+use crate::{intern::AtomId, value::Constant};
 
 /// Bytecode plus the tables the VM consults around it.
 #[derive(Debug, Serialize, Deserialize)]
@@ -21,6 +21,10 @@ pub(crate) struct Code {
     /// Protected ranges and their handlers, innermost first.
     #[serde(rename = "E")]
     pub handlers: Vec<ExceptionEntry>,
+    /// The source text of each call's callee (`o.f` in `o.f()`), for
+    /// `o.f is not a function`; sorted by offset.
+    #[serde(rename = "K")]
+    pub callees: Vec<CalleeEntry>,
     /// The deepest operand stack the body reaches, so a frame can reserve it.
     #[serde(rename = "M")]
     pub max_stack: u16,
@@ -36,6 +40,15 @@ impl Code {
             .map(|i| (self.locations[i].start, self.locations[i].end))
     }
 
+    /// The callee text of the call instruction at `offset`.
+    pub fn callee(&self, offset: usize) -> Option<AtomId> {
+        let offset = u32::try_from(offset).ok()?;
+        self.callees
+            .binary_search_by_key(&offset, |entry| entry.offset)
+            .ok()
+            .map(|index| self.callees[index].text)
+    }
+
     /// The innermost handler covering `offset`.
     pub fn handler_for(&self, offset: usize) -> Option<&ExceptionEntry> {
         let offset = u32::try_from(offset).ok()?;
@@ -43,6 +56,15 @@ impl Code {
             .iter()
             .find(|entry| entry.start <= offset && offset < entry.end)
     }
+}
+
+/// Names the callee of the call instruction at `offset`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) struct CalleeEntry {
+    #[serde(rename = "O")]
+    pub offset: u32,
+    #[serde(rename = "T")]
+    pub text: AtomId,
 }
 
 /// Maps a bytecode offset to the source range of the expression it executes.

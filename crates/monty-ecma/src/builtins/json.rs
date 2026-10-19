@@ -69,7 +69,8 @@ pub(crate) fn stringify_to_string(vm: &mut Vm<'_>, value: &JsValue) -> RunResult
 struct Serializer<'a> {
     indent: String,
     replacer: Option<&'a JsValue>,
-    stack: Vec<HeapId>,
+    /// The objects being serialized and the key each was reached through.
+    stack: Vec<(HeapId, String)>,
     out: String,
 }
 
@@ -77,6 +78,7 @@ impl Serializer<'_> {
     /// `SerializeJSONProperty`: writes `holder[key]`, returning whether anything was written.
     fn value(&mut self, vm: &mut Vm<'_>, holder: &JsValue, key: JsValue, depth: usize) -> RunResult<bool> {
         let property_key = vm.coerce_key(key.clone_with_heap(&vm.session.heap))?;
+        let key_name = vm.key_display(property_key);
         let mut value = vm.get(holder, property_key)?;
         if value.is_object() {
             let to_json_name = vm.session.interns.intern_str("toJSON");
@@ -137,11 +139,13 @@ impl Serializer<'_> {
             }
             JsValue::Ref(id) if !vm.is_callable_id(*id) => {
                 let id = *id;
-                if self.stack.contains(&id) {
+                let key_text = key_display(&key_name);
+                if let Some(start) = self.stack.iter().position(|(seen, _)| *seen == id) {
+                    let message = self.circular_message(vm, start, &key_text);
                     value.drop_with(&mut vm.session.heap);
-                    return Err(vm.type_error("Converting circular structure to JSON"));
+                    return Err(vm.type_error(&message));
                 }
-                self.stack.push(id);
+                self.stack.push((id, key_text));
                 let result = if vm.is_array(&value) {
                     self.array(vm, &value, id, depth)
                 } else {
@@ -156,6 +160,21 @@ impl Serializer<'_> {
         value.drop_with(&mut vm.session.heap);
         vm.tracker().check_growth(self.out.len(), self.out.capacity(), 1)?;
         Ok(written)
+    }
+
+    /// V8's description of the cycle: where it starts, the path down, and
+    /// the property that closes it.
+    fn circular_message(&self, vm: &mut Vm<'_>, start: usize, closing: &str) -> String {
+        let mut message = format!(
+            "Converting circular structure to JSON\n    --> starting at object with constructor '{}'",
+            constructor_name(vm, self.stack[start].0)
+        );
+        for (id, key) in &self.stack[start + 1..] {
+            let constructor = constructor_name(vm, *id);
+            let _ = write!(message, "\n    |     {key} -> object with constructor '{constructor}'");
+        }
+        let _ = write!(message, "\n    --- {closing} closes the circle");
+        message
     }
 
     fn newline(&mut self, depth: usize) {
@@ -227,6 +246,30 @@ impl Serializer<'_> {
     }
 }
 
+/// `property 'name'` or `index N`, as V8 names a step of a cycle.
+fn key_display(key: &str) -> String {
+    if key.bytes().all(|b| b.is_ascii_digit()) && !key.is_empty() {
+        format!("index {key}")
+    } else {
+        format!("property '{key}'")
+    }
+}
+
+/// The `constructor.name` of an object, `Object` when it has none.
+fn constructor_name(vm: &mut Vm<'_>, id: HeapId) -> String {
+    let value = JsValue::Ref(id);
+    let constructor = vm
+        .get_atom(&value, StaticAtom::Constructor.id())
+        .unwrap_or(JsValue::Undefined);
+    let name = vm
+        .get_atom(&constructor, StaticAtom::Name.id())
+        .unwrap_or(JsValue::Undefined);
+    constructor.drop_with(&mut vm.session.heap);
+    let text = vm.string_of(&name).map(|s| s.to_string_lossy());
+    name.drop_with(&mut vm.session.heap);
+    text.filter(|t| !t.is_empty()).unwrap_or_else(|| "Object".to_owned())
+}
+
 /// Writes a JSON string literal.
 fn quote_json(text: &str, out: &mut String) {
     out.push('"');
@@ -260,7 +303,7 @@ pub(super) fn parse(vm: &mut Vm<'_>, _: &JsValue, args: &[JsValue], _: bool) -> 
     parser.skip_whitespace();
     if parser.pos < parser.bytes.len() {
         value.drop_with(&mut vm.session.heap);
-        return Err(parser.error(vm, "Unexpected non-whitespace character after JSON"));
+        return Err(parser.at(vm, "Unexpected non-whitespace character after JSON"));
     }
     let reviver = arg(args, 1);
     if vm.is_callable(reviver) {
@@ -324,22 +367,59 @@ impl Parser<'_> {
         }
     }
 
-    fn error(&self, vm: &mut Vm<'_>, message: &str) -> Throw {
-        let _ = self.text;
-        vm.syntax_error(&format!("{message} in JSON at position {}", self.pos))
+    /// A positioned error, in V8's wording: `… in JSON at position N (line L column C)`.
+    fn at(&self, vm: &mut Vm<'_>, message: &str) -> Throw {
+        let before = &self.text[..self.pos.min(self.text.len())];
+        let line = before.matches('\n').count() + 1;
+        let column = before.rfind('\n').map_or(self.pos, |i| self.pos - i - 1) + 1;
+        // the trailing-garbage message already says "after JSON"
+        let joiner = if message.ends_with("after JSON") {
+            ""
+        } else {
+            " in JSON"
+        };
+        vm.syntax_error(&format!(
+            "{message}{joiner} at position {} (line {line} column {column})",
+            self.pos
+        ))
     }
 
+    /// The error for a value that starts with the wrong character, or ends early.
     fn unexpected(&self, vm: &mut Vm<'_>) -> Throw {
-        match self.bytes.get(self.pos) {
-            None => vm.syntax_error("Unexpected end of JSON input"),
-            Some(byte) => {
-                let shown = self.text[self.pos..].chars().next().unwrap_or(char::from(*byte));
-                vm.syntax_error(&format!(
-                    "Unexpected token '{shown}', \"{}\" is not valid JSON",
-                    preview(self.text)
-                ))
+        let Some(c) = self.text[self.pos.min(self.text.len())..].chars().next() else {
+            return vm.syntax_error("Unexpected end of JSON input");
+        };
+        // a bare word that is not a prefix of a literal names the whole input
+        if c.is_ascii_alphabetic() || c == '_' || c == '$' {
+            let word: String = self.text[self.pos..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+                .collect();
+            if !["true", "false", "null"]
+                .iter()
+                .any(|literal| literal.starts_with(word.as_str()))
+            {
+                return vm.syntax_error(&format!("{} is not valid JSON", self.context()));
             }
         }
+        vm.syntax_error(&format!("Unexpected token '{c}', {} is not valid JSON", self.context()))
+    }
+
+    /// The quoted source V8 shows: the whole text when short, else a window around the position.
+    fn context(&self) -> String {
+        const MAX_WHOLE: usize = 40;
+        const WINDOW: usize = 10;
+        let chars: Vec<char> = self.text.chars().collect();
+        if chars.len() <= MAX_WHOLE {
+            return format!("\"{}\"", self.text);
+        }
+        let position = self.text[..self.pos.min(self.text.len())].chars().count();
+        let start = position.saturating_sub(WINDOW);
+        let end = (position + WINDOW).min(chars.len());
+        let window: String = chars[start..end].iter().collect();
+        let prefix = if start > 0 { "..." } else { "" };
+        let suffix = if end < chars.len() { "..." } else { "" };
+        format!("{prefix}\"{window}\"{suffix}")
     }
 
     fn value(&mut self, vm: &mut Vm<'_>, depth: usize) -> RunResult<JsValue> {
@@ -363,10 +443,17 @@ impl Parser<'_> {
     }
 
     fn literal(&mut self, vm: &mut Vm<'_>, word: &str, value: JsValue) -> RunResult<JsValue> {
-        if self.bytes[self.pos..].starts_with(word.as_bytes()) {
+        let rest = &self.bytes[self.pos..];
+        if rest.starts_with(word.as_bytes()) {
             self.pos += word.len();
             Ok(value)
+        } else if word.as_bytes().starts_with(rest) {
+            // a prefix of the literal cut short by the end of the input
+            Err(vm.syntax_error("Unexpected end of JSON input"))
         } else {
+            // the first byte matched; report the first that does not
+            let mismatch = rest.iter().zip(word.bytes()).take_while(|(a, b)| **a == *b).count();
+            self.pos += mismatch;
             Err(self.unexpected(vm))
         }
     }
@@ -375,22 +462,25 @@ impl Parser<'_> {
         let start = self.pos;
         if self.bytes.get(self.pos) == Some(&b'-') {
             self.pos += 1;
+            if !self.bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
+                return Err(self.at(vm, "No number after minus sign"));
+            }
         }
         let digits_start = self.pos;
-        while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
+        while self.bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
             self.pos += 1;
         }
-        if self.pos == digits_start || (self.bytes[digits_start] == b'0' && self.pos - digits_start > 1) {
-            return Err(self.unexpected(vm));
+        if self.bytes[digits_start] == b'0' && self.pos - digits_start > 1 {
+            self.pos = digits_start + 1;
+            return Err(self.at(vm, "Unexpected number"));
         }
         if self.bytes.get(self.pos) == Some(&b'.') {
             self.pos += 1;
-            let fraction_start = self.pos;
-            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
-                self.pos += 1;
+            if !self.bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
+                return Err(self.at(vm, "Unterminated fractional number"));
             }
-            if self.pos == fraction_start {
-                return Err(self.unexpected(vm));
+            while self.bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
+                self.pos += 1;
             }
         }
         if matches!(self.bytes.get(self.pos), Some(b'e' | b'E')) {
@@ -398,12 +488,11 @@ impl Parser<'_> {
             if matches!(self.bytes.get(self.pos), Some(b'+' | b'-')) {
                 self.pos += 1;
             }
-            let exponent_start = self.pos;
-            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
-                self.pos += 1;
+            if !self.bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
+                return Err(self.at(vm, "Exponent part is missing a number"));
             }
-            if self.pos == exponent_start {
-                return Err(self.unexpected(vm));
+            while self.bytes.get(self.pos).is_some_and(u8::is_ascii_digit) {
+                self.pos += 1;
             }
         }
         let number: f64 = self.text[start..self.pos].parse().map_err(|_| self.unexpected(vm))?;
@@ -415,7 +504,7 @@ impl Parser<'_> {
         let mut units: Vec<u16> = Vec::new();
         loop {
             let Some(&byte) = self.bytes.get(self.pos) else {
-                return Err(vm.syntax_error(&format!("Unterminated string in JSON at position {}", self.pos)));
+                return Err(self.at(vm, "Unterminated string"));
             };
             match byte {
                 b'"' => {
@@ -425,7 +514,7 @@ impl Parser<'_> {
                 b'\\' => {
                     self.pos += 1;
                     let Some(&escape) = self.bytes.get(self.pos) else {
-                        return Err(self.unexpected(vm));
+                        return Err(self.at(vm, "Unterminated string"));
                     };
                     self.pos += 1;
                     match escape {
@@ -438,21 +527,25 @@ impl Parser<'_> {
                         b'r' => units.push(13),
                         b't' => units.push(9),
                         b'u' => {
-                            let hex = self
-                                .text
-                                .get(self.pos..self.pos + 4)
-                                .ok_or_else(|| self.unexpected(vm))?;
-                            let unit = u16::from_str_radix(hex, 16).map_err(|_| self.unexpected(vm))?;
-                            self.pos += 4;
+                            let mut unit = 0u16;
+                            for _ in 0..4 {
+                                let digit = self
+                                    .bytes
+                                    .get(self.pos)
+                                    .and_then(|b| char::from(*b).to_digit(16))
+                                    .ok_or_else(|| self.at(vm, "Bad Unicode escape"))?;
+                                unit = unit * 16 + u16::try_from(digit).expect("a hex digit");
+                                self.pos += 1;
+                            }
                             units.push(unit);
                         }
                         _ => {
                             self.pos -= 1;
-                            return Err(self.unexpected(vm));
+                            return Err(self.at(vm, "Bad escaped character"));
                         }
                     }
                 }
-                0..=0x1F => return Err(self.unexpected(vm)),
+                0..=0x1F => return Err(self.at(vm, "Bad control character in string literal")),
                 _ => {
                     let c = self.text[self.pos..].chars().next().expect("valid utf-8");
                     let mut buffer = [0u16; 2];
@@ -494,7 +587,7 @@ impl Parser<'_> {
                     for item in items {
                         item.drop_with(&mut vm.session.heap);
                     }
-                    return Err(self.unexpected(vm));
+                    return Err(self.at(vm, "Expected ',' or ']' after array element"));
                 }
             }
         }
@@ -510,12 +603,19 @@ impl Parser<'_> {
             self.pos += 1;
             return Ok(object);
         }
+        let mut first = true;
         loop {
             self.skip_whitespace();
             if self.bytes.get(self.pos) != Some(&b'"') {
                 object.drop_with(&mut vm.session.heap);
-                return Err(self.unexpected(vm));
+                let message = if first {
+                    "Expected property name or '}'"
+                } else {
+                    "Expected double-quoted property name"
+                };
+                return Err(self.at(vm, message));
             }
+            first = false;
             let key = match self.string(vm) {
                 Ok(key) => key,
                 Err(err) => {
@@ -526,7 +626,7 @@ impl Parser<'_> {
             self.skip_whitespace();
             if self.bytes.get(self.pos) != Some(&b':') {
                 object.drop_with(&mut vm.session.heap);
-                return Err(self.unexpected(vm));
+                return Err(self.at(vm, "Expected ':' after property name"));
             }
             self.pos += 1;
             self.skip_whitespace();
@@ -551,19 +651,9 @@ impl Parser<'_> {
                 }
                 _ => {
                     object.drop_with(&mut vm.session.heap);
-                    return Err(self.unexpected(vm));
+                    return Err(self.at(vm, "Expected ',' or '}' after property value"));
                 }
             }
         }
-    }
-}
-
-/// The first characters of the input, as V8 quotes them in its message.
-fn preview(text: &str) -> String {
-    let shown: String = text.chars().take(10).collect();
-    if text.chars().count() > 10 {
-        format!("{shown}...")
-    } else {
-        shown
     }
 }

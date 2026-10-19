@@ -51,14 +51,6 @@ pub(super) fn install(vm: &mut Vm<'_>, global: HeapId) {
     ] {
         install_value(vm, number, name, JsValue::Number(value), PropFlags::NONE);
     }
-    // `Number.parseFloat` / `parseInt` are the globals
-    let global_value = JsValue::Ref(global);
-    for name in ["parseFloat", "parseInt"] {
-        let key = super::key(vm, name);
-        if let Ok(function) = vm.get(&global_value, key) {
-            vm.define_with_flags(number, key, function, PropFlags::HIDDEN);
-        }
-    }
     // Boolean
     let boolean_prototype = raw_object(vm, Some(object_prototype));
     vm.object_mut(boolean_prototype).expect("object").class = ObjectClass::BoxedBool(false);
@@ -134,7 +126,7 @@ pub(super) fn to_string(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bo
         other => vm.coerce_integer(other)?,
     };
     if !(2.0..=36.0).contains(&radix) {
-        return Err(vm.range_error("toString() radix must be between 2 and 36"));
+        return Err(vm.range_error("toString() radix argument must be between 2 and 36"));
     }
     let text = number::number_to_string_radix(value, index_u32(to_usize(radix)));
     vm.alloc_string(JsString::from(text.as_str()))

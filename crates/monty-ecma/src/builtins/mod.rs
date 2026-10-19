@@ -226,6 +226,7 @@ natives! {
     ParseFloat => ("parseFloat", 1, false, global::parse_float),
     IsNaN => ("isNaN", 1, false, global::is_nan),
     IsFinite => ("isFinite", 1, false, global::is_finite),
+    BigInt => ("BigInt", 1, false, global::big_int),
 }
 
 /// Runs a native.
@@ -369,14 +370,23 @@ pub(crate) fn relative_index(index: f64, len: usize) -> usize {
     to_usize(resolved)
 }
 
-/// Throws when `value` is not callable, naming it as V8 does.
+/// Throws when `value` is not callable, naming it as V8 does for a builtin's
+/// callback argument: the type, then the value for primitives.
 pub(crate) fn require_callable(vm: &mut Vm<'_>, value: &JsValue) -> RunResult<()> {
     if vm.is_callable(value) {
-        Ok(())
-    } else {
-        let shown = vm.inspect_short(value)?;
-        Err(vm.type_error(&format!("{shown} is not a function")))
+        return Ok(());
     }
+    let shown = match value {
+        JsValue::Undefined | JsValue::Hole => "undefined".to_owned(),
+        JsValue::Null => "object null".to_owned(),
+        JsValue::Bool(b) => format!("boolean {b}"),
+        JsValue::Number(_) => format!("number {}", vm.inspect(value)?),
+        JsValue::Atom(_) | JsValue::Str(_) => format!("string \"{}\"", vm.string_of(value).expect("string")),
+        JsValue::Symbol(_) => "symbol".to_owned(),
+        JsValue::BigInt(_) => "bigint".to_owned(),
+        JsValue::Ref(_) => "object".to_owned(),
+    };
+    Err(vm.type_error(&format!("{shown} is not a function")))
 }
 
 /// The object a method was called on, or a `TypeError` naming the method.

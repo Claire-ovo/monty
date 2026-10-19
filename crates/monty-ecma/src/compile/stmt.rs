@@ -374,12 +374,7 @@ impl<'c> Compiler<'c> {
                     .and_then(|id| self.scoping().get_reference(id).symbol_id());
                 let resolved = match symbol {
                     Some(symbol) => self.resolve_symbol(symbol)?,
-                    None => super::Resolved {
-                        place: super::Place::Global,
-                        name: self.intern_str(ident.name.as_str()),
-                        lexical: false,
-                        is_const: false,
-                    },
+                    None => self.resolve_unbound(ident.name.as_str()),
                 };
                 self.emit_store(resolved)
             }
@@ -503,8 +498,13 @@ impl<'c> Compiler<'c> {
             self.builder().resume_at(depth);
             self.builder().add_handler(try_start, try_end, catch_start, depth)?;
             self.builder().emit(Opcode::PushException)?;
+            // the parameter may be bound in the clause's scope or the body block's: declare both first
             let scope = scope_of(&handler.scope_id)?;
             self.declare_scope(scope, false)?;
+            let body_scope = scope_of(&handler.body.scope_id)?;
+            if body_scope != scope {
+                self.declare_scope(body_scope, false)?;
+            }
             match &handler.param {
                 Some(param) => {
                     let ident = binding_identifier(&param.pattern)?;
@@ -513,7 +513,8 @@ impl<'c> Compiler<'c> {
                 }
                 None => self.builder().emit(Opcode::Pop)?,
             }
-            self.compile_block(&handler.body)?;
+            self.hoist_functions(&handler.body.body)?;
+            self.compile_statements(&handler.body.body)?;
             let catch_end = self.builder().offset();
             protected.push((catch_start, catch_end));
             if !self.builder().is_dead() {

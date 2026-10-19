@@ -246,7 +246,6 @@ pub(crate) enum OperandShape {
 impl Opcode {
     /// The operand layout of this opcode.
     pub fn operand_shape(self) -> OperandShape {
-        use OperandShape as S;
         match self {
             Self::Pop
             | Self::Dup
@@ -310,10 +309,10 @@ impl Opcode {
             | Self::ToString
             | Self::ToPropertyKey
             | Self::Nop
-            | Self::RequireObjectCoercible => S::None,
-            Self::LoadInt | Self::IncDec => S::I8,
-            Self::DefineAccessor | Self::TemplateConcat | Self::MakeClass | Self::Call | Self::New => S::U8,
-            Self::SuperCall => S::U8,
+            | Self::RequireObjectCoercible => OperandShape::None,
+            Self::LoadInt | Self::IncDec => OperandShape::I8,
+            Self::DefineAccessor | Self::TemplateConcat | Self::MakeClass | Self::Call | Self::New => OperandShape::U8,
+            Self::SuperCall => OperandShape::U8,
             Self::LoadConst
             | Self::LoadLocal
             | Self::StoreLocal
@@ -336,7 +335,7 @@ impl Opcode {
             | Self::MakeClosure
             | Self::MakeMethod
             | Self::LoadThis
-            | Self::CreateArguments => S::U16,
+            | Self::CreateArguments => OperandShape::U16,
             Self::Jump
             | Self::JumpIfFalse
             | Self::JumpIfTrue
@@ -345,9 +344,9 @@ impl Opcode {
             | Self::JumpIfNotNullishKeep
             | Self::JumpIfNullishKeep
             | Self::JumpIfUndefinedKeep
-            | Self::IteratorNext => S::I16,
-            Self::LoadLocalChecked | Self::LoadCellChecked | Self::LoadScript => S::U16U16,
-            Self::ThrowError => S::U8U16,
+            | Self::IteratorNext => OperandShape::I16,
+            Self::LoadLocalChecked | Self::LoadCellChecked | Self::LoadScript => OperandShape::U16U16,
+            Self::ThrowError => OperandShape::U8U16,
         }
     }
 

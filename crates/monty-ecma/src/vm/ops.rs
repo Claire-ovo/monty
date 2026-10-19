@@ -383,7 +383,7 @@ impl Vm<'_> {
     /// `instanceof`: `rhs.prototype` on `lhs`'s prototype chain.
     pub fn instance_of(&mut self, lhs: &JsValue, rhs: &JsValue) -> RunResult<bool> {
         let JsValue::Ref(constructor) = rhs else {
-            return Err(self.type_error("Right-hand side of 'instanceof' is not callable"));
+            return Err(self.type_error("Right-hand side of 'instanceof' is not an object"));
         };
         if !self.is_callable_id(*constructor) {
             return Err(self.type_error("Right-hand side of 'instanceof' is not callable"));

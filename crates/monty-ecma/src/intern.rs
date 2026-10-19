@@ -99,23 +99,39 @@ pub(crate) enum StaticAtom {
     Null,
     True,
     False,
+    #[strum(serialize = "NaN")]
     NaN,
+    #[strum(serialize = "Infinity")]
     Infinity,
+    #[strum(serialize = "Object")]
     Object,
+    #[strum(serialize = "Array")]
     Array,
+    #[strum(serialize = "Function")]
     Function,
+    #[strum(serialize = "String")]
     String,
+    #[strum(serialize = "Number")]
     Number,
+    #[strum(serialize = "Boolean")]
     Boolean,
+    #[strum(serialize = "Symbol")]
     Symbol,
+    #[strum(serialize = "Error")]
     Error,
+    #[strum(serialize = "TypeError")]
     TypeError,
+    #[strum(serialize = "RangeError")]
     RangeError,
+    #[strum(serialize = "ReferenceError")]
     ReferenceError,
+    #[strum(serialize = "SyntaxError")]
     SyntaxError,
+    #[strum(serialize = "EvalError")]
     EvalError,
     #[strum(serialize = "URIError")]
     UriError,
+    #[strum(serialize = "AggregateError")]
     AggregateError,
     Console,
     Log,

@@ -18,6 +18,18 @@ pub(super) fn install(vm: &mut Vm<'_>, global: HeapId) {
     ] {
         install_function(vm, global, native);
     }
+    // `Number.parseFloat` and `Number.parseInt` are the same functions as the globals
+    let number_key = super::key(vm, "Number");
+    if let Ok(JsValue::Ref(number)) = vm.get(&JsValue::Ref(global), number_key) {
+        for name in ["parseFloat", "parseInt"] {
+            let key = super::key(vm, name);
+            if let Ok(function) = vm.get(&JsValue::Ref(global), key) {
+                vm.define_with_flags(number, key, function, PropFlags::HIDDEN);
+            }
+        }
+        vm.session.heap.dec_ref(number);
+    }
+    install_function(vm, global, NativeFn::BigInt);
     vm.session.heap.inc_ref(global);
     install_value(vm, global, "globalThis", JsValue::Ref(global), PropFlags::HIDDEN);
     install_value(vm, global, "undefined", JsValue::Undefined, PropFlags::NONE);
@@ -129,6 +141,12 @@ pub(crate) fn parse_float_text(text: &str) -> f64 {
         }
     }
     trimmed[..i].parse::<f64>().unwrap_or(f64::NAN)
+}
+
+/// `BigInt` exists so `typeof BigInt` and feature checks behave, but every
+/// call is refused: the engine has no arbitrary-precision integers.
+pub(super) fn big_int(vm: &mut Vm<'_>, _: &JsValue, _: &[JsValue], _: bool) -> RunResult<JsValue> {
+    Err(vm.type_error("BigInt is not supported"))
 }
 
 pub(super) fn is_nan(vm: &mut Vm<'_>, _: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {

@@ -3,10 +3,11 @@
 
 use crate::{
     bytecode::{
-        code::{Code, ExceptionEntry, LocationEntry},
+        code::{CalleeEntry, Code, ExceptionEntry, LocationEntry},
         op::{Opcode, OperandShape},
     },
     error::CompileError,
+    intern::AtomId,
     value::Constant,
 };
 
@@ -21,6 +22,9 @@ pub(crate) struct CodeBuilder {
     constants: Vec<Constant>,
     locations: Vec<LocationEntry>,
     handlers: Vec<ExceptionEntry>,
+    callees: Vec<CalleeEntry>,
+    /// The callee text the next call instruction is recorded under.
+    pending_callee: Option<AtomId>,
     /// Current operand stack depth, `None` after an unconditional jump or
     /// return until a label is bound.
     depth: Option<u16>,
@@ -54,6 +58,8 @@ impl CodeBuilder {
             constants: Vec::new(),
             locations: Vec::new(),
             handlers: Vec::new(),
+            callees: Vec::new(),
+            pending_callee: None,
             depth: Some(0),
             max_depth: 0,
             pending_location: None,
@@ -66,6 +72,11 @@ impl CodeBuilder {
         if self.last_location != Some((start, end)) {
             self.pending_location = Some((start, end));
         }
+    }
+
+    /// Names the callee of the call instruction emitted next.
+    pub fn set_callee(&mut self, text: AtomId) {
+        self.pending_callee = Some(text);
     }
 
     /// The offset the next instruction will have.
@@ -83,11 +94,15 @@ impl CodeBuilder {
         self.depth.is_none()
     }
 
-    /// Emits an opcode with no operand and its standard stack effect.
+    /// Emits an opcode with no operand and its standard stack effect; a
+    /// return or throw leaves the following code unreachable.
     pub fn emit(&mut self, op: Opcode) -> Result<(), CompileError> {
         debug_assert_eq!(op.operand_shape(), OperandShape::None, "{op:?} takes an operand");
         self.apply_effect(op.stack_effect(0))?;
         self.write_op(op);
+        if op.ends_block() {
+            self.depth = None;
+        }
         Ok(())
     }
 
@@ -115,6 +130,9 @@ impl CodeBuilder {
         self.apply_effect(op.stack_effect(i32::from(operand)))?;
         self.write_op(op);
         self.bytecode.extend_from_slice(&operand.to_le_bytes());
+        if op.ends_block() {
+            self.depth = None;
+        }
         Ok(())
     }
 
@@ -242,6 +260,7 @@ impl CodeBuilder {
             constants: self.constants,
             locations: self.locations,
             handlers: self.handlers,
+            callees: self.callees,
             max_stack: self.max_depth,
         }
     }
@@ -254,6 +273,12 @@ impl CodeBuilder {
                 end,
             });
             self.last_location = Some((start, end));
+        }
+        if let Some(text) = self.pending_callee.take() {
+            self.callees.push(CalleeEntry {
+                offset: u32::try_from(self.bytecode.len()).unwrap_or(u32::MAX),
+                text,
+            });
         }
         self.bytecode.push(op as u8);
     }
@@ -328,6 +353,7 @@ impl Opcode {
             | Self::LoadScript
             | Self::NewObject
             | Self::MakeClosure
+            | Self::MakeMethod
             | Self::LoadThis
             | Self::PushException => 1,
             Self::StoreLocal
@@ -384,14 +410,13 @@ impl Opcode {
             | Self::GetIterator
             | Self::ForInStart
             | Self::RequireObjectCoercible
-            | Self::MakeMethod
             | Self::Jump
             | Self::ArrayPushHole => 0,
             Self::GetPropKeep | Self::GetElemKeep | Self::IteratorNext => 1,
             Self::SetElem | Self::DefineOwnElem | Self::DefineAccessor => -2,
             // the keep-variants pop on fall-through; the jump path is accounted in `emit_jump`
-            Self::JumpIfTrueKeep | Self::JumpIfFalseKeep | Self::JumpIfNotNullishKeep => -1,
-            Self::JumpIfNullishKeep | Self::JumpIfUndefinedKeep => 0,
+            Self::JumpIfTrueKeep | Self::JumpIfFalseKeep | Self::JumpIfNotNullishKeep | Self::JumpIfUndefinedKeep => -1,
+            Self::JumpIfNullishKeep => 0,
             // `count` values become one array / string
             Self::NewArray | Self::TemplateConcat => 1 - operand,
             // callee, this and `argc` arguments become one result
@@ -405,6 +430,19 @@ impl Opcode {
             Self::MakeClass => -1,
             Self::ReturnUndefined | Self::ThrowError | Self::Rethrow => 0,
         }
+    }
+
+    /// Whether control never continues past the opcode (returns and throws).
+    pub fn ends_block(self) -> bool {
+        matches!(
+            self,
+            Self::Return
+                | Self::ReturnUndefined
+                | Self::Throw
+                | Self::ThrowError
+                | Self::Rethrow
+                | Self::ThrowConstAssign
+        )
     }
 
     /// Whether a conditional jump leaves its operand on the stack when it jumps.

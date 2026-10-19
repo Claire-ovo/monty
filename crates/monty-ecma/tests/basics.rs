@@ -32,26 +32,37 @@ fn arithmetic_and_strings() {
     assert_eq!(eval("1 + 2 * 3"), MontyObject::int(7));
     assert_eq!(eval("'a' + 1 + 2"), MontyObject::string("a12"));
     assert_eq!(eval("7 % 3 + 2 ** 3"), MontyObject::int(9));
-    assert_eq!(eval("0.1 + 0.2"), MontyObject::float(0.30000000000000004));
+    assert_eq!(eval("0.1 + 0.2"), MontyObject::float(0.300_000_000_000_000_04));
     assert_eq!(eval("'abc'.length"), MontyObject::int(3));
     assert_eq!(eval("`x${1 + 1}y`"), MontyObject::string("x2y"));
 }
 
 #[test]
 fn console_log_formatting() {
-    assert_snapshot!(run(r#"
+    assert_snapshot!(run(r"
 console.log('hello', 1, true, null, undefined);
 console.log([1, 'two', [3]], { a: 1, b: 'x', c: { d: [] } });
 console.log(-0, 1e21, 1e-7, 0.5, NaN);
 console.log(function f() {}, () => 1, Math.max);
 console.log([1, 2, 3, 4, 5, 6, 7]);
 console.log('%s is %d years', 'Bob', 42);
-"#), @"");
+"), @"
+    hello 1 true null undefined
+    [ 1, 'two', [ 3 ] ] { a: 1, b: 'x', c: { d: [] } }
+    -0 1e+21 1e-7 0.5 NaN
+    [Function: f] [Function (anonymous)] [Function: max]
+    [
+      1, 2, 3, 4,
+      5, 6, 7
+    ]
+    Bob is 42 years
+    => None
+    ");
 }
 
 #[test]
 fn closures_and_scopes() {
-    assert_snapshot!(run(r#"
+    assert_snapshot!(run(r"
 function counter() {
   let n = 0;
   return () => ++n;
@@ -72,12 +83,18 @@ var v = 1;
   console.log(v);
 }
 console.log(v);
-"#), @"");
+"), @"
+    3
+    [ 0, 1, 2 ]
+    2
+    1
+    => None
+    ");
 }
 
 #[test]
 fn exceptions() {
-    assert_snapshot!(run(r#"
+    assert_snapshot!(run(r"
 function f() {
   try {
     throw new TypeError('bad');
@@ -94,13 +111,18 @@ try {
   console.log(e.constructor === TypeError, e.message);
 }
 undefinedVariable;
-"#), @"");
+"), @"
+    true bad
+    finally
+    true Cannot read properties of null (reading 'x')
+    !! ReferenceError: undefinedVariable is not defined
+    ");
 }
 
 #[test]
 fn tdz_and_const() {
-    assert_snapshot!(run("{ console.log(x); let x = 1; }"), @"");
-    assert_snapshot!(run("const k = 1; k = 2;"), @"");
+    assert_snapshot!(run("{ console.log(x); let x = 1; }"), @"!! ReferenceError: Cannot access 'x' before initialization");
+    assert_snapshot!(run("const k = 1; k = 2;"), @"!! TypeError: Assignment to constant variable.");
 }
 
 #[test]
@@ -115,15 +137,27 @@ console.log(JSON.stringify({ x: [1, { y: null }], s: 'q"' }), JSON.parse('{"a":[
 for (const k in { p: 1, q: 2 }) console.log(k);
 for (const ch of 'hé') console.log(ch);
 console.log([...'ab', ...[1, 2]], { ...o, z: 9 }.z);
-"#), @"");
+"#), @r#"
+    { '2': 3, a: 1, 'b c': 2, g: [Getter], m: [Function: m] } got 1 [ '2', 'a', 'b c', 'g', 'm' ]
+    [ 1, 2, 3 ] true 2 [ 1, 2, 3, [ 4 ] ]
+    {"x":[1,{"y":null}],"s":"q\""} { a: [ 1, 2, { b: true } ] }
+    p
+    q
+    h
+    é
+    [ 'a', 'b', 1, 2 ] 9
+    => None
+    "#);
 }
 
 #[test]
 fn session_persists_bindings() {
     let repl = JsRepl::new("main.js", ResourceLimits::default()).expect("session");
-    let JsProgress::Complete { repl, .. } =
-        repl.feed("let total = 1; function add(n) { total += n; }", &NamedValues::new(), PrintWriter::Disabled)
-    else {
+    let JsProgress::Complete { repl, .. } = repl.feed(
+        "let total = 1; function add(n) { total += n; }",
+        &NamedValues::new(),
+        PrintWriter::Disabled,
+    ) else {
         panic!("first feed failed");
     };
     let JsProgress::Complete { value, .. } = repl.feed("add(41); total", &NamedValues::new(), PrintWriter::Disabled)
@@ -135,18 +169,19 @@ fn session_persists_bindings() {
 
 #[test]
 fn syntax_error() {
-    assert_snapshot!(run("let x = ;"), @"");
-    assert_snapshot!(run("with (a) {}"), @"");
+    assert_snapshot!(run("let x = ;"), @"!! SyntaxError: Unexpected token");
+    assert_snapshot!(run("with (a) {}"), @"!! SyntaxError: 'with' statements are not allowed");
 }
 
 #[test]
 fn inputs_are_globals() {
     let repl = JsRepl::new("main.js", ResourceLimits::default()).expect("session");
     let mut inputs = NamedValues::new();
-    inputs.push("data", MontyObject::list([MontyObject::int(1), MontyObject::string("x")]));
-    let JsProgress::Complete { value, .. } =
-        repl.feed("data.length + data[0]", &inputs, PrintWriter::Disabled)
-    else {
+    inputs.push(
+        "data",
+        MontyObject::list([MontyObject::int(1), MontyObject::string("x")]),
+    );
+    let JsProgress::Complete { value, .. } = repl.feed("data.length + data[0]", &inputs, PrintWriter::Disabled) else {
         panic!("feed failed");
     };
     assert_eq!(value, MontyObject::int(3));

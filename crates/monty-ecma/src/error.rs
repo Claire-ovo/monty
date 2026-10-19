@@ -105,18 +105,19 @@ pub(crate) fn stack_frame(
     }
 }
 
-/// The 1-based line and column of a byte offset, with the text of its line.
+/// The line and column of a byte offset, with the text of its line.
 ///
 /// Columns count characters, as CPython-style tracebacks do, and an offset
-/// past the end of the source lands on the last line.
+/// past the end of the source lands on the last line. `CodeLoc::new` takes
+/// zero-based positions and reports them one-based.
 fn locate(source: &str, offset: u32) -> (CodeLoc, &str) {
     let offset = (offset as usize).min(source.len());
     let line_start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
     let line_end = source[offset..].find('\n').map_or(source.len(), |i| offset + i);
-    let line_number = source[..line_start].matches('\n').count() + 1;
+    let line_index = source[..line_start].matches('\n').count();
     let column = source[line_start..offset].chars().count();
     let loc = CodeLoc::new(
-        u32::try_from(line_number).unwrap_or(u32::MAX),
+        u32::try_from(line_index).unwrap_or(u32::MAX),
         u32::try_from(column).unwrap_or(u32::MAX),
     );
     (loc, &source[line_start..line_end])

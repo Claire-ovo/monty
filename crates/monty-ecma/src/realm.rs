@@ -132,23 +132,32 @@ impl ErrorKind {
 pub(crate) struct ScriptScope {
     /// Binding values by index; `Hole` until the declaration runs.
     pub values: Vec<JsValue>,
-    /// The name of each binding, parallel to `values`.
-    names: Vec<AtomId>,
+    /// The name of each binding and whether it is a `const`, parallel to `values`.
+    names: Vec<(AtomId, bool)>,
     #[serde(skip)]
     index: AHashMap<AtomId, u32>,
 }
 
 impl ScriptScope {
-    /// The index of `name`, creating a `Hole` binding when it is new.
-    pub fn declare(&mut self, name: AtomId) -> u32 {
+    /// The index of `name`, creating a `Hole` binding when it is new; a
+    /// redeclaration takes the new constness.
+    pub fn declare(&mut self, name: AtomId, is_const: bool) -> u32 {
         if let Some(index) = self.index.get(&name) {
+            self.names[*index as usize].1 = is_const;
             *index
         } else {
             let index = u32::try_from(self.values.len()).expect("more than 2**32 script bindings");
             self.values.push(JsValue::Hole);
-            self.names.push(name);
+            self.names.push((name, is_const));
             self.index.insert(name, index);
             index
         }
+    }
+
+    /// An existing binding's index and constness, for a later feed's reference to it.
+    pub fn lookup(&self, name: AtomId) -> Option<(u32, bool)> {
+        self.index
+            .get(&name)
+            .map(|index| (*index, self.names[*index as usize].1))
     }
 }

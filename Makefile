@@ -177,6 +177,10 @@ test-ref-count-return: ## Run rust tests with ref-count-return enabled
 test-cases: ## Run tests cases only
 	cargo run -p monty-datatest
 
+.PHONY: test-js-cases
+test-js-cases: ## Run the JavaScript test cases against monty-ecma and Node
+	cargo run -p monty-js-datatest
+
 .PHONY: miri
 miri: ## Run library inline tests under miri (particularly relevant for heap.rs)
 	cargo +nightly miri test -p monty-heap -p monty --lib

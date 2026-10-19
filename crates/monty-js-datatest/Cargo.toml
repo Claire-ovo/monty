@@ -1,0 +1,19 @@
+[package]
+name = "monty-js-datatest"
+version = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+description = "Datatest harness for Monty's JavaScript engine — runs test cases against both monty-ecma and Node"
+publish = false
+
+[dependencies]
+monty-ecma = { workspace = true }
+monty-fixture = { path = "../monty-fixture" }
+monty-types = { workspace = true }
+datatest-stable = "0.2"
+similar = "2.7.0"
+
+[lints]
+workspace = true

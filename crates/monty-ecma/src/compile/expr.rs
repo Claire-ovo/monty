@@ -207,15 +207,16 @@ impl<'c> Compiler<'c> {
         }
     }
 
-    /// Reads a `globalThis` property; `typeof` tolerates a missing one.
+    /// Reads an unbound name: an earlier feed's binding or a `globalThis`
+    /// property, which `typeof` tolerates missing.
     fn emit_global_load(&mut self, ident: &IdentifierReference<'c>, tolerant: bool) -> Result<(), CompileError> {
-        let atom = self.intern_str(ident.name.as_str());
-        let op = if tolerant {
-            Opcode::LoadGlobalOrUndefined
-        } else {
-            Opcode::LoadGlobal
-        };
-        self.builder().emit_u16(op, atom_operand(atom)?)
+        let resolved = self.resolve_unbound(ident.name.as_str());
+        match resolved.place {
+            Place::Global if tolerant => self
+                .builder()
+                .emit_u16(Opcode::LoadGlobalOrUndefined, atom_operand(resolved.name)?),
+            _ => self.emit_load(resolved),
+        }
     }
 
     /// Resolves an identifier used as an assignment target.
@@ -226,12 +227,7 @@ impl<'c> Compiler<'c> {
             .and_then(|id| self.scoping().get_reference(id).symbol_id());
         match symbol {
             Some(symbol) => self.resolve_symbol(symbol),
-            None => Ok(Resolved {
-                place: Place::Global,
-                name: self.intern_str(ident.name.as_str()),
-                lexical: false,
-                is_const: false,
-            }),
+            None => Ok(self.resolve_unbound(ident.name.as_str())),
         }
     }
 
@@ -343,11 +339,14 @@ impl<'c> Compiler<'c> {
             }
         }
         self.locate(call.span);
+        let callee = self.callee_text(&call.callee);
         if has_spread(&call.arguments) {
             self.compile_spread_arguments(&call.arguments)?;
+            self.builder().set_callee(callee);
             self.builder().emit(Opcode::CallSpread)
         } else {
             let count = self.compile_arguments(&call.arguments)?;
+            self.builder().set_callee(callee);
             self.builder().emit_u8(Opcode::Call, count)
         }
     }
@@ -355,13 +354,24 @@ impl<'c> Compiler<'c> {
     fn compile_new(&mut self, new: &'c NewExpression<'c>) -> Result<(), CompileError> {
         self.compile_expression(&new.callee)?;
         self.locate(new.span);
+        let callee = self.callee_text(&new.callee);
         if has_spread(&new.arguments) {
             self.compile_spread_arguments(&new.arguments)?;
+            self.builder().set_callee(callee);
             self.builder().emit(Opcode::NewSpread)
         } else {
             let count = self.compile_arguments(&new.arguments)?;
+            self.builder().set_callee(callee);
             self.builder().emit_u8(Opcode::New, count)
         }
+    }
+
+    /// How V8 names a callee in `x is not a function`: identifiers and member
+    /// chains by their text, literals re-rendered, anything else as
+    /// `(intermediate value)`.
+    fn callee_text(&mut self, callee: &Expression<'c>) -> AtomId {
+        let text = render_callee(callee);
+        self.intern_str(&text)
     }
 
     /// Pushes plain arguments, returning their count.
@@ -721,12 +731,16 @@ impl<'c> Compiler<'c> {
                 }
                 ObjectPropertyKind::ObjectProperty(property) => {
                     self.locate(property.span);
-                    let is_proto = !property.computed
+                    let proto_key = match &property.key {
+                        PropertyKey::StaticIdentifier(id) => id.name.as_str() == "__proto__",
+                        PropertyKey::StringLiteral(lit) => lit.value.as_str() == Some("__proto__"),
+                        _ => false,
+                    };
+                    let is_proto = proto_key
+                        && !property.computed
                         && !property.method
                         && !property.shorthand
-                        && property.kind == PropertyKind::Init
-                        && matches!(&property.key, PropertyKey::StaticIdentifier(id) if id.name.as_str() == "__proto__")
-                        || matches!(&property.key, PropertyKey::StringLiteral(lit) if lit.value.as_str() == Some("__proto__") && !property.computed && property.kind == PropertyKind::Init && !property.shorthand);
+                        && property.kind == PropertyKind::Init;
                     if is_proto {
                         self.compile_expression(&property.value)?;
                         self.builder().emit(Opcode::SetPrototype)?;
@@ -741,6 +755,11 @@ impl<'c> Compiler<'c> {
                             self.emit_method(id)?;
                             match key {
                                 LiteralKey::Static(atom) => self.builder().emit_u16(Opcode::DefineOwn, atom)?,
+                                LiteralKey::Index(index) => {
+                                    self.emit_number(f64::from(index))?;
+                                    self.builder().emit(Opcode::Swap)?;
+                                    self.builder().emit(Opcode::DefineOwnElem)?;
+                                }
                                 LiteralKey::Computed(expr) => {
                                     self.compile_expression(expr)?;
                                     self.builder().emit(Opcode::Swap)?;
@@ -752,6 +771,11 @@ impl<'c> Compiler<'c> {
                             LiteralKey::Static(atom) => {
                                 self.compile_expression_named(&property.value, Some(AtomId::from_u16(atom)))?;
                                 self.builder().emit_u16(Opcode::DefineOwn, atom)?;
+                            }
+                            LiteralKey::Index(index) => {
+                                self.emit_number(f64::from(index))?;
+                                self.compile_expression(&property.value)?;
+                                self.builder().emit(Opcode::DefineOwnElem)?;
                             }
                             LiteralKey::Computed(expr) => {
                                 self.compile_expression(expr)?;
@@ -767,6 +791,7 @@ impl<'c> Compiler<'c> {
                             self.emit_method(id)?;
                             match key {
                                 LiteralKey::Static(atom) => self.emit_atom(AtomId::from_u16(atom))?,
+                                LiteralKey::Index(index) => self.emit_number(f64::from(index))?,
                                 LiteralKey::Computed(expr) => self.compile_expression(expr)?,
                             }
                             self.builder().emit(Opcode::Swap)?;
@@ -803,13 +828,19 @@ impl<'c> Compiler<'c> {
             }
             other => return Ok(LiteralKey::Computed(other.to_expression())),
         };
+        // `{ 1: x }` and `{ '1': x }` are the array index 1, which orders before string keys
+        if let Some(index) = self.interns.atom(atom).as_array_index() {
+            return Ok(LiteralKey::Index(index));
+        }
         Ok(LiteralKey::Static(atom_operand(atom)?))
     }
 }
 
-/// A literal's property key: a known name, or an expression to evaluate.
+/// A literal's property key: a known name, a canonical array index, or an
+/// expression to evaluate.
 enum LiteralKey<'c> {
     Static(u16),
+    Index(u32),
     Computed(&'c Expression<'c>),
 }
 
@@ -818,7 +849,7 @@ impl LiteralKey<'_> {
     fn name_hint(&self) -> AtomId {
         match self {
             Self::Static(atom) => AtomId::from_u16(*atom),
-            Self::Computed(_) => StaticAtom::Empty.id(),
+            Self::Index(_) | Self::Computed(_) => StaticAtom::Empty.id(),
         }
     }
 }
@@ -829,6 +860,35 @@ fn method_function<'c>(value: &'c Expression<'c>) -> Result<&'c Function<'c>, Co
     match value {
         Expression::FunctionExpression(function) => Ok(function),
         _ => Err(CompileError::internal("method value is not a function")),
+    }
+}
+
+/// The text V8's error messages use for a callee expression.
+fn render_callee(expr: &Expression<'_>) -> String {
+    match expr {
+        Expression::Identifier(ident) => ident.name.to_string(),
+        Expression::ThisExpression(_) => "this".to_owned(),
+        Expression::Super(_) => "super".to_owned(),
+        Expression::NullLiteral(_) => "null".to_owned(),
+        Expression::BooleanLiteral(lit) => lit.value.to_string(),
+        Expression::NumericLiteral(lit) => number_to_string(lit.value),
+        Expression::StringLiteral(lit) => format!("\"{}\"", lit.value.as_str().unwrap_or_default()),
+        Expression::ParenthesizedExpression(inner) => render_callee(&inner.expression),
+        Expression::StaticMemberExpression(member) => {
+            format!("{}.{}", render_callee(&member.object), member.property.name)
+        }
+        Expression::ComputedMemberExpression(member) => {
+            let key = match &member.expression {
+                key @ (Expression::Identifier(_) | Expression::StringLiteral(_) | Expression::NumericLiteral(_)) => {
+                    render_callee(key)
+                }
+                _ => "...".to_owned(),
+            };
+            format!("{}[{key}]", render_callee(&member.object))
+        }
+        Expression::CallExpression(call) => format!("{}(...)", render_callee(&call.callee)),
+        Expression::ObjectExpression(object) if object.properties.is_empty() => "{}".to_owned(),
+        _ => "(intermediate value)".to_owned(),
     }
 }
 

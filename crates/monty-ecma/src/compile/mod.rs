@@ -432,9 +432,15 @@ impl<'c> Compiler<'c> {
         if scope == self.module_scope() {
             for symbol in self.scope_symbols(scope) {
                 let flags = self.scoping().symbol_flags(symbol);
+                let name = self.intern_symbol_name(symbol);
                 if flags.is_block_scoped() || flags.is_class() {
-                    let name = self.intern_symbol_name(symbol);
-                    self.script.declare(name);
+                    self.script.declare(name, flags.is_const_variable());
+                } else if !flags.is_function() {
+                    // a hoisted `var` exists (as `undefined`) before its declaration runs,
+                    // keeping the value an earlier feed gave it
+                    let operand = atom_operand(name)?;
+                    self.builder().emit_u16(Opcode::LoadGlobalOrUndefined, operand)?;
+                    self.builder().emit_u16(Opcode::DefineGlobal, operand)?;
                 }
             }
             return Ok(());
@@ -510,7 +516,7 @@ impl<'c> Compiler<'c> {
         let declaring_scope = scoping.symbol_scope_id(symbol);
         if declaring_scope == self.module_scope() {
             let place = if lexical {
-                Place::Script(self.script.declare(name))
+                Place::Script(self.script.declare(name, is_const))
             } else {
                 Place::Global
             };
@@ -550,6 +556,26 @@ impl<'c> Compiler<'c> {
             lexical,
             is_const,
         })
+    }
+
+    /// Resolves a name no symbol binds: a top-level binding of an earlier feed,
+    /// else a `globalThis` property.
+    fn resolve_unbound(&mut self, name: &str) -> Resolved {
+        let name = self.intern_str(name);
+        match self.script.lookup(name) {
+            Some((index, is_const)) => Resolved {
+                place: Place::Script(index),
+                name,
+                lexical: true,
+                is_const,
+            },
+            None => Resolved {
+                place: Place::Global,
+                name,
+                lexical: false,
+                is_const: false,
+            },
+        }
     }
 
     /// Makes the cell in `owner_level`'s slot `owner_slot` available in the

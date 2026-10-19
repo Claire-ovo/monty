@@ -208,9 +208,10 @@ impl Vm<'_> {
                     if !flags.writable() {
                         value.drop_with(&mut self.session.heap);
                         let shown = self.key_display(key);
-                        return Err(
-                            self.type_error(&format!("Cannot assign to read only property '{shown}' of object"))
-                        );
+                        let target = self.inspect_short(receiver)?;
+                        return Err(self.type_error(&format!(
+                            "Cannot assign to read only property '{shown}' of object '{target}'"
+                        )));
                     }
                     break;
                 }

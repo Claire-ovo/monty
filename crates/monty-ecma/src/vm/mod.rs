@@ -433,7 +433,7 @@ impl<'p> Vm<'p> {
                 let JsValue::Ref(object) = rhs else {
                     let key_shown = self.display_key_value(&lhs);
                     lhs.drop_with(&mut self.session.heap);
-                    let shown = self.inspect_short(&rhs);
+                    let shown = self.coerce_string(&rhs).map(|s| s.to_string_lossy());
                     rhs.drop_with(&mut self.session.heap);
                     let (key_shown, shown) = (key_shown?, shown?);
                     return Err(self.type_error(&format!(

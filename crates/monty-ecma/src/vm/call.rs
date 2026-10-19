@@ -35,13 +35,22 @@ impl Vm<'_> {
     /// `Call n` from bytecode: a compiled callee gets a frame and the loop
     /// continues into it; a native runs now and its result is pushed.
     pub(super) fn call_from_bytecode(&mut self, callee: JsValue, this: JsValue, args: Vec<JsValue>) -> RunResult<Step> {
-        if let Some(Callable::Closure { function, cells }) = self.callable(&callee) {
-            let result = self.push_closure_frame(function, &cells, callee, this, args, None);
-            result.map(|()| Step::Continue)
-        } else {
-            let result = self.call(callee, this, args)?;
-            self.stack.push(result);
-            Ok(Step::Continue)
+        match self.callable(&callee) {
+            Some(Callable::Closure { function, cells }) => {
+                let result = self.push_closure_frame(function, &cells, callee, this, args, None);
+                result.map(|()| Step::Continue)
+            }
+            None => {
+                self.drop_all(this, args);
+                callee.drop_with(&mut self.session.heap);
+                let text = self.callee_text();
+                Err(self.type_error(&format!("{text} is not a function")))
+            }
+            Some(_) => {
+                let result = self.call(callee, this, args)?;
+                self.stack.push(result);
+                Ok(Step::Continue)
+            }
         }
     }
 
@@ -54,10 +63,21 @@ impl Vm<'_> {
                 self.push_closure_frame(function, &cells, callee, this, args, Some(this_copy))?;
                 Ok(Step::Continue)
             }
-            _ => {
+            Some(Callable::Native(native)) if native.is_constructor() => {
                 let result = self.construct(callee, args)?;
                 self.stack.push(result);
                 Ok(Step::Continue)
+            }
+            Some(Callable::Bound { .. }) => {
+                let result = self.construct(callee, args)?;
+                self.stack.push(result);
+                Ok(Step::Continue)
+            }
+            _ => {
+                self.drop_all(JsValue::Undefined, args);
+                callee.drop_with(&mut self.session.heap);
+                let text = self.callee_text();
+                Err(self.type_error(&format!("{text} is not a constructor")))
             }
         }
     }
@@ -131,6 +151,15 @@ impl Vm<'_> {
                 Err(self.type_error(&format!("{shown} is not a constructor")))
             }
         }
+    }
+
+    /// The source text of the callee of the call instruction being executed.
+    fn callee_text(&self) -> String {
+        let frame = self.frames.last().expect("a frame is running");
+        frame.function.code.callee(frame.op_start).map_or_else(
+            || "(intermediate value)".to_owned(),
+            |atom| self.session.interns.atom(atom).to_string_lossy(),
+        )
     }
 
     /// Runs a nested dispatch loop for a call made from Rust, bounding how

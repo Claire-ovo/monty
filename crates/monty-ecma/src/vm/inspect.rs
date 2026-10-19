@@ -26,6 +26,10 @@ const COMPACT: usize = 3;
 
 /// State threaded through one `inspect` call.
 struct Context {
+    /// `%o`: show an array's `length` and go deeper (Node's `showHidden`).
+    show_hidden: bool,
+    /// Objects nested deeper than this print as `[Object]`.
+    max_depth: usize,
     /// Objects being formatted, for cycle detection.
     seen: Vec<HeapId>,
     /// Objects found to be circular, numbered in discovery order.
@@ -51,7 +55,18 @@ impl Vm<'_> {
 
     /// `util.inspect(value)`.
     pub fn inspect(&mut self, value: &JsValue) -> RunResult<String> {
+        self.inspect_with(value, false)
+    }
+
+    /// `util.inspect(value, { showHidden: true, depth: 4 })`, what `%o` prints.
+    pub fn inspect_verbose(&mut self, value: &JsValue) -> RunResult<String> {
+        self.inspect_with(value, true)
+    }
+
+    fn inspect_with(&mut self, value: &JsValue, show_hidden: bool) -> RunResult<String> {
         let mut ctx = Context {
+            show_hidden,
+            max_depth: if show_hidden { 4 } else { MAX_DEPTH },
             seen: Vec::new(),
             circular: Vec::new(),
             indentation: 0,
@@ -132,7 +147,7 @@ impl Vm<'_> {
             ObjectClass::StringIterator { .. } => ("Object [String Iterator]".to_owned(), ["{", "}"], false, false),
             ObjectClass::Ordinary => (self.ordinary_prefix(id), ["{", "}"], false, false),
         };
-        if depth > MAX_DEPTH {
+        if depth > ctx.max_depth {
             return Ok(if is_array {
                 "[Array]".to_owned()
             } else if base.is_empty() {
@@ -179,6 +194,9 @@ impl Vm<'_> {
                     "... {remaining} more item{}",
                     if remaining == 1 { "" } else { "s" }
                 ));
+            }
+            if ctx.show_hidden {
+                output.push(format!("[length]: {len}"));
             }
         }
         // named properties (enumerable only), then symbols
@@ -234,7 +252,16 @@ impl Vm<'_> {
                 base
             } else if base.is_empty() {
                 "{}".to_owned()
-            } else if matches!(self.object(id).map(|o| &o.class), Some(ObjectClass::Function(_))) {
+            } else if matches!(
+                self.object(id).map(|o| &o.class),
+                Some(
+                    ObjectClass::Function(_)
+                        | ObjectClass::BoxedBool(_)
+                        | ObjectClass::BoxedNumber(_)
+                        | ObjectClass::BoxedString(_)
+                        | ObjectClass::BoxedSymbol(_)
+                )
+            ) {
                 base
             } else {
                 format!("{base} {{}}")
@@ -337,7 +364,7 @@ impl Vm<'_> {
                     format_string(&text, 0)
                 }
             }
-            PropertyKey::Symbol(symbol) => format!("[{}]", self.key_display(PropertyKey::Symbol(symbol))),
+            PropertyKey::Symbol(symbol) => self.key_display(PropertyKey::Symbol(symbol)),
         }
     }
 }
@@ -577,8 +604,6 @@ fn format_string(text: &str, indentation: usize) -> String {
 /// Whether a key prints unquoted.
 fn is_identifier(text: &str) -> bool {
     let mut chars = text.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

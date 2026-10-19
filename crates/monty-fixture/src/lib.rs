@@ -17,10 +17,8 @@ use std::{error::Error, fmt};
 
 use serde::Deserialize;
 
-/// The line that opens a monty header block.
-const BLOCK_START: &str = "# /// monty";
-/// The line that closes any PEP 723 block.
-const BLOCK_END: &str = "# ///";
+/// The comment prefix of a Python (or shell) fixture.
+const PYTHON_PREFIX: &str = "#";
 
 /// A fixture's settings; every field defaults to off, so a file without a header gets
 /// `Header::default()`. Unknown keys are errors, so a typo can't silently drop a setting.
@@ -54,7 +52,14 @@ impl Header {
     /// Errors on malformed TOML, unknown keys, an unterminated, repeated or misplaced block, and
     /// any other `# ///` line, such as a misspelt block type.
     pub fn parse(source: &str) -> Result<Self, HeaderError> {
-        match extract_block(source)? {
+        Self::parse_with_prefix(source, PYTHON_PREFIX)
+    }
+
+    /// [`parse`](Self::parse) for a language whose line comments start with
+    /// `prefix` (`//` for JavaScript): the block is `// /// monty` … `// ///`.
+    pub fn parse_with_prefix(source: &str, prefix: &str) -> Result<Self, HeaderError> {
+        let markers = Markers::new(prefix);
+        match extract_block(source, &markers)? {
             Some((start, toml)) => toml::from_str(&toml)
                 .map_err(|err| HeaderError(format!("in the header opening on line {}: {err}", start + 1))),
             None => Ok(Self::default()),
@@ -102,28 +107,62 @@ impl fmt::Display for HeaderError {
 
 impl Error for HeaderError {}
 
-/// Returns the index of the `# /// monty` line and the TOML inside its block, each line's `#`
-/// prefix removed.
+/// The block delimiters for one comment prefix.
+struct Markers {
+    prefix: String,
+    /// `# /// monty`: the line that opens a monty header block.
+    start: String,
+    /// `# ///`: the line that closes any PEP 723 block.
+    end: String,
+    /// `# `: what every body line starts with.
+    body: String,
+}
+
+impl Markers {
+    fn new(prefix: &str) -> Self {
+        Self {
+            prefix: prefix.to_owned(),
+            start: format!("{prefix} /// monty"),
+            end: format!("{prefix} ///"),
+            body: format!("{prefix} "),
+        }
+    }
+
+    /// Whether a comment looks like a PEP 723 block delimiter, such as `#/// monty` or `# ///monty`.
+    fn is_block_marker(&self, line: &str) -> bool {
+        line.starts_with(&self.prefix)
+            && line
+                .trim_start_matches(|c| self.prefix.contains(c))
+                .trim_start()
+                .starts_with("///")
+    }
+}
+
+/// Returns the index of the `# /// monty` line and the TOML inside its block, each line's
+/// comment prefix removed.
 ///
 /// The block must sit in the file's leading comment and blank lines, so code and strings can't
 /// configure a fixture; a block marker anywhere after them is an error rather than ignored.
-fn extract_block(source: &str) -> Result<Option<(usize, String)>, HeaderError> {
+fn extract_block(source: &str, markers: &Markers) -> Result<Option<(usize, String)>, HeaderError> {
     let mut block: Option<(usize, String)> = None;
     let mut before_code = true;
     let mut lines = source.lines().enumerate();
     while let Some((index, line)) = lines.next() {
-        before_code &= line.starts_with('#') || line.trim().is_empty();
-        if !is_block_marker(line) {
+        before_code &= line.starts_with(&markers.prefix) || line.trim().is_empty();
+        if !markers.is_block_marker(line) {
             continue;
         }
-        let problem = if line != BLOCK_START {
-            format!("`{line}` is not `{BLOCK_START}` or a block's closing `{BLOCK_END}`")
+        let problem = if line != markers.start {
+            format!(
+                "`{line}` is not `{}` or a block's closing `{}`",
+                markers.start, markers.end
+            )
         } else if !before_code {
-            format!("`{BLOCK_START}` must come before any code")
+            format!("`{}` must come before any code", markers.start)
         } else if block.is_some() {
-            format!("second `{BLOCK_START}` block")
+            format!("second `{}` block", markers.start)
         } else {
-            block = Some((index, read_block_body(&mut lines, index)?));
+            block = Some((index, read_block_body(&mut lines, index, markers)?));
             continue;
         };
         return Err(HeaderError(format!("line {}: {problem}", index + 1)));
@@ -135,20 +174,22 @@ fn extract_block(source: &str) -> Result<Option<(usize, String)>, HeaderError> {
 fn read_block_body<'a>(
     lines: &mut impl Iterator<Item = (usize, &'a str)>,
     start: usize,
+    markers: &Markers,
 ) -> Result<String, HeaderError> {
     let mut toml = String::new();
     for (index, line) in lines {
-        if line == BLOCK_END {
+        if line == markers.end {
             return Ok(toml);
         }
-        // PEP 723: every body line is `#` alone or `# ` followed by content.
-        let content = if line == "#" {
+        // PEP 723: every body line is the prefix alone or the prefix, a space and content.
+        let content = if line == markers.prefix {
             ""
         } else {
-            line.strip_prefix("# ").ok_or_else(|| {
+            line.strip_prefix(&markers.body).ok_or_else(|| {
                 HeaderError(format!(
-                    "line {}: `{line}` inside the header is not a `# ` comment",
-                    index + 1
+                    "line {}: `{line}` inside the header is not a `{}` comment",
+                    index + 1,
+                    markers.body.trim_end()
                 ))
             })?
         };
@@ -156,12 +197,8 @@ fn read_block_body<'a>(
         toml.push('\n');
     }
     Err(HeaderError(format!(
-        "line {}: `{BLOCK_START}` is never closed",
-        start + 1
+        "line {}: `{}` is never closed",
+        start + 1,
+        markers.start
     )))
-}
-
-/// Whether a comment looks like a PEP 723 block delimiter, such as `#/// monty` or `# ///monty`.
-fn is_block_marker(line: &str) -> bool {
-    line.starts_with('#') && line.trim_start_matches('#').trim_start().starts_with("///")
 }

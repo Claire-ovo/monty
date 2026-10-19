@@ -109,7 +109,8 @@ fn format_directives(vm: &mut Vm<'_>, args: &[JsValue]) -> RunResult<String> {
             'j' => {
                 out.push_str(&super::json::stringify_to_string(vm, value)?.unwrap_or_else(|| "undefined".to_owned()));
             }
-            'o' | 'O' => out.push_str(&vm.inspect(value)?),
+            'o' => out.push_str(&vm.inspect_verbose(value)?),
+            'O' => out.push_str(&vm.inspect(value)?),
             _ => {} // `%c` consumes its argument and prints nothing
         }
     }
