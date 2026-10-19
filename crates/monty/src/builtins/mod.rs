@@ -121,7 +121,9 @@ impl FromStr for Builtins {
         // Only matches names that are true Python builtins (accessible without imports).
         if let Ok(b) = BuiltinsFunctions::from_str(s) {
             Ok(Self::Function(b))
-        } else if let Ok(exc) = ExcType::from_str(s) {
+        } else if let Ok(exc) = ExcType::from_str(s)
+            && !exc.is_javascript()
+        {
             Ok(Self::ExcType(exc))
         } else if let Some(t) = Type::from_builtin_name(s) {
             Ok(Self::Type(t))

@@ -79,6 +79,13 @@ pub fn exc_monty_to_py(py: Python<'_>, mut exc: MontyException) -> PyErr {
                 exceptions::PyOSError::new_err(msg)
             }
         }
+        // JavaScript error classes surface as the closest Python builtin until
+        // the bindings grow a JavaScript error hierarchy. TODO(js-bindings)
+        ExcType::Error | ExcType::EvalError | ExcType::UriError | ExcType::AggregateError => {
+            exceptions::PyException::new_err(msg)
+        }
+        ExcType::ReferenceError => exceptions::PyNameError::new_err(msg),
+        ExcType::RangeError => exceptions::PyValueError::new_err(msg),
         ExcType::RePatternError => {
             if let Ok(re_pattern_error) = get_re_pattern_error(py)
                 && let Ok(exc_instance) = re_pattern_error.call1((PyString::new(py, &msg),))

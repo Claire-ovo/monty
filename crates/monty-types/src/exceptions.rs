@@ -359,6 +359,24 @@ pub enum ExcType {
     SyntaxError,
     TypeError,
 
+    // --- JavaScript error classes ---
+    // Uncaught errors from the JavaScript sandbox (`monty-ecma`) name their
+    // nearest builtin class here; `TypeError` and `SyntaxError` are shared with
+    // Python. Python code never sees them: they are not Python builtins.
+    /// JavaScript's base `Error`, and any user subclass of it.
+    Error,
+    /// JavaScript `ReferenceError`: an undeclared name or a binding read in its temporal dead zone.
+    ReferenceError,
+    /// JavaScript `RangeError`: a value outside its allowed range, or stack exhaustion.
+    RangeError,
+    /// JavaScript `EvalError`.
+    EvalError,
+    /// JavaScript `URIError`.
+    #[strum(serialize = "URIError")]
+    UriError,
+    /// JavaScript `AggregateError`.
+    AggregateError,
+
     // --- Module-specific exception types ---
 
     // --- re module ---
@@ -453,9 +471,26 @@ impl ExcType {
                     | Self::UnsupportedOperation
                     | Self::TimeoutError
             ),
+            // JavaScript's `Error` is the base of every JavaScript error class
+            Self::Error => self.is_javascript() || matches!(self, Self::TypeError | Self::SyntaxError),
             // All other types only match exactly (handled by self == handler_type above)
             _ => false,
         }
+    }
+
+    /// Whether this is a JavaScript-only error class, which the Python
+    /// builtins must not expose and Python code can never raise.
+    #[must_use]
+    pub fn is_javascript(self) -> bool {
+        matches!(
+            self,
+            Self::Error
+                | Self::ReferenceError
+                | Self::RangeError
+                | Self::EvalError
+                | Self::UriError
+                | Self::AggregateError
+        )
     }
 }
 

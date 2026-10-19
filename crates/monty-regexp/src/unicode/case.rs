@@ -7,7 +7,8 @@
 //! UTF-16 surrogates.
 
 #[cfg(any(test, feature = "test-hooks"))]
-use std::{cell::Cell, mem};
+use std::cell::Cell;
+use std::mem;
 
 use super::{CodeUnitBuf, CodeUnits, MAX_STRING_LEN, StringError, is_in_table};
 
