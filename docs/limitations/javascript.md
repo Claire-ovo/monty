@@ -90,6 +90,9 @@ Differences within the available builtins:
 - `Array.prototype` lacks `group` and the locale methods; `String.prototype` lacks `localeCompare` with locales
     (it compares code units), `substr`, `anchor` and the other HTML methods. `String.prototype.normalize` uses the
     Unicode 17 tables vendored with the regexp engine rather than the host's ICU.
+- When coercing an index argument runs code that shrinks the array (`a.splice({ valueOf() { a.length = 1; return 0; } }, 5)`),
+    `splice` and `copyWithin` work on the shrunk array, where Node keeps the length it read first and leaves holes;
+    `fill`, `with` and `toSpliced` match Node.
 - `RegExp` is the ECMAScript engine vendored from QuickJS (`monty-regexp`): all flags (`dgimsuvy`), named groups,
     lookbehind, Unicode property escapes and `v`-mode set operations work, and `String.prototype.match`,
     `matchAll`, `replace`, `replaceAll`, `search` and `split` dispatch through the `Symbol.match`/`matchAll`/
