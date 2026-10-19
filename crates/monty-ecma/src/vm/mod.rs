@@ -22,6 +22,7 @@ use std::{collections::VecDeque, mem, string::ToString, sync::Arc};
 
 use monty_heap::ContainsHeap;
 use monty_types::{MontyException, OsPolicy, PrintWriter, ResourceError, ResourceTracker, StackFrame};
+use serde::{Deserialize, Serialize};
 
 use self::{
     generator::ResumeMode,
@@ -48,6 +49,7 @@ const CHECK_INTERVAL: u8 = 255;
 const MAX_REENTRANCY: usize = 200;
 
 /// Everything a session keeps between feeds.
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Session {
     pub heap: Heap,
     pub interns: Interns,
@@ -62,6 +64,14 @@ pub(crate) struct Session {
     pub next_call_id: u32,
     /// Where the clock, the zone and the entropy come from.
     pub os_policy: OsPolicy,
+}
+
+impl Session {
+    /// Rebuilds the lookup indexes a dump leaves out.
+    pub fn restore(&mut self) {
+        self.interns.restore_index();
+        self.script.restore_index();
+    }
 }
 
 /// The interpreter for one feed: the session plus the run-time stacks.
@@ -124,6 +134,7 @@ struct Frame {
 /// leaves the stack. Frames the job queue starts carry the continuation
 /// here instead of a Rust caller, so the dispatch loop stays flat and a
 /// host call can suspend from any of them.
+#[derive(Serialize, Deserialize)]
 pub(crate) enum Completion {
     /// Hand the value to the caller: push it, or return it at the stop depth.
     Deliver,
@@ -145,6 +156,7 @@ pub(crate) enum Completion {
 }
 
 /// What a frame does with its return value under `new`.
+#[derive(Serialize, Deserialize)]
 enum Construct {
     /// An ordinary call: the returned value.
     Call,

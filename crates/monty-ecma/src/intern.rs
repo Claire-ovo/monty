@@ -222,6 +222,16 @@ pub(crate) struct Interns {
 }
 
 impl Interns {
+    /// Rebuilds the string lookup a dump leaves out.
+    pub fn restore_index(&mut self) {
+        self.atom_ids = self
+            .atoms
+            .iter()
+            .enumerate()
+            .map(|(index, text)| (text.clone(), AtomId(u32::try_from(index).expect("atom count fits u32"))))
+            .collect();
+    }
+
     /// A table holding the static atoms and well-known symbols.
     pub fn new() -> Self {
         let mut this = Self {

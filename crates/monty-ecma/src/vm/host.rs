@@ -8,22 +8,23 @@
 //! a request made while a builtin runs a callback (`reentrancy > 0`) is an
 //! error instead.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use monty_types::{
     CallArgs, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, OsFunctionCall, PrintWriter,
     ResourceTracker, SourceRange, StackFrame, unstable::graph_parts,
 };
+use serde::{Deserialize, Serialize};
 
 use super::{
-    Delivery, Frame, Session, Step, Vm,
+    Completion, Construct, Delivery, Frame, Session, Step, Vm,
     promise::{Job, Timer},
 };
 use crate::{
     builtins::date,
     error::{RunResult, Throw},
     heap::{FunctionObject, HeapId, PropertyKey},
-    intern::AtomId,
+    intern::{AtomId, FunctionId},
     object_bridge::Importer,
     realm::ErrorKind,
     repl::exc_type_to_kind,
@@ -31,7 +32,7 @@ use crate::{
 };
 
 /// What a suspended feed is waiting for.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) enum HostRequest {
     /// `name(...args)` on an undeclared name.
     FunctionCall {
@@ -65,7 +66,7 @@ pub(crate) enum HostRequest {
 
 /// How a host clock answer (seconds since the epoch) becomes the suspended
 /// builtin's result.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(crate) enum OsAnswer {
     /// `Date.now()`: milliseconds.
     ClockMillis,
@@ -77,11 +78,12 @@ pub(crate) enum OsAnswer {
 
 /// The interpreter without its print sink, as a suspended feed keeps it
 /// between the request and the host's answer (it must cross threads, which
-/// a borrowed print callback cannot).
+/// a borrowed print callback cannot) and as a dump stores it.
+#[derive(Serialize, Deserialize)]
 pub(crate) struct ParkedVm {
     session: Session,
     stack: Vec<JsValue>,
-    frames: Vec<Frame>,
+    frames: Vec<SerializedFrame>,
     pending: Option<JsValue>,
     traceback: Vec<StackFrame>,
     ticks: u8,
@@ -96,7 +98,36 @@ pub(crate) struct ParkedVm {
     host_futures: Vec<(u32, HeapId)>,
 }
 
+/// A frame as a dump stores it: the function by id rather than by its
+/// shared code.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SerializedFrame {
+    function: FunctionId,
+    ip: usize,
+    op_start: usize,
+    base: usize,
+    operands: usize,
+    callee: Option<HeapId>,
+    new_target: JsValue,
+    construct: Construct,
+    generator: Option<HeapId>,
+    completion: Completion,
+}
+
 impl ParkedVm {
+    /// Rebuilds the indexes a dump leaves out; call once after deserializing.
+    pub(crate) fn restore(&mut self) {
+        self.session.restore();
+    }
+
+    pub(crate) fn tracker_mut(&mut self) -> &mut ResourceTracker {
+        &mut self.session.heap.tracker
+    }
+
+    pub(crate) fn script_name(&self) -> &str {
+        &self.session.script_name
+    }
+
     /// Reattaches the interpreter to a print sink.
     pub(crate) fn wake(self, print: PrintWriter<'_>) -> Vm<'_> {
         let Self {
@@ -116,6 +147,21 @@ impl ParkedVm {
             feed_result,
             host_futures,
         } = self;
+        let frames = frames
+            .into_iter()
+            .map(|frame| Frame {
+                function: Arc::clone(session.interns.function(frame.function)),
+                ip: frame.ip,
+                op_start: frame.op_start,
+                base: frame.base,
+                operands: frame.operands,
+                callee: frame.callee,
+                new_target: frame.new_target,
+                construct: frame.construct,
+                generator: frame.generator,
+                completion: frame.completion,
+            })
+            .collect();
         Vm {
             session,
             print,
@@ -167,6 +213,21 @@ impl Vm<'_> {
             feed_result,
             host_futures,
         } = self;
+        let frames = frames
+            .into_iter()
+            .map(|frame| SerializedFrame {
+                function: frame.function.id,
+                ip: frame.ip,
+                op_start: frame.op_start,
+                base: frame.base,
+                operands: frame.operands,
+                callee: frame.callee,
+                new_target: frame.new_target,
+                construct: frame.construct,
+                generator: frame.generator,
+                completion: frame.completion,
+            })
+            .collect();
         ParkedVm {
             session,
             stack,

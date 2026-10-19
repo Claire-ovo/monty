@@ -30,6 +30,7 @@ ahash = { workspace = true }
 chrono = { workspace = true }
 getrandom = "0.3"
 indexmap = { workspace = true, features = ["serde"] }
+minicbor-serde = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
 strum = { workspace = true }

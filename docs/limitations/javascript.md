@@ -176,5 +176,8 @@ Differences from the Python worker:
     run from the dispatch loop and can suspend. Prefer `await` on host functions that return futures.
 - Host objects (`object_id` on a call or lookup) and eager awaits are not produced.
 
-OS calls (the clock, sleeps, the filesystem), dumps and loads end the turn with an error; type checking
+Dumps (`Dump`/`Load`) capture an idle session or a feed suspended on the host, including parked generators,
+promises and timers; the format is the sandbox's own (`MONTYJS` magic, a CBOR body) and is not readable by the
+Python worker or vice versa.
+OS calls other than the clock (sleeps, the filesystem) end the turn with an error; type checking
 (`Configure.type_check`) is refused.

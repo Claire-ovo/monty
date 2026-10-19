@@ -2,14 +2,15 @@
 //!
 //! A feed runs until it completes, fails or suspends on the host: a call of
 //! an undeclared name (`FunctionCall`), a read of one (`NameLookup`) or
-//! promises waiting on host futures (`ResolveFutures`). Dumps are not
-//! supported yet.
+//! promises waiting on host futures (`ResolveFutures`). Idle and suspended
+//! sessions dump and load through `monty_ecma::dump`.
 
-use monty_ecma::{JsProgress, JsRepl, JsSuspension, JsSuspensionKind};
+use monty_ecma::{JsDump, JsProgress, JsRepl, JsSessionRef, JsSuspension, JsSuspensionKind, dump};
 use monty_proto::{
     pb,
     worker::{
-        Engine, Failed, Loaded, Outcome, PreFeed, SessionRef, Step, Suspension, error_event_from, protocol_violation,
+        Engine, Failed, Loaded, LoadedSession, Outcome, PreFeed, SessionRef, Step, Suspension, error_event_from,
+        protocol_violation,
     },
 };
 use monty_types::{
@@ -165,14 +166,36 @@ impl Engine for JsEngine {
         progress.tracker()
     }
 
-    fn dump(&self, _: &str, _: SessionRef<'_, Self>) -> Result<Vec<u8>, String> {
-        Err("dumps are not supported for JavaScript yet".to_owned())
+    fn dump(&self, _: &str, session: SessionRef<'_, Self>) -> Result<Vec<u8>, String> {
+        // the script name travels inside the session
+        dump(match session {
+            SessionRef::Idle(repl) => JsSessionRef::Idle(repl),
+            SessionRef::Suspended(progress) => JsSessionRef::Suspended(progress),
+        })
     }
 
-    fn load(&self, _: &[u8], _: &ResourceLimits) -> Result<Loaded<Self>, Box<pb::ChildEvent>> {
-        Err(Box::new(protocol_violation(
-            "dumps are not supported for JavaScript yet",
-        )))
+    fn load(&self, state: &[u8], limits: &ResourceLimits) -> Result<Loaded<Self>, Box<pb::ChildEvent>> {
+        let loaded = JsDump::load(state)
+            .map_err(|err| Box::new(protocol_violation(&format!("failed to load session: {err}"))))?;
+        // keep the snapshot's clocks and the stricter of its and this worker's limits
+        let (script_name, session) = match loaded {
+            JsDump::Idle(mut repl) => {
+                repl.tracker_mut().tighten_limits(limits);
+                (repl.script_name().to_owned(), LoadedSession::Idle(*repl))
+            }
+            JsDump::Suspended(mut suspension) => {
+                suspension.tracker_mut().tighten_limits(limits);
+                (
+                    suspension.script_name().to_owned(),
+                    LoadedSession::Suspended(*suspension),
+                )
+            }
+        };
+        Ok(Loaded {
+            script_name,
+            session,
+            restored: (),
+        })
     }
 
     fn adopt(&mut self, (): ()) {}

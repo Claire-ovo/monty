@@ -14,6 +14,7 @@
 mod builtins;
 mod bytecode;
 mod compile;
+mod dump;
 mod error;
 mod function;
 mod heap;
@@ -27,4 +28,5 @@ mod string;
 mod value;
 mod vm;
 
+pub use dump::{DUMP_VERSION, JsDump, JsSessionRef, dump};
 pub use repl::{JsProgress, JsRepl, JsStartError, JsSuspension, JsSuspensionKind};

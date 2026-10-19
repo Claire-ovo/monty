@@ -4,7 +4,7 @@
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use monty_proto::{
-    FrameReader, PROTOCOL_VERSION, WireFunctionCall, ext_result_to_proto, future_results_to_proto,
+    BudgetVec, FrameReader, PROTOCOL_VERSION, WireFunctionCall, ext_result_to_proto, future_results_to_proto,
     named_values_to_proto, pb, write_frame,
 };
 use monty_types::{DateTimeSource, ExtFunctionResult, MontyObject, NameLookupResult, NamedValues, OsPolicy};
@@ -413,5 +413,75 @@ fn host_clock_suspends_with_an_os_call() {
     assert_eq!(
         error.message.as_deref(),
         Some("The host clock cannot be read from a callback run by a builtin")
+    );
+}
+
+// =============================================================================
+// Dumps
+// =============================================================================
+
+fn dump(child: &mut ChildProc) -> BudgetVec<u8> {
+    child.send(pb::parent_request::Kind::Dump(pb::Dump {}));
+    match child.recv() {
+        pb::child_event::Kind::DumpResult(dump) => dump.state,
+        other => panic!("expected DumpResult, got {other:?}"),
+    }
+}
+
+#[test]
+fn idle_session_survives_a_dump_and_load() {
+    let mut child = ChildProc::spawn();
+    child.create_repl();
+    child.feed_complete("let total = 40; const re = /a(b)/; class Pt { constructor(x) { this.x = x; } } const pts = [new Pt(1), new Pt(2)];");
+    child.feed_complete("function* gen() { yield total; } const g = gen(); const m = new Map([[1, 'one']]);");
+    let state = dump(&mut child);
+    drop(child);
+
+    let mut fresh = ChildProc::spawn();
+    fresh.send(pb::parent_request::Kind::Load(pb::Load { state }));
+    let (_, event) = fresh.recv_turn();
+    assert!(matches!(event, pb::child_event::Kind::Ok(_)), "{event:?}");
+    assert_eq!(fresh.feed_complete("total += 2; total"), MontyObject::int(42));
+    assert_eq!(
+        fresh.feed_complete("re.exec('xab')[1] + pts.map((p) => p.x).join() + g.next().value + m.get(1)"),
+        MontyObject::string("b1,242one".to_owned())
+    );
+    let (_, event) = fresh.feed("undefinedName");
+    assert!(matches!(event, pb::child_event::Kind::NameLookup(_)), "{event:?}");
+}
+
+#[test]
+fn suspended_feed_survives_a_dump_and_load() {
+    let mut child = ChildProc::spawn();
+    child.create_repl();
+    let (_, event) = child.feed("let seen = []; async function run() { seen.push(await fetchData(1)); return seen.join('|') + host2(2); } run()");
+    let call = expect_function_call(event);
+    assert_eq!(call.function_name, "fetchData");
+    let state = dump(&mut child);
+    drop(child);
+
+    let mut fresh = ChildProc::spawn();
+    fresh.send(pb::parent_request::Kind::Load(pb::Load { state }));
+    let (_, event) = fresh.recv_turn();
+    let restored = expect_function_call(event);
+    assert_eq!(restored.function_name, "fetchData");
+    assert_eq!(restored.call_id, call.call_id);
+    let (_, event) = fresh.resume_call(
+        restored.call_id,
+        ExtFunctionResult::Return(MontyObject::string("a".to_owned())),
+    );
+    let second = expect_function_call(event);
+    assert_eq!(second.function_name, "host2");
+    assert_eq!(call_args(&second), vec![MontyObject::int(2)]);
+    let (_, event) = fresh.resume_call(
+        second.call_id,
+        ExtFunctionResult::Return(MontyObject::string("!".to_owned())),
+    );
+    let value = expect_complete(event);
+    // the module's completion value is the promise, which exports as its repr
+    assert_eq!(value, MontyObject::repr("#<Promise>".to_owned()));
+    assert_eq!(
+        fresh.feed_complete("seen"),
+        MontyObject::list(vec![MontyObject::string("a".to_owned())])
     );
 }

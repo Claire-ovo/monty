@@ -5,6 +5,8 @@
 
 use std::mem;
 
+use serde::{Deserialize, Serialize};
+
 use super::{Completion, Vm, generator::ResumeMode};
 use crate::{
     error::{RunResult, Throw},
@@ -15,6 +17,7 @@ use crate::{
 };
 
 /// One microtask.
+#[derive(Serialize, Deserialize)]
 pub(crate) enum Job {
     /// A settled promise's reaction, with the settlement it reacts to.
     Reaction { reaction: Reaction, settled: Settled },
@@ -29,6 +32,7 @@ pub(crate) enum Job {
 }
 
 /// A `setTimeout` / `setInterval` entry (its values are owned).
+#[derive(Serialize, Deserialize)]
 pub(crate) struct Timer {
     pub id: u32,
     /// When it fires on the virtual clock, in milliseconds.

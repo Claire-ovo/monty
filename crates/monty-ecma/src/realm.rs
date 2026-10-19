@@ -167,6 +167,16 @@ pub(crate) struct ScriptScope {
 }
 
 impl ScriptScope {
+    /// Rebuilds the name lookup a dump leaves out.
+    pub fn restore_index(&mut self) {
+        self.index = self
+            .names
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _))| (*name, u32::try_from(index).expect("binding count fits u32")))
+            .collect();
+    }
+
     /// The index of `name`, creating a `Hole` binding when it is new; a
     /// redeclaration takes the new constness.
     pub fn declare(&mut self, name: AtomId, is_const: bool) -> u32 {

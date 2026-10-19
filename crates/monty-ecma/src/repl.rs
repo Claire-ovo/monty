@@ -8,6 +8,7 @@ use monty_types::{
     OsPolicy, PrintWriter, ResourceError, ResourceLimits, ResourceTracker, SourceRange,
 };
 use oxc_allocator::Allocator;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     builtins,
@@ -31,6 +32,7 @@ const INITIAL_HEAP_CAPACITY: usize = 256;
 
 /// A JavaScript session: feed snippets with [`feed`](Self::feed); bindings,
 /// `globalThis` and the heap persist between them.
+#[derive(Serialize, Deserialize)]
 pub struct JsRepl {
     session: Session,
 }
@@ -51,6 +53,7 @@ pub enum JsProgress {
 
 /// A feed parked on a host round-trip: the whole interpreter is kept, and
 /// the matching `resume_*` method continues it with the host's answer.
+#[derive(Serialize, Deserialize)]
 pub struct JsSuspension {
     vm: ParkedVm,
     request: HostRequest,
@@ -118,6 +121,21 @@ impl JsSuspension {
 
     pub fn tracker(&self) -> &ResourceTracker {
         self.vm.tracker()
+    }
+
+    pub fn tracker_mut(&mut self) -> &mut ResourceTracker {
+        self.vm.tracker_mut()
+    }
+
+    /// The name of the suspended feed.
+    #[must_use]
+    pub fn script_name(&self) -> &str {
+        self.vm.script_name()
+    }
+
+    /// Rebuilds the indexes a dump leaves out; called by [`JsDump::load`](crate::JsDump::load).
+    pub(crate) fn restore(&mut self) {
+        self.vm.restore();
     }
 
     /// Answers a `FunctionCall` or an `OsCall`.
@@ -234,6 +252,17 @@ impl JsRepl {
     /// Mutable access to the tracker, for tightening limits on restore.
     pub fn tracker_mut(&mut self) -> &mut ResourceTracker {
         &mut self.session.heap.tracker
+    }
+
+    /// The name the running or last feed is reported under.
+    #[must_use]
+    pub fn script_name(&self) -> &str {
+        &self.session.script_name
+    }
+
+    /// Rebuilds the indexes a dump leaves out; called by [`JsDump::load`](crate::JsDump::load).
+    pub(crate) fn restore(&mut self) {
+        self.session.restore();
     }
 
     /// The filename the next feed's frames carry.
