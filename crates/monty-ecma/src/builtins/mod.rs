@@ -17,8 +17,10 @@ mod json;
 mod math;
 mod number;
 mod object;
+pub(crate) mod regexp;
 mod string;
 
+pub(crate) use regexp::regexp_error_message;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -171,6 +173,9 @@ natives! {
     StringProtoPadEnd => ("padEnd", 2, false, string::pad_end),
     StringProtoReplace => ("replace", 2, false, string::replace),
     StringProtoReplaceAll => ("replaceAll", 2, false, string::replace_all),
+    StringProtoMatch => ("match", 1, false, string::match_),
+    StringProtoMatchAll => ("matchAll", 1, false, string::match_all),
+    StringProtoSearch => ("search", 1, false, string::search),
     StringProtoAt => ("at", 1, false, string::at),
     StringProtoConcat => ("concat", 1, false, string::concat),
     StringProtoToString => ("toString", 0, false, string::to_string),
@@ -249,6 +254,26 @@ natives! {
     WeakSetProtoHas => ("has", 1, false, collections::weak_set_has),
     WeakSetProtoDelete => ("delete", 1, false, collections::weak_set_delete),
     ObjectGroupBy => ("groupBy", 2, false, collections::object_group_by),
+    // RegExp
+    RegExp => ("RegExp", 2, true, regexp::constructor),
+    RegExpProtoExec => ("exec", 1, false, regexp::exec),
+    RegExpProtoTest => ("test", 1, false, regexp::test),
+    RegExpProtoToString => ("toString", 0, false, regexp::proto_to_string),
+    RegExpProtoSource => ("source", 0, false, regexp::source),
+    RegExpProtoFlags => ("flags", 0, false, regexp::flags),
+    RegExpProtoGlobal => ("global", 0, false, regexp::global),
+    RegExpProtoIgnoreCase => ("ignoreCase", 0, false, regexp::ignore_case),
+    RegExpProtoMultiline => ("multiline", 0, false, regexp::multiline),
+    RegExpProtoDotAll => ("dotAll", 0, false, regexp::dot_all),
+    RegExpProtoUnicode => ("unicode", 0, false, regexp::unicode),
+    RegExpProtoUnicodeSets => ("unicodeSets", 0, false, regexp::unicode_sets),
+    RegExpProtoSticky => ("sticky", 0, false, regexp::sticky),
+    RegExpProtoHasIndices => ("hasIndices", 0, false, regexp::has_indices),
+    RegExpProtoMatch => ("[Symbol.match]", 1, false, regexp::symbol_match),
+    RegExpProtoMatchAll => ("[Symbol.matchAll]", 1, false, regexp::symbol_match_all),
+    RegExpProtoReplace => ("[Symbol.replace]", 2, false, regexp::symbol_replace),
+    RegExpProtoSearch => ("[Symbol.search]", 1, false, regexp::symbol_search),
+    RegExpProtoSplit => ("[Symbol.split]", 2, false, regexp::symbol_split),
     // JSON
     JsonStringify => ("stringify", 3, false, json::stringify),
     JsonParse => ("parse", 2, false, json::parse),
@@ -308,6 +333,7 @@ pub(crate) fn create_realm(vm: &mut Vm<'_>) {
     number::install(vm, global);
     error::install(vm, global);
     collections::install(vm, global);
+    regexp::install(vm, global);
     math::install(vm, global);
     json::install(vm, global);
     console::install(vm, global);
@@ -363,6 +389,17 @@ pub(crate) fn install_symbol_function(
 pub(crate) fn install_value(vm: &mut Vm<'_>, target: HeapId, name: &str, value: JsValue, flags: PropFlags) {
     let name = vm.session.interns.intern_str(name);
     vm.define_with_flags(target, PropertyKey::Atom(name), value, flags);
+}
+
+/// Defines `Symbol.toStringTag` on a prototype.
+pub(crate) fn install_tag(vm: &mut Vm<'_>, prototype: HeapId, tag: &str) {
+    let tag = vm.atom_value(tag);
+    vm.define_with_flags(
+        prototype,
+        PropertyKey::Symbol(WellKnownSymbol::ToStringTag.id()),
+        tag,
+        PropFlags::CONFIGURABLE,
+    );
 }
 
 /// Defines a getter by name.

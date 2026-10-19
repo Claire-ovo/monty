@@ -4,13 +4,14 @@ use oxc_ast::ast::{
     Argument, ArrayExpressionElement, ArrowFunctionBody, ArrowFunctionExpression, AssignmentExpression,
     AssignmentOperator, AssignmentTarget, BinaryOperator, CallExpression, ChainElement, ChainExpression, Expression,
     Function, IdentifierReference, LogicalOperator, MemberExpression, NewExpression, ObjectExpression,
-    ObjectPropertyKind, PropertyKey, PropertyKind, SimpleAssignmentTarget, TemplateLiteral, UnaryOperator,
-    UpdateExpression, UpdateOperator,
+    ObjectPropertyKind, PropertyKey, PropertyKind, RegExpFlags, RegExpLiteral, SimpleAssignmentTarget, TemplateLiteral,
+    UnaryOperator, UpdateExpression, UpdateOperator,
 };
 use oxc_span::GetSpan;
 
 use super::{Compiler, FunctionBody, FunctionSpec, Place, Resolved, atom_operand, scope_of, symbol_of};
 use crate::{
+    builtins::regexp_error_message,
     bytecode::Opcode,
     error::CompileError,
     function::FunctionKind,
@@ -163,7 +164,7 @@ impl<'c> Compiler<'c> {
             Expression::ClassExpression(class) => self.compile_class(class, name),
             Expression::AwaitExpression(_) => Err(CompileError::unsupported("async functions", Self::span_of(expr))),
             Expression::YieldExpression(_) => Err(CompileError::unsupported("generators", Self::span_of(expr))),
-            Expression::RegExpLiteral(_) => Err(CompileError::unsupported("regular expressions", Self::span_of(expr))),
+            Expression::RegExpLiteral(lit) => self.compile_regexp(lit),
             Expression::BigIntLiteral(_) => Err(CompileError::unsupported("BigInt", Self::span_of(expr))),
             Expression::TaggedTemplateExpression(_) => {
                 Err(CompileError::unsupported("tagged templates", Self::span_of(expr)))
@@ -816,6 +817,36 @@ impl<'c> Compiler<'c> {
         } else {
             Ok(pending + 1)
         }
+    }
+
+    /// A regular expression literal: validated here so an invalid pattern is
+    /// the early `SyntaxError` it is in Node, then built afresh on every
+    /// evaluation (each evaluation of a literal is a new object).
+    fn compile_regexp(&mut self, lit: &'c RegExpLiteral<'c>) -> Result<(), CompileError> {
+        let pattern = lit.regex.pattern.text.as_str();
+        let flags: String = [
+            (RegExpFlags::D, 'd'),
+            (RegExpFlags::G, 'g'),
+            (RegExpFlags::I, 'i'),
+            (RegExpFlags::M, 'm'),
+            (RegExpFlags::S, 's'),
+            (RegExpFlags::U, 'u'),
+            (RegExpFlags::V, 'v'),
+            (RegExpFlags::Y, 'y'),
+        ]
+        .into_iter()
+        .filter(|(flag, _)| lit.regex.flags.contains(*flag))
+        .map(|(_, letter)| letter)
+        .collect();
+        let pattern_units: Vec<u16> = pattern.encode_utf16().collect();
+        let flag_units: Vec<u16> = flags.encode_utf16().collect();
+        if let Err(error) = monty_regexp::compile(&pattern_units, &flag_units) {
+            let message = regexp_error_message(pattern, &flags, &error);
+            return Err(CompileError::syntax(message, (lit.span.start, lit.span.end)));
+        }
+        let pattern = atom_operand(self.intern_units(pattern_units.into_iter()))?;
+        let flags = atom_operand(self.intern_str(&flags))?;
+        self.builder().emit_u16_u16(Opcode::MakeRegExp, pattern, flags)
     }
 
     fn compile_object(&mut self, object: &'c ObjectExpression<'c>) -> Result<(), CompileError> {

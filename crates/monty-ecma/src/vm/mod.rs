@@ -21,6 +21,7 @@ use monty_heap::ContainsHeap;
 use monty_types::{MontyException, PrintWriter, ResourceError, ResourceTracker, StackFrame};
 
 use crate::{
+    builtins::regexp,
     bytecode::{Code, Opcode},
     error::{RunResult, Throw, stack_frame},
     function::Function,
@@ -875,6 +876,14 @@ impl<'p> Vm<'p> {
                 let parent = self.pop();
                 let class = self.make_class(constructor, parent)?;
                 self.stack.push(class);
+            }
+            Opcode::MakeRegExp => {
+                let pattern = AtomId::from_u16(self.operand_u16());
+                let flags = AtomId::from_u16(self.operand_u16());
+                let source = self.session.interns.atom(pattern).clone();
+                let flags = self.session.interns.atom(flags).clone();
+                let regexp = regexp::create(self, source, &flags)?;
+                self.stack.push(regexp);
             }
             Opcode::Call => {
                 let count = usize::from(self.operand_u8());

@@ -9,6 +9,7 @@ use super::{
     ops::Hint,
 };
 use crate::{
+    builtins::regexp,
     error::{RunResult, Throw},
     heap::{HeapId, IterKind, JsHeapData, JsObject, ObjectClass, PropFlags, PropertyKey, Slot},
     intern::{AtomId, StaticAtom, WellKnownSymbol},
@@ -985,6 +986,7 @@ impl Vm<'_> {
                     }),
                 }
             }
+            Some(ObjectClass::RegExpStringIterator { .. }) => regexp::iterator_step(self, id)?,
             _ => return Ok(IteratorStep::NotBuiltin),
         };
         Ok(step.map_or(IteratorStep::Done, IteratorStep::Value))

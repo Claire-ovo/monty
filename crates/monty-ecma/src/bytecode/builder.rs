@@ -432,6 +432,7 @@ impl Opcode {
             Self::SuperCall => 1 - operand,
             Self::SuperCallSpread => 0,
             Self::MakeClass => -1,
+            Self::MakeRegExp => 1,
             Self::ReturnUndefined | Self::ThrowError | Self::Rethrow => 0,
         }
     }

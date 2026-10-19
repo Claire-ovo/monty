@@ -27,6 +27,12 @@ impl RegExpFlags {
         self.0
     }
 
+    /// Rebuilds flags from [`bits`](Self::bits), for an embedder that stores them.
+    #[must_use]
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
     #[must_use]
     pub const fn contains(self, flag: Self) -> bool {
         (self.0 & flag.0) != 0

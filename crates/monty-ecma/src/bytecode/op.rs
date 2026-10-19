@@ -249,6 +249,8 @@ pub(crate) enum Opcode {
     /// `value` → `value`: throw `TypeError` when nullish (destructuring `null`).
     /// Operand: u16 atom of the first property destructured (empty: none).
     RequireObjectCoercible = 144,
+    /// Push a new `RegExp` object for a literal. Operands: u16 pattern atom, u16 flags atom.
+    MakeRegExp = 145,
 }
 
 /// How many operand bytes follow an opcode.
@@ -373,7 +375,9 @@ impl Opcode {
             | Self::JumpIfNullishKeep
             | Self::JumpIfUndefinedKeep
             | Self::IteratorNext => OperandShape::I16,
-            Self::LoadLocalChecked | Self::LoadCellChecked | Self::LoadScript => OperandShape::U16U16,
+            Self::LoadLocalChecked | Self::LoadCellChecked | Self::LoadScript | Self::MakeRegExp => {
+                OperandShape::U16U16
+            }
             Self::ThrowError => OperandShape::U8U16,
         }
     }

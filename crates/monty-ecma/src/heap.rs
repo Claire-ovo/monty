@@ -9,11 +9,13 @@
 use std::{
     mem,
     ops::{Deref, DerefMut},
+    sync::Arc,
 };
 
 use ahash::AHashMap;
 use indexmap::IndexMap;
 pub(crate) use monty_heap::{HeapId, HeapObject, Payload};
+use monty_regexp::{CompiledRegExp, RegExpFlags};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -284,6 +286,35 @@ pub(crate) enum ObjectClass {
         index: u32,
         kind: IterKind,
     },
+    RegExp(Box<RegExpData>),
+    /// The iterator `matchAll` returns: `regexp` is an owned reference to a
+    /// private copy of the pattern whose `lastIndex` tracks the position.
+    RegExpStringIterator {
+        regexp: HeapId,
+        string: JsString,
+        done: bool,
+    },
+}
+
+/// A `RegExp` object's internal slots: the pattern text and flags it was
+/// built from. The compiled program is derived from them on first use (and
+/// again after a restore), so it is never serialized.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct RegExpData {
+    #[serde(rename = "S")]
+    pub source: JsString,
+    /// `RegExpFlags` bits.
+    #[serde(rename = "F")]
+    pub flags: u16,
+    #[serde(skip)]
+    pub program: Option<Arc<CompiledRegExp>>,
+}
+
+impl RegExpData {
+    /// The typed flags.
+    pub fn flags(&self) -> RegExpFlags {
+        RegExpFlags::from_bits(self.flags)
+    }
 }
 
 /// The storage of `Map`, `Set` and the weak collections: insertion-ordered
@@ -373,6 +404,7 @@ impl ObjectClass {
             Self::Function(function) => function.for_each_child(on_child),
             Self::ArrayIterator { array, .. } => on_child(*array),
             Self::MapIterator { map, .. } => on_child(*map),
+            Self::RegExpStringIterator { regexp, .. } => on_child(*regexp),
             Self::Map(data) | Self::Set(data) | Self::WeakMap(data) | Self::WeakSet(data) => {
                 data.for_each_child(on_child);
             }
@@ -385,6 +417,7 @@ impl ObjectClass {
             Self::Function(function) => function.dec_ref_ids(stack),
             Self::ArrayIterator { array, .. } => stack.push(*array),
             Self::MapIterator { map, .. } => stack.push(*map),
+            Self::RegExpStringIterator { regexp, .. } => stack.push(*regexp),
             Self::Map(data) | Self::Set(data) | Self::WeakMap(data) | Self::WeakSet(data) => data.dec_ref_ids(stack),
             _ => {}
         }

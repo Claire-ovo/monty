@@ -5,7 +5,9 @@
 
 use std::mem;
 
-use super::{NativeFn, arg, install_constructor, install_function, install_getter, raw_object, require_callable};
+use super::{
+    NativeFn, arg, install_constructor, install_function, install_getter, install_tag, raw_object, require_callable,
+};
 use crate::{
     error::RunResult,
     heap::{HeapId, IterKind, MapData, MapEntry, ObjectClass, PropFlags, PropertyKey},
@@ -131,17 +133,6 @@ pub(super) fn install(vm: &mut Vm<'_>, global: HeapId) {
     vm.session.realm.set_iterator_prototype = set_iterator_prototype;
     install_function(vm, set_iterator_prototype, NativeFn::ArrayIteratorNext);
     install_tag(vm, set_iterator_prototype, "Set Iterator");
-}
-
-/// Defines `Symbol.toStringTag` on a prototype.
-fn install_tag(vm: &mut Vm<'_>, prototype: HeapId, tag: &str) {
-    let tag = vm.atom_value(tag);
-    vm.define_with_flags(
-        prototype,
-        PropertyKey::Symbol(WellKnownSymbol::ToStringTag.id()),
-        tag,
-        PropFlags::CONFIGURABLE,
-    );
 }
 
 /// The collection a method was called on, or V8's incompatible-receiver error.

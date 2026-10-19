@@ -1,8 +1,11 @@
 //! `String` and `String.prototype`, over UTF-16 code units.
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, slice};
 
-use super::{NativeFn, arg, install_constructor, install_function, install_symbol_function, integer_arg, raw_object};
+use super::{
+    NativeFn, NativeImpl, arg, install_constructor, install_function, install_symbol_function, integer_arg, key,
+    raw_object, regexp,
+};
 use crate::{
     error::RunResult,
     heap::{HeapId, ObjectClass, PropFlags, PropertyKey},
@@ -42,6 +45,9 @@ pub(super) fn install(vm: &mut Vm<'_>, global: HeapId) {
         NativeFn::StringProtoPadEnd,
         NativeFn::StringProtoReplace,
         NativeFn::StringProtoReplaceAll,
+        NativeFn::StringProtoMatch,
+        NativeFn::StringProtoMatchAll,
+        NativeFn::StringProtoSearch,
         NativeFn::StringProtoAt,
         NativeFn::StringProtoConcat,
         NativeFn::StringProtoToString,
@@ -273,6 +279,11 @@ pub(super) fn trim_end(vm: &mut Vm<'_>, this: &JsValue, _: &[JsValue], _: bool) 
 
 pub(super) fn split(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
     let string = this_string(vm, this, "split")?;
+    let separator = arg(args, 0);
+    if let Some(method) = protocol_method(vm, separator, WellKnownSymbol::Split)? {
+        let limit = arg(args, 1).clone_with_heap(&vm.session.heap);
+        return call_protocol(vm, method, separator, string, vec![limit]);
+    }
     let limit = match args.get(1) {
         None | Some(JsValue::Undefined) => usize::MAX,
         Some(value) => {
@@ -284,7 +295,7 @@ pub(super) fn split(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) 
     if limit == 0 {
         return vm.new_array(parts);
     }
-    let separator = match arg(args, 0) {
+    let separator = match separator {
         JsValue::Undefined => {
             parts.push(vm.alloc_string(string)?);
             return vm.new_array(parts);
@@ -365,20 +376,45 @@ pub(super) fn pad_end(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool
     pad(vm, this, args, false)
 }
 
-/// `replace` / `replaceAll` with a string pattern and a string or function replacement.
+/// `replace` / `replaceAll`: a pattern with a `Symbol.replace` method (a
+/// regexp) handles itself; otherwise a string pattern is matched literally
+/// with a string or function replacement.
 fn replace_impl(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], all: bool) -> RunResult<JsValue> {
     let string = this_string(vm, this, if all { "replaceAll" } else { "replace" })?;
-    let pattern = vm.coerce_string(arg(args, 0))?.to_units();
+    let pattern_value = arg(args, 0);
     let replacement = arg(args, 1);
+    if !pattern_value.is_nullish() {
+        if all && is_regexp(vm, pattern_value)? && !flags_include(vm, pattern_value, b'g', "replaceAll")? {
+            return Err(vm.type_error("String.prototype.replaceAll called with a non-global RegExp argument"));
+        }
+        if let Some(method) = protocol_method(vm, pattern_value, WellKnownSymbol::Replace)? {
+            let replacement = replacement.clone_with_heap(&vm.session.heap);
+            return call_protocol(vm, method, pattern_value, string, vec![replacement]);
+        }
+    }
+    let pattern = vm.coerce_string(pattern_value)?.to_units();
+    let template = if vm.is_callable(replacement) {
+        None
+    } else {
+        Some(vm.coerce_string(replacement)?.to_units())
+    };
     let units = string.to_units();
     let mut out: Vec<u16> = Vec::with_capacity(units.len());
     let mut start = 0;
     let mut last_end = 0;
     while let Some(found) = find_units(&units, &pattern, start) {
         out.extend_from_slice(&units[last_end..found]);
-        let matched = JsString::from_units(&pattern);
-        if vm.is_callable(replacement) {
-            let matched_value = vm.alloc_string(matched)?;
+        if let Some(template) = &template {
+            let context = MatchContext {
+                subject: &units,
+                position: found,
+                matched: &pattern,
+                captures: &[],
+                groups: None,
+            };
+            get_substitution(vm, template, &context, &mut out)?;
+        } else {
+            let matched_value = vm.alloc_string(JsString::from_units(&pattern))?;
             let whole = vm.alloc_string(string.clone())?;
             let result = vm.call(
                 replacement.clone_with_heap(&vm.session.heap),
@@ -388,9 +424,6 @@ fn replace_impl(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], all: bool) ->
             let text = vm.coerce_string(&result);
             result.drop_with(&mut vm.session.heap);
             out.extend(text?.units());
-        } else {
-            let template = vm.coerce_string(replacement)?.to_units();
-            expand_replacement(&template, &units, found, &pattern, &mut out);
         }
         last_end = found + pattern.len();
         start = if pattern.is_empty() { found + 1 } else { last_end };
@@ -405,29 +438,252 @@ fn replace_impl(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], all: bool) ->
     string_result(vm, JsString::from_units(&out))
 }
 
-/// `GetSubstitution` for the `$$`, `$&`, `` $` `` and `$'` patterns.
-fn expand_replacement(template: &[u16], subject: &[u16], position: usize, matched: &[u16], out: &mut Vec<u16>) {
+/// The pieces `GetSubstitution` expands a replacement template against.
+pub(super) struct MatchContext<'a> {
+    pub subject: &'a [u16],
+    /// Where the match starts in `subject`.
+    pub position: usize,
+    pub matched: &'a [u16],
+    /// Captures 1..n; `None` for a group that did not participate.
+    pub captures: &'a [Option<JsString>],
+    /// The named-groups object, when the pattern has named groups.
+    pub groups: Option<&'a JsValue>,
+}
+
+/// `GetSubstitution`: expands `$$`, `$&`, `` $` ``, `$'`, `$n`, `$nn` and
+/// `$<name>` in `template` into `out`; anything else stays literal.
+pub(super) fn get_substitution(
+    vm: &mut Vm<'_>,
+    template: &[u16],
+    context: &MatchContext<'_>,
+    out: &mut Vec<u16>,
+) -> RunResult<()> {
     let dollar = u16::from(b'$');
+    let digit = |unit: u16| {
+        (u16::from(b'0')..=u16::from(b'9'))
+            .contains(&unit)
+            .then(|| usize::from(unit - u16::from(b'0')))
+    };
+    let group_count = context.captures.len();
     let mut i = 0;
     while i < template.len() {
         let unit = template[i];
-        if unit == dollar && i + 1 < template.len() {
-            match template[i + 1] {
-                u if u == dollar => out.push(dollar),
-                u if u == u16::from(b'&') => out.extend_from_slice(matched),
-                u if u == u16::from(b'`') => out.extend_from_slice(&subject[..position]),
-                u if u == u16::from(b'\'') => out.extend_from_slice(&subject[position + matched.len()..]),
-                other => {
-                    out.push(dollar);
-                    out.push(other);
-                }
-            }
-            i += 2;
-        } else {
+        if unit != dollar || i + 1 >= template.len() {
             out.push(unit);
             i += 1;
+            continue;
+        }
+        let next = template[i + 1];
+        i += 2;
+        let literal = |out: &mut Vec<u16>| {
+            out.push(dollar);
+            out.push(next);
+        };
+        if next == dollar {
+            out.push(dollar);
+        } else if next == u16::from(b'&') {
+            out.extend_from_slice(context.matched);
+        } else if next == u16::from(b'`') {
+            out.extend_from_slice(&context.subject[..context.position]);
+        } else if next == u16::from(b'\'') {
+            let after = (context.position + context.matched.len()).min(context.subject.len());
+            out.extend_from_slice(&context.subject[after..]);
+        } else if let Some(first) = digit(next) {
+            // `$nn` when that group exists, else `$n` and the second digit stays literal
+            let two_digit = template
+                .get(i)
+                .and_then(|unit| digit(*unit))
+                .map(|second| first * 10 + second)
+                .filter(|n| (1..=group_count).contains(n));
+            if let Some(n) = two_digit {
+                push_capture(context, n, out);
+                i += 1;
+            } else if (1..=group_count).contains(&first) {
+                push_capture(context, first, out);
+            } else {
+                literal(out);
+            }
+        } else if next == u16::from(b'<') {
+            let close = context
+                .groups
+                .and_then(|_| template[i..].iter().position(|unit| *unit == u16::from(b'>')));
+            match (context.groups, close) {
+                (Some(groups), Some(close)) => {
+                    let name = JsString::from_units(&template[i..i + close]);
+                    i += close + 1;
+                    let name_value = vm.alloc_string(name)?;
+                    let key = vm.coerce_key(name_value)?;
+                    let value = vm.get(groups, key)?;
+                    if value != JsValue::Undefined {
+                        let text = vm.coerce_string(&value);
+                        value.drop_with(&mut vm.session.heap);
+                        out.extend(text?.units());
+                    }
+                }
+                _ => literal(out),
+            }
+        } else {
+            literal(out);
         }
     }
+    Ok(())
+}
+
+/// Appends capture `n` (1-based) when it participated.
+fn push_capture(context: &MatchContext<'_>, n: usize, out: &mut Vec<u16>) {
+    if let Some(Some(capture)) = context.captures.get(n - 1) {
+        out.extend(capture.units());
+    }
+}
+
+/// `GetMethod(value, symbol)` for an object argument: the protocol method a
+/// regexp-like value supplies, `None` for a primitive or an absent method.
+fn protocol_method(vm: &mut Vm<'_>, value: &JsValue, symbol: WellKnownSymbol) -> RunResult<Option<JsValue>> {
+    if !value.is_object() {
+        return Ok(None);
+    }
+    let method = vm.get(value, PropertyKey::Symbol(symbol.id()))?;
+    if method.is_nullish() {
+        method.drop_with(&mut vm.session.heap);
+        Ok(None)
+    } else if vm.is_callable(&method) {
+        Ok(Some(method))
+    } else {
+        let shown = vm.inspect_short(&method);
+        method.drop_with(&mut vm.session.heap);
+        let receiver = vm.inspect_short(value)?;
+        let key = vm.key_display(PropertyKey::Symbol(symbol.id()));
+        Err(vm.type_error(&format!(
+            "'{}' returned for property '{key}' of object '{receiver}' is not a function",
+            shown?
+        )))
+    }
+}
+
+/// Calls a protocol method as `receiver[symbol](string, …extra)`, consuming `method` and `extra`.
+fn call_protocol(
+    vm: &mut Vm<'_>,
+    method: JsValue,
+    receiver: &JsValue,
+    string: JsString,
+    extra: Vec<JsValue>,
+) -> RunResult<JsValue> {
+    let string = match vm.alloc_string(string) {
+        Ok(string) => string,
+        Err(err) => {
+            vm.drop_all(method, extra);
+            return Err(err);
+        }
+    };
+    let mut call_args = vec![string];
+    call_args.extend(extra);
+    vm.call(method, receiver.clone_with_heap(&vm.session.heap), call_args)
+}
+
+/// `IsRegExp`: an object whose `Symbol.match` is truthy, or a `RegExp` without one.
+fn is_regexp(vm: &mut Vm<'_>, value: &JsValue) -> RunResult<bool> {
+    let JsValue::Ref(id) = value else {
+        return Ok(false);
+    };
+    let matcher = vm.get(value, PropertyKey::Symbol(WellKnownSymbol::Match.id()))?;
+    let result = if matcher == JsValue::Undefined {
+        matches!(vm.object(*id).map(|o| &o.class), Some(ObjectClass::RegExp(_)))
+    } else {
+        vm.to_boolean(&matcher)
+    };
+    matcher.drop_with(&mut vm.session.heap);
+    Ok(result)
+}
+
+/// Whether `ToString(Get(regexp, "flags"))` contains `flag`.
+fn flags_include(vm: &mut Vm<'_>, regexp: &JsValue, flag: u8, method: &str) -> RunResult<bool> {
+    let key = key(vm, "flags");
+    let flags = vm.get(regexp, key)?;
+    if flags.is_nullish() {
+        flags.drop_with(&mut vm.session.heap);
+        return Err(vm.type_error(&format!(
+            "The .flags property of the argument to String.prototype.{method} cannot be null or undefined"
+        )));
+    }
+    let text = vm.coerce_string(&flags);
+    flags.drop_with(&mut vm.session.heap);
+    Ok(text?.units().any(|unit| unit == u16::from(flag)))
+}
+
+pub(super) fn match_(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let string = this_string(vm, this, "match")?;
+    regexp_dispatch(
+        vm,
+        string,
+        arg(args, 0),
+        WellKnownSymbol::Match,
+        None,
+        regexp::symbol_match,
+    )
+}
+
+pub(super) fn search(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let string = this_string(vm, this, "search")?;
+    regexp_dispatch(
+        vm,
+        string,
+        arg(args, 0),
+        WellKnownSymbol::Search,
+        None,
+        regexp::symbol_search,
+    )
+}
+
+pub(super) fn match_all(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let string = this_string(vm, this, "matchAll")?;
+    let regexp_value = arg(args, 0);
+    if !regexp_value.is_nullish() && is_regexp(vm, regexp_value)? && !flags_include(vm, regexp_value, b'g', "matchAll")?
+    {
+        return Err(vm.type_error("String.prototype.matchAll called with a non-global RegExp argument"));
+    }
+    regexp_dispatch(
+        vm,
+        string,
+        regexp_value,
+        WellKnownSymbol::MatchAll,
+        Some("g"),
+        regexp::symbol_match_all,
+    )
+}
+
+/// `match` / `matchAll` / `search`: the argument's protocol method when it
+/// has one, else `fallback` on a `RegExp` built from the argument (so
+/// `undefined` matches everything).
+fn regexp_dispatch(
+    vm: &mut Vm<'_>,
+    string: JsString,
+    regexp_value: &JsValue,
+    symbol: WellKnownSymbol,
+    flags: Option<&str>,
+    fallback: NativeImpl,
+) -> RunResult<JsValue> {
+    if !regexp_value.is_nullish()
+        && let Some(method) = protocol_method(vm, regexp_value, symbol)?
+    {
+        return call_protocol(vm, method, regexp_value, string, Vec::new());
+    }
+    let flags = flags.map_or(JsValue::Undefined, |flags| vm.atom_value(flags));
+    let ctor_args = [regexp_value.clone_with_heap(&vm.session.heap), flags];
+    let rx = regexp::constructor(vm, &JsValue::Undefined, &ctor_args, true);
+    for value in ctor_args {
+        value.drop_with(&mut vm.session.heap);
+    }
+    let rx = rx?;
+    let string = match vm.alloc_string(string) {
+        Ok(string) => string,
+        Err(err) => {
+            rx.drop_with(&mut vm.session.heap);
+            return Err(err);
+        }
+    };
+    let result = fallback(vm, &rx, slice::from_ref(&string), false);
+    vm.drop_all(rx, vec![string]);
+    result
 }
 
 pub(super) fn replace(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {

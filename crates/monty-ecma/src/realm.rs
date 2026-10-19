@@ -37,6 +37,8 @@ pub(crate) struct Realm {
     pub weak_set_prototype: HeapId,
     pub map_iterator_prototype: HeapId,
     pub set_iterator_prototype: HeapId,
+    pub regexp_prototype: HeapId,
+    pub regexp_string_iterator_prototype: HeapId,
 }
 
 impl Realm {
@@ -70,6 +72,8 @@ impl Realm {
             weak_set_prototype: zero,
             map_iterator_prototype: zero,
             set_iterator_prototype: zero,
+            regexp_prototype: zero,
+            regexp_string_iterator_prototype: zero,
         }
     }
 

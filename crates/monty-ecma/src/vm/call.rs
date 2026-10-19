@@ -111,7 +111,7 @@ impl Vm<'_> {
         match self.callable(&callee) {
             None => {
                 self.drop_all(this, args);
-                let shown = self.inspect_short(&callee)?;
+                let shown = self.inspect_callee(&callee)?;
                 callee.drop_with(&mut self.session.heap);
                 Err(self.type_error(&format!("{shown} is not a function")))
             }
@@ -205,7 +205,7 @@ impl Vm<'_> {
             _ => {
                 self.drop_all(JsValue::Undefined, args);
                 new_target.drop_with(&mut self.session.heap);
-                let shown = self.inspect_short(&callee)?;
+                let shown = self.inspect_callee(&callee)?;
                 callee.drop_with(&mut self.session.heap);
                 Err(self.type_error(&format!("{shown} is not a constructor")))
             }

@@ -33,7 +33,6 @@ Each of these is a `SyntaxError` at compile time naming the feature (`generators
 - `super()` inside an arrow function in a derived constructor
 - A computed key before a rest element in an object pattern (`const { [k]: a, ...rest } = o`)
 - Generators (`function*`, `yield`), async functions, `await`, `for await`
-- Regular expression literals
 - `BigInt` literals; the `BigInt` global exists so feature checks work, but calling it throws a `TypeError`
 - Tagged templates
 - `using` declarations
@@ -54,20 +53,28 @@ Within classes:
 Available: `globalThis`, `undefined`, `NaN`, `Infinity`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `console`
 (`log`, `info`, `debug` to stdout; `error`, `warn` to stderr), `Object`, `Function.prototype` (`call`, `apply`,
 `bind`, `toString`), `Array`, `String`, `Number`, `Boolean`, `Symbol` (with the well-known symbols), `Map`, `Set`,
-`WeakMap`, `WeakSet`, `Math`, `JSON` and the `Error` family.
+`WeakMap`, `WeakSet`, `RegExp`, `Math`, `JSON` and the `Error` family.
 
-Not available: `WeakRef`, `FinalizationRegistry`, `Promise`, `Date`, `RegExp`, `Proxy`, `Reflect`,
+Not available: `WeakRef`, `FinalizationRegistry`, `Promise`, `Date`, `Proxy`, `Reflect`,
 `ArrayBuffer` and the typed arrays, `TextEncoder`/`TextDecoder`, `structuredClone`, `queueMicrotask`,
 `setTimeout` and the other timers, `encodeURIComponent` and its relatives, `Intl`, `Atomics`, `globalThis.process`
 and every Node module.
 
 Differences within the available builtins:
 
-- `Array.prototype` lacks `copyWithin`, `toSorted`, `toReversed`, `toSpliced`, `with`, `group`, the locale methods
-    and anything taking a `RegExp`; `String.prototype` lacks `match`, `matchAll`, `search`, `normalize`,
-    `localeCompare` with locales (it compares code units), `split` with a `RegExp`, `substr`, `anchor` and the other
-    HTML methods; `String.prototype.replace` and `replaceAll` accept only string patterns and support the `$$`, `$&`,
-    `` $` `` and `$'` replacement patterns (no `$<name>` or `$n`).
+- `Array.prototype` lacks `copyWithin`, `toSorted`, `toReversed`, `toSpliced`, `with`, `group` and the locale
+    methods; `String.prototype` lacks `normalize`, `localeCompare` with locales (it compares code units), `substr`,
+    `anchor` and the other HTML methods.
+- `RegExp` is the ECMAScript engine vendored from QuickJS (`monty-regexp`): all flags (`dgimsuvy`), named groups,
+    lookbehind, Unicode property escapes and `v`-mode set operations work, and `String.prototype.match`,
+    `matchAll`, `replace`, `replaceAll`, `search` and `split` dispatch through the `Symbol.match`/`matchAll`/
+    `replace`/`search`/`split` protocol, so a custom matcher object works as it does in Node. Differences:
+    an invalid pattern reports V8's `Invalid regular expression: /…/…: ` prefix followed by QuickJS's wording
+    (`unexpected end` where V8 says `Unterminated character class`); `RegExp.escape`, `RegExp.prototype.compile`,
+    the legacy statics (`RegExp.$1`, `RegExp.lastMatch`) and `Symbol.species` are absent, so the results of
+    `split`/`matchAll` on a subclass are built with the builtin `RegExp`; a match that exhausts the backtracking
+    stack throws `RangeError: Maximum call stack size exceeded` where V8 keeps going; and a pattern that runs past
+    the feed's time limit ends the feed with the limit's error rather than returning.
 - `WeakMap` and `WeakSet` hold their keys strongly: a key stays alive as long as the collection does, since the
     sandbox has no finalization. `console.log` prints them as Node does, `WeakMap { <items unknown> }`.
 - A `Map` or `Set` keeps a tombstone for each deleted entry until it is cleared, so a collection with heavy

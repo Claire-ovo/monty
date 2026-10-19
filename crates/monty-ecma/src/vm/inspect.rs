@@ -7,6 +7,7 @@ use std::fmt::Write;
 
 use super::{Vm, number::number_to_string};
 use crate::{
+    builtins::regexp,
     error::RunResult,
     heap::{FunctionObject, HeapId, IterKind, JsObject, ObjectClass, PropertyKey, Slot},
     intern::StaticAtom,
@@ -82,11 +83,22 @@ impl Vm<'_> {
                 self.function_base(*id)
             } else if self.is_array(value) {
                 "[object Array]".to_owned()
+            } else if matches!(self.object(*id).map(|o| &o.class), Some(ObjectClass::RegExp(_))) {
+                "[object RegExp]".to_owned()
             } else {
                 "#<Object>".to_owned()
             }),
-            JsValue::Atom(_) | JsValue::Str(_) => Ok(format!("\"{}\"", self.string_of(value).expect("string"))),
+            JsValue::Atom(_) | JsValue::Str(_) => Ok(self.string_of(value).expect("string").to_string_lossy()),
             other => self.inspect(other),
+        }
+    }
+
+    /// [`inspect_short`](Self::inspect_short) for a value that was called:
+    /// V8 quotes a string callee (`"abc" is not a function`).
+    pub fn inspect_callee(&mut self, value: &JsValue) -> RunResult<String> {
+        match value {
+            JsValue::Atom(_) | JsValue::Str(_) => Ok(format!("\"{}\"", self.string_of(value).expect("string"))),
+            other => self.inspect_short(other),
         }
     }
 
@@ -159,8 +171,20 @@ impl Vm<'_> {
                 (name.to_owned(), ["{", "}"], false, false)
             }
             ObjectClass::StringIterator { .. } => ("Object [String Iterator]".to_owned(), ["{", "}"], false, false),
+            ObjectClass::RegExp(data) => (regexp::to_string(data), ["{", "}"], false, false),
+            ObjectClass::RegExpStringIterator { .. } => {
+                ("Object [RegExp String Iterator]".to_owned(), ["{", "}"], false, false)
+            }
             ObjectClass::Ordinary => (self.ordinary_prefix(id), ["{", "}"], false, false),
         };
+        // a regexp without extra properties prints whole at any depth, like a primitive
+        let bare_regexp = self.object(id).is_some_and(|object| {
+            matches!(object.class, ObjectClass::RegExp(_))
+                && !object.props.values().any(|slot| slot.flags().enumerable())
+        });
+        if bare_regexp {
+            return Ok(base);
+        }
         if depth > ctx.max_depth {
             return Ok(if is_array {
                 "[Array]".to_owned()
