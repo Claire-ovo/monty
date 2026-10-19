@@ -2,11 +2,17 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{bytecode::Code, intern::AtomId};
+use crate::{
+    bytecode::Code,
+    intern::{AtomId, FunctionId},
+};
 
 /// A compiled function body, published to `Interns` once its snippet is admitted.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Function {
+    /// This function's id in the session's table, set when it is published.
+    #[serde(rename = "I")]
+    pub id: FunctionId,
     /// The `name` property's value; the empty atom for an anonymous function.
     #[serde(rename = "N")]
     pub name: AtomId,
@@ -80,8 +86,8 @@ pub(crate) enum FunctionKind {
     Method,
     /// A class constructor: only constructible; `derived` when the class `extends`.
     ClassConstructor { derived: bool },
-    /// `async function`.
-    Async,
+    /// `async function`, `async () =>` (`arrow`) or an async method.
+    Async { arrow: bool, method: bool },
     /// `function*`; `method` when it is an object or class method, so it
     /// has a home object for `super`.
     Generator { method: bool },
@@ -105,11 +111,25 @@ impl FunctionKind {
         matches!(self, Self::Generator { .. })
     }
 
+    /// Whether a call returns a promise and the body may `await`.
+    pub fn is_async(self) -> bool {
+        matches!(self, Self::Async { .. })
+    }
+
+    /// Whether the function reads `this`, `arguments` and `new.target` from
+    /// its enclosing scope instead of having its own.
+    pub fn is_arrow(self) -> bool {
+        matches!(self, Self::Arrow | Self::Async { arrow: true, .. })
+    }
+
     /// Whether the body may use `super`: it was defined with a home object.
     pub fn has_home_object(self) -> bool {
         matches!(
             self,
-            Self::Method | Self::ClassConstructor { .. } | Self::Generator { method: true }
+            Self::Method
+                | Self::ClassConstructor { .. }
+                | Self::Generator { method: true }
+                | Self::Async { method: true, .. }
         )
     }
 

@@ -293,8 +293,9 @@ impl Interns {
     }
 
     /// Publishes a compiled function.
-    pub fn add_function(&mut self, function: Function) -> FunctionId {
+    pub fn add_function(&mut self, mut function: Function) -> FunctionId {
         let id = FunctionId(u32::try_from(self.functions.len()).expect("more than 2**32 functions"));
+        function.id = id;
         self.functions.push(Arc::new(function));
         id
     }

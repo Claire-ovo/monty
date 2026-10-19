@@ -42,6 +42,9 @@ pub(crate) struct Realm {
     pub generator_prototype: HeapId,
     /// `%GeneratorFunction.prototype%`: the prototype of every `function*` object.
     pub generator_function_prototype: HeapId,
+    pub promise_prototype: HeapId,
+    /// `%AsyncFunction.prototype%`: the prototype of every async function object.
+    pub async_function_prototype: HeapId,
 }
 
 impl Realm {
@@ -79,6 +82,8 @@ impl Realm {
             regexp_string_iterator_prototype: zero,
             generator_prototype: zero,
             generator_function_prototype: zero,
+            promise_prototype: zero,
+            async_function_prototype: zero,
         }
     }
 

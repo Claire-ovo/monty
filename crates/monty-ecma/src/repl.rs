@@ -13,7 +13,7 @@ use crate::{
     builtins,
     compile::compile,
     error::Throw,
-    heap::{Heap, HeapId, ObjectClass},
+    heap::{Heap, HeapId, ObjectClass, Settled},
     intern::{Interns, StaticAtom},
     parse::parse,
     realm::{ErrorKind, Realm, ScriptScope},
@@ -156,12 +156,16 @@ impl JsRepl {
         for function in compiled.functions {
             self.session.interns.add_function(function);
         }
-        let module = Arc::new(compiled.module);
+        let module_id = self.session.interns.add_function(compiled.module);
+        let module = Arc::clone(self.session.interns.function(module_id));
         self.session.script_name = script_name;
         let mut vm = Vm::new(self.session, print);
         vm.tracker().on_feed_start();
         vm.tracker().on_execution_start();
-        let outcome = vm.import_inputs(inputs).and_then(|()| vm.run_module(module));
+        let outcome = vm
+            .import_inputs(inputs)
+            .and_then(|()| vm.run_module(module))
+            .and_then(|value| finish_feed(&mut vm, value));
         let result = match outcome {
             Ok(value) => {
                 let exported = vm.export(&value);
@@ -184,6 +188,35 @@ impl JsRepl {
 
 /// Converts an uncaught throw into the host's exception, with the traceback
 /// the VM recorded while unwinding.
+/// Drains the job and timer queues after the module body, then settles the
+/// feed's value: an async body's promise is read, and a rejection nobody
+/// handled fails the feed as an uncaught error.
+fn finish_feed(vm: &mut Vm<'_>, value: JsValue) -> Result<JsValue, Throw> {
+    if let Err(err) = vm.run_jobs() {
+        value.drop_with(&mut vm.session.heap);
+        return Err(err);
+    }
+    let value = match value {
+        JsValue::Ref(id) if vm.is_promise(id) && vm.module_is_async() => {
+            let settled = vm.promise_settlement(id);
+            value.drop_with(&mut vm.session.heap);
+            match settled {
+                Some(Settled::Fulfilled(value)) => value,
+                Some(Settled::Rejected(reason)) => return Err(Throw::Value(reason)),
+                None => return Err(vm.throw_error(ErrorKind::Error, "unsettled top-level await")),
+            }
+        }
+        other => other,
+    };
+    match vm.take_unhandled_rejection() {
+        Some(reason) => {
+            value.drop_with(&mut vm.session.heap);
+            Err(Throw::Value(reason))
+        }
+        None => Ok(value),
+    }
+}
+
 fn throw_to_exception(vm: &mut Vm<'_>, throw: Throw) -> MontyException {
     let traceback = vm.take_traceback();
     match throw {

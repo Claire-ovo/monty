@@ -18,6 +18,7 @@ mod json;
 mod math;
 mod number;
 mod object;
+mod promise;
 pub(crate) mod regexp;
 mod string;
 
@@ -107,6 +108,8 @@ natives! {
     ObjectProtoPropertyIsEnumerable => ("propertyIsEnumerable", 1, false, object::proto_property_is_enumerable),
     // Function
     Function => ("Function", 1, true, function::constructor),
+    AsyncFunction => ("AsyncFunction", 1, true, function::constructor),
+    GeneratorFunction => ("GeneratorFunction", 1, true, function::constructor),
     FunctionProtoCall => ("call", 1, false, function::proto_call),
     FunctionProtoApply => ("apply", 2, false, function::proto_apply),
     FunctionProtoBind => ("bind", 1, false, function::proto_bind),
@@ -261,6 +264,29 @@ natives! {
     WeakSetProtoHas => ("has", 1, false, collections::weak_set_has),
     WeakSetProtoDelete => ("delete", 1, false, collections::weak_set_delete),
     ObjectGroupBy => ("groupBy", 2, false, collections::object_group_by),
+    // Promise, timers and microtasks
+    Promise => ("Promise", 1, true, promise::constructor),
+    PromiseResolve => ("resolve", 1, false, promise::resolve),
+    PromiseReject => ("reject", 1, false, promise::reject),
+    PromiseAll => ("all", 1, false, promise::all),
+    PromiseAllSettled => ("allSettled", 1, false, promise::all_settled),
+    PromiseRace => ("race", 1, false, promise::race),
+    PromiseAny => ("any", 1, false, promise::any),
+    PromiseWithResolvers => ("withResolvers", 0, false, promise::with_resolvers),
+    PromiseTry => ("try", 1, false, promise::try_),
+    PromiseProtoThen => ("then", 2, false, promise::then),
+    PromiseProtoCatch => ("catch", 1, false, promise::catch),
+    PromiseProtoFinally => ("finally", 1, false, promise::finally),
+    PromiseResolveFunction => ("", 1, false, promise::resolve_function),
+    PromiseRejectFunction => ("", 1, false, promise::reject_function),
+    PromiseCombinatorElement => ("", 1, false, promise::combinator_element),
+    QueueMicrotask => ("queueMicrotask", 1, false, promise::queue_microtask),
+    SetTimeout => ("setTimeout", 2, false, promise::set_timeout),
+    SetInterval => ("setInterval", 2, false, promise::set_interval),
+    SetImmediate => ("setImmediate", 1, false, promise::set_immediate),
+    ClearTimeout => ("clearTimeout", 1, false, promise::clear_timeout),
+    ClearInterval => ("clearInterval", 1, false, promise::clear_timeout),
+    ClearImmediate => ("clearImmediate", 1, false, promise::clear_timeout),
     // Generators
     GeneratorProtoNext => ("next", 1, false, generator::next),
     GeneratorProtoReturn => ("return", 1, false, generator::return_),
@@ -346,6 +372,7 @@ pub(crate) fn create_realm(vm: &mut Vm<'_>) {
     collections::install(vm, global);
     regexp::install(vm, global);
     generator::install(vm, global);
+    promise::install(vm, global);
     math::install(vm, global);
     json::install(vm, global);
     console::install(vm, global);
@@ -419,6 +446,26 @@ pub(crate) fn install_getter(vm: &mut Vm<'_>, target: HeapId, name: &str, native
     let atom = vm.session.interns.intern_str(name);
     let function = vm.new_function_object(FunctionObject::Native(native), atom, 0);
     vm.define_accessor(target, PropertyKey::Atom(atom), JsValue::Ref(function), false, false);
+}
+
+/// Creates a constructor that is not a global (`AsyncFunction`,
+/// `GeneratorFunction`), reachable only as `prototype.constructor`.
+pub(crate) fn install_hidden_constructor(vm: &mut Vm<'_>, native: NativeFn, prototype: HeapId) {
+    let name = vm.session.interns.intern_str(native.name());
+    let constructor = vm.new_function_object(FunctionObject::Native(native), name, native.length());
+    vm.session.heap.inc_ref(prototype);
+    vm.define_with_flags(
+        constructor,
+        PropertyKey::Atom(StaticAtom::Prototype.id()),
+        JsValue::Ref(prototype),
+        PropFlags::NONE,
+    );
+    vm.define_with_flags(
+        prototype,
+        PropertyKey::Atom(StaticAtom::Constructor.id()),
+        JsValue::Ref(constructor),
+        PropFlags::CONFIGURABLE,
+    );
 }
 
 /// Creates a constructor on the global object linked to its prototype:

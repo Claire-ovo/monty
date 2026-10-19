@@ -9,7 +9,7 @@
 use std::cell::Cell;
 
 use ahash::{AHashMap, AHashSet};
-use oxc_ast::ast::{IdentifierReference, NewTarget, Program, PropertyDefinition, ThisExpression};
+use oxc_ast::ast::{AwaitExpression, IdentifierReference, NewTarget, Program, PropertyDefinition, ThisExpression};
 use oxc_ast_visit::{Visit, walk};
 use oxc_semantic::Scoping;
 use oxc_syntax::{
@@ -24,6 +24,8 @@ pub(crate) struct Analysis {
     pub captured: AHashSet<SymbolId>,
     /// Per non-arrow function scope (the module scope included).
     pub functions: AHashMap<ScopeId, FunctionFacts>,
+    /// The module body itself awaits, so it compiles as an async function.
+    pub top_level_await: bool,
 }
 
 /// What a non-arrow function's body does with its implicit bindings.
@@ -53,14 +55,17 @@ impl Analysis {
             scopes: Vec::new(),
             field_class: Vec::new(),
             captured: captured_symbols(&scoping),
+            top_level_await: false,
         };
         visitor.visit_program(program);
         let functions = visitor.functions;
         let captured = visitor.captured;
+        let top_level_await = visitor.top_level_await;
         Self {
             scoping,
             captured,
             functions,
+            top_level_await,
         }
     }
 
@@ -123,6 +128,7 @@ struct FactsVisitor<'s> {
     /// read are captured.
     field_class: Vec<ScopeId>,
     captured: AHashSet<SymbolId>,
+    top_level_await: bool,
 }
 
 impl FactsVisitor<'_> {
@@ -162,6 +168,18 @@ impl<'a> Visit<'a> for FactsVisitor<'_> {
 
     fn leave_scope(&mut self) {
         self.scopes.pop();
+    }
+
+    fn visit_await_expression(&mut self, it: &AwaitExpression<'a>) {
+        if let Some(current) = self.scopes.last().copied()
+            && self
+                .scoping
+                .scope_flags(function_scope(self.scoping, current, true))
+                .is_top()
+        {
+            self.top_level_await = true;
+        }
+        walk::walk_await_expression(self, it);
     }
 
     fn visit_this_expression(&mut self, it: &ThisExpression) {

@@ -67,7 +67,16 @@ pub(crate) fn compile(
         funcs: Vec::new(),
     };
     let module_scope = scope_of(&program.scope_id)?;
-    compiler.push_function(FunctionKind::Normal, module_scope, StaticAtom::Empty.id(), program.span);
+    // a feed with a top-level `await` runs as an async body whose promise is the feed's result
+    let module_kind = if analysis.top_level_await {
+        FunctionKind::Async {
+            arrow: false,
+            method: false,
+        }
+    } else {
+        FunctionKind::Normal
+    };
+    compiler.push_function(module_kind, module_scope, StaticAtom::Empty.id(), program.span);
     compiler.compile_module_statements(program)?;
     let module = compiler.pop_function();
     Ok(CompiledFeed {
@@ -255,6 +264,7 @@ impl<'c> Compiler<'c> {
         let state = self.funcs.pop().expect("a function is being compiled");
         let (captures, free_slots) = state.captures.iter().map(|c| (c.outer, c.inner)).unzip();
         Function {
+            id: FunctionId::from_u16(0),
             name: state.name,
             code: state.builder.build(),
             param_count: state.param_count,
@@ -291,7 +301,7 @@ impl<'c> Compiler<'c> {
         } = spec;
         self.push_function(kind, scope, name, span);
         self.bind_parameters(params)?;
-        if kind != FunctionKind::Arrow {
+        if !kind.is_arrow() {
             self.bind_implicit_slots(scope)?;
         }
         self.declare_scope(scope, true)?;
@@ -325,12 +335,14 @@ impl<'c> Compiler<'c> {
     }
 
     /// Adds a finished function to the feed's table, returning its id.
-    fn publish_function(&mut self, function: Function) -> Result<FunctionId, CompileError> {
+    fn publish_function(&mut self, mut function: Function) -> Result<FunctionId, CompileError> {
         let id = self.function_base as usize + self.functions.len();
-        self.functions.push(function);
-        u16::try_from(id)
+        let id = u16::try_from(id)
             .map(FunctionId::from_u16)
-            .map_err(|_| CompileError::TooManyConstants)
+            .map_err(|_| CompileError::TooManyConstants)?;
+        function.id = id;
+        self.functions.push(function);
+        Ok(id)
     }
 
     /// Assigns the first slots to the formal parameters, in order. A pattern
@@ -682,7 +694,7 @@ impl<'c> Compiler<'c> {
         self.funcs
             .iter()
             .rev()
-            .find(|state| state.kind != FunctionKind::Arrow)
+            .find(|state| !state.kind.is_arrow())
             .is_some_and(|state| state.kind.is_derived_constructor())
     }
 
@@ -692,7 +704,7 @@ impl<'c> Compiler<'c> {
         self.funcs
             .iter()
             .rev()
-            .find(|state| state.kind != FunctionKind::Arrow)
+            .find(|state| !state.kind.is_arrow())
             .is_some_and(|state| state.kind.has_home_object())
     }
 
@@ -706,7 +718,7 @@ impl<'c> Compiler<'c> {
         let owner_level = self
             .funcs
             .iter()
-            .rposition(|state| state.kind != FunctionKind::Arrow)
+            .rposition(|state| !state.kind.is_arrow())
             .expect("the module function is never an arrow");
         if owner_level == 0 {
             return Ok(None);

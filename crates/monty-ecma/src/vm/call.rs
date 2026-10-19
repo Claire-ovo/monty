@@ -61,8 +61,12 @@ impl Vm<'_> {
                 Err(self.class_without_new(&function))
             }
             Some(Callable::Closure { function, cells }) => {
-                let result = self.push_closure_frame(function, &cells, callee, args, Invocation::call(this));
-                result.map(|()| Step::Continue)
+                let is_async = function.kind.is_async();
+                self.push_closure_frame(function, &cells, callee, args, Invocation::call(this))?;
+                if is_async {
+                    self.start_coroutine();
+                }
+                Ok(Step::Continue)
             }
             None => {
                 self.drop_all(this, args);
@@ -124,11 +128,12 @@ impl Vm<'_> {
                 this: bound_this,
                 args: bound_args,
             }) => {
+                // the callee may be the target's only owner: take a reference before releasing it
+                self.session.heap.inc_ref(target);
                 callee.drop_with(&mut self.session.heap);
                 this.drop_with(&mut self.session.heap);
                 let mut all = bound_args;
                 all.extend(args);
-                self.session.heap.inc_ref(target);
                 self.call(JsValue::Ref(target), bound_this, all)
             }
             Some(Callable::Closure { function, .. }) if function.kind.is_class_constructor() => {
@@ -138,7 +143,11 @@ impl Vm<'_> {
             }
             Some(Callable::Closure { function, cells }) => self.enter_nested(|vm| {
                 let depth = vm.frames.len();
+                let is_async = function.kind.is_async();
                 vm.push_closure_frame(function, &cells, callee, args, Invocation::call(this))?;
+                if is_async {
+                    vm.start_coroutine();
+                }
                 vm.run_to_return(depth)
             }),
         }
@@ -183,11 +192,11 @@ impl Vm<'_> {
                 args: bound_args,
                 this,
             }) => {
+                self.session.heap.inc_ref(target);
                 callee.drop_with(&mut self.session.heap);
                 this.drop_with(&mut self.session.heap);
                 let mut all = bound_args;
                 all.extend(args);
-                self.session.heap.inc_ref(target);
                 // a bound function's new.target is the target when it was the constructor
                 let new_target = if let JsValue::Ref(id) = &new_target
                     && self
@@ -617,6 +626,7 @@ impl Vm<'_> {
             new_target,
             construct,
             generator: None,
+            async_initial: false,
         });
         Ok(())
     }
@@ -643,6 +653,10 @@ impl Vm<'_> {
             fields: None,
         };
         let object = self.new_function_object(callable, function.name, function.param_count);
+        if function.kind.is_async() {
+            let function_proto = self.session.realm.async_function_prototype;
+            self.set_prototype(object, Some(function_proto));
+        }
         if function.kind.is_generator() {
             // a generator function inherits from %GeneratorFunction.prototype% and
             // carries a fresh `prototype` for its generators, without a `constructor`

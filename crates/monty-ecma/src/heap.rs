@@ -295,6 +295,162 @@ pub(crate) enum ObjectClass {
         done: bool,
     },
     Generator(Box<GeneratorState>),
+    Promise(Box<PromiseData>),
+    /// An async function's activation (never user-visible): its parked frame
+    /// and the promise (an owned reference) its return settles.
+    Coroutine(Box<Coroutine>),
+}
+
+/// A promise's settlement state and whether a rejection has a handler.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PromiseData {
+    pub state: PromiseState,
+    /// Set once a reaction is attached to a rejected promise.
+    pub handled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum PromiseState {
+    Pending(Vec<Reaction>),
+    Fulfilled(JsValue),
+    Rejected(JsValue),
+}
+
+/// What runs when a promise settles: one handler per outcome, feeding `target`.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Reaction {
+    pub target: Target,
+    pub on_fulfilled: Handler,
+    pub on_rejected: Handler,
+}
+
+/// Where a reaction's result goes (both references are owned; the enum is
+/// `Copy` for convenience, the owner releases the reference exactly once).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub(crate) enum Target {
+    /// Resolve or reject this promise with the handler's outcome.
+    Promise(HeapId),
+    /// Resume this async function's frame with the settlement.
+    Coroutine(HeapId),
+    /// Discard the outcome (`await`-free bookkeeping such as `Promise.all` elements).
+    None,
+}
+
+/// How a settlement is transformed before reaching the target.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum Handler {
+    /// Pass the value through (fulfill the target with it, or resume `next`).
+    Identity,
+    /// Pass the reason through (reject the target, or resume `throw`).
+    Thrower,
+    /// Call this function with the value; its result (or throw) decides the target.
+    Call(JsValue),
+    /// `finally`: call this function without arguments, then settle the
+    /// target with the original settlement unless the call failed.
+    Finally(JsValue),
+    /// Settle the target with a stored settlement, ignoring the value.
+    Settle(Settled),
+}
+
+/// A promise's outcome.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum Settled {
+    Fulfilled(JsValue),
+    Rejected(JsValue),
+}
+
+impl Settled {
+    pub fn value(&self) -> &JsValue {
+        match self {
+            Self::Fulfilled(value) | Self::Rejected(value) => value,
+        }
+    }
+
+    pub fn into_value(self) -> JsValue {
+        match self {
+            Self::Fulfilled(value) | Self::Rejected(value) => value,
+        }
+    }
+}
+
+impl Handler {
+    fn for_each_child(&self, mut on_child: impl FnMut(HeapId)) {
+        match self {
+            Self::Identity | Self::Thrower => {}
+            Self::Call(function) | Self::Finally(function) => {
+                if let Some(id) = function.heap_id() {
+                    on_child(id);
+                }
+            }
+            Self::Settle(settled) => {
+                if let Some(id) = settled.value().heap_id() {
+                    on_child(id);
+                }
+            }
+        }
+    }
+
+    fn dec_ref_ids(self, stack: &mut Vec<HeapId>) {
+        match self {
+            Self::Identity | Self::Thrower => {}
+            Self::Call(function) | Self::Finally(function) => stack.extend(function.heap_id()),
+            Self::Settle(settled) => stack.extend(settled.into_value().heap_id()),
+        }
+    }
+}
+
+impl Reaction {
+    fn for_each_child(&self, mut on_child: impl FnMut(HeapId)) {
+        match &self.target {
+            Target::Promise(id) | Target::Coroutine(id) => on_child(*id),
+            Target::None => {}
+        }
+        self.on_fulfilled.for_each_child(&mut on_child);
+        self.on_rejected.for_each_child(on_child);
+    }
+
+    fn dec_ref_ids(self, stack: &mut Vec<HeapId>) {
+        match self.target {
+            Target::Promise(id) | Target::Coroutine(id) => stack.push(id),
+            Target::None => {}
+        }
+        self.on_fulfilled.dec_ref_ids(stack);
+        self.on_rejected.dec_ref_ids(stack);
+    }
+}
+
+impl PromiseData {
+    fn for_each_child(&self, mut on_child: impl FnMut(HeapId)) {
+        match &self.state {
+            PromiseState::Pending(reactions) => {
+                for reaction in reactions {
+                    reaction.for_each_child(&mut on_child);
+                }
+            }
+            PromiseState::Fulfilled(value) | PromiseState::Rejected(value) => {
+                if let Some(id) = value.heap_id() {
+                    on_child(id);
+                }
+            }
+        }
+    }
+
+    fn dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
+        match mem::replace(&mut self.state, PromiseState::Pending(Vec::new())) {
+            PromiseState::Pending(reactions) => {
+                for reaction in reactions {
+                    reaction.dec_ref_ids(stack);
+                }
+            }
+            PromiseState::Fulfilled(value) | PromiseState::Rejected(value) => stack.extend(value.heap_id()),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Coroutine {
+    pub state: GeneratorState,
+    pub promise: HeapId,
 }
 
 /// Where a generator is in its life: its frame is parked here between
@@ -306,13 +462,16 @@ pub(crate) enum GeneratorState {
     Completed,
 }
 
-/// A generator's frame between resumptions: the function object it runs
-/// (an owned reference), the instruction to continue at, and its locals and
+/// A generator's or async function's frame between resumptions: the
+/// function, the function object it ran as (an owned reference; `None` for
+/// an async module body), the instruction to continue at, and its locals and
 /// operands as they were on the stack.
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SavedFrame {
+    #[serde(rename = "F")]
+    pub function: FunctionId,
     #[serde(rename = "C")]
-    pub callee: HeapId,
+    pub callee: Option<HeapId>,
     #[serde(rename = "I")]
     pub ip: u32,
     #[serde(rename = "V")]
@@ -322,7 +481,9 @@ pub(crate) struct SavedFrame {
 impl GeneratorState {
     fn for_each_child(&self, mut on_child: impl FnMut(HeapId)) {
         if let Self::Suspended(frame) = self {
-            on_child(frame.callee);
+            if let Some(callee) = frame.callee {
+                on_child(callee);
+            }
             for value in &frame.values {
                 if let Some(id) = value.heap_id() {
                     on_child(id);
@@ -333,7 +494,7 @@ impl GeneratorState {
 
     fn dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
         if let Self::Suspended(frame) = mem::replace(self, Self::Completed) {
-            stack.push(frame.callee);
+            stack.extend(frame.callee);
             stack.extend(frame.values.into_iter().filter_map(|value| value.heap_id()));
         }
     }
@@ -449,6 +610,11 @@ impl ObjectClass {
             Self::MapIterator { map, .. } => on_child(*map),
             Self::RegExpStringIterator { regexp, .. } => on_child(*regexp),
             Self::Generator(state) => state.for_each_child(on_child),
+            Self::Promise(data) => data.for_each_child(on_child),
+            Self::Coroutine(coroutine) => {
+                on_child(coroutine.promise);
+                coroutine.state.for_each_child(on_child);
+            }
             Self::Map(data) | Self::Set(data) | Self::WeakMap(data) | Self::WeakSet(data) => {
                 data.for_each_child(on_child);
             }
@@ -463,6 +629,11 @@ impl ObjectClass {
             Self::MapIterator { map, .. } => stack.push(*map),
             Self::RegExpStringIterator { regexp, .. } => stack.push(*regexp),
             Self::Generator(state) => state.dec_ref_ids(stack),
+            Self::Promise(data) => data.dec_ref_ids(stack),
+            Self::Coroutine(coroutine) => {
+                stack.push(coroutine.promise);
+                coroutine.state.dec_ref_ids(stack);
+            }
             Self::Map(data) | Self::Set(data) | Self::WeakMap(data) | Self::WeakSet(data) => data.dec_ref_ids(stack),
             _ => {}
         }

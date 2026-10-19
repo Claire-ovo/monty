@@ -9,7 +9,7 @@ use super::{Vm, number::number_to_string};
 use crate::{
     builtins::regexp,
     error::RunResult,
-    heap::{FunctionObject, HeapId, IterKind, JsObject, ObjectClass, PropertyKey, Slot},
+    heap::{FunctionObject, HeapId, IterKind, JsObject, ObjectClass, PromiseState, PropertyKey, Slot},
     intern::{StaticAtom, WellKnownSymbol},
     value::JsValue,
 };
@@ -180,7 +180,10 @@ impl Vm<'_> {
             ObjectClass::RegExpStringIterator { .. } => {
                 ("Object [RegExp String Iterator]".to_owned(), ["{", "}"], false, false)
             }
-            ObjectClass::Generator(_) => (self.ordinary_prefix(id), ["{", "}"], false, false),
+            ObjectClass::Generator(_) | ObjectClass::Coroutine(_) => {
+                (self.ordinary_prefix(id), ["{", "}"], false, false)
+            }
+            ObjectClass::Promise(_) => (self.ordinary_prefix(id), ["{", "}"], false, false),
             ObjectClass::Ordinary => (self.ordinary_prefix(id), ["{", "}"], false, false),
         };
         // a regexp without extra properties prints whole at any depth, like a primitive
@@ -207,6 +210,7 @@ impl Vm<'_> {
         let mut output = Vec::new();
         let mut shown_keys: Vec<PropertyKey> = Vec::new();
         self.format_collection(ctx, id, depth, &mut output)?;
+        self.format_promise_state(ctx, id, depth, &mut output)?;
         if is_array {
             let len = self.object(id).map_or(0, |o| o.elements.len());
             let shown = len.min(MAX_ARRAY_LENGTH);
@@ -327,6 +331,36 @@ impl Vm<'_> {
         Ok(reduce_to_single_string(ctx, output, &base, braces, depth, !is_array))
     }
 
+    /// A promise's state as Node shows it: `<pending>`, the value, or `<rejected> reason`.
+    fn format_promise_state(
+        &mut self,
+        ctx: &mut Context,
+        id: HeapId,
+        depth: usize,
+        output: &mut Vec<String>,
+    ) -> RunResult<()> {
+        let state = match self.object(id).map(|o| &o.class) {
+            Some(ObjectClass::Promise(data)) => match &data.state {
+                PromiseState::Pending(_) => None,
+                PromiseState::Fulfilled(value) => Some((false, value.clone_with_heap(&self.session.heap))),
+                PromiseState::Rejected(value) => Some((true, value.clone_with_heap(&self.session.heap))),
+            },
+            _ => return Ok(()),
+        };
+        match state {
+            None => output.push("<pending>".to_owned()),
+            Some((rejected, value)) => {
+                ctx.indentation += 2;
+                let text = self.format_value(ctx, &value, depth + 1, false);
+                ctx.indentation -= 2;
+                value.drop_with(&mut self.session.heap);
+                let text = text?;
+                output.push(if rejected { format!("<rejected> {text}") } else { text });
+            }
+        }
+        Ok(())
+    }
+
     /// The entries of a `Map`, `Set` or their iterators, as `key => value`,
     /// values, or `[ key, value ]` pairs.
     fn format_collection(
@@ -428,11 +462,21 @@ impl Vm<'_> {
             };
         }
         let bound = matches!(object.class, ObjectClass::Function(FunctionObject::Bound { .. }));
-        let is_generator = matches!(&object.class, ObjectClass::Function(FunctionObject::Closure { func, .. }) if self.session.interns.function(*func).kind.is_generator());
-        if is_generator {
+        let kind = match &object.class {
+            ObjectClass::Function(FunctionObject::Closure { func, .. }) => {
+                Some(self.session.interns.function(*func).kind)
+            }
+            _ => None,
+        };
+        let special = match kind {
+            Some(kind) if kind.is_generator() => Some("GeneratorFunction"),
+            Some(kind) if kind.is_async() => Some("AsyncFunction"),
+            _ => None,
+        };
+        if let Some(label) = special {
             return match name {
-                Some(name) if !name.is_empty() => format!("[GeneratorFunction: {name}]"),
-                _ => "[GeneratorFunction (anonymous)]".to_owned(),
+                Some(name) if !name.is_empty() => format!("[{label}: {name}]"),
+                _ => format!("[{label} (anonymous)]"),
             };
         }
         match name {

@@ -2,7 +2,7 @@
 //! every `function*` and every generator inherit from, with `next`, `return`
 //! and `throw` driving the frame parked in the generator (see `vm::generator`).
 
-use super::{NativeFn, arg, install_function, install_tag, raw_object};
+use super::{NativeFn, arg, install_function, install_hidden_constructor, install_tag, raw_object};
 use crate::{
     error::RunResult,
     heap::{HeapId, ObjectClass, PropFlags, PropertyKey},
@@ -41,6 +41,7 @@ pub(super) fn install(vm: &mut Vm<'_>, _global: HeapId) {
         PropFlags::CONFIGURABLE,
     );
     install_tag(vm, generator_function_prototype, "GeneratorFunction");
+    install_hidden_constructor(vm, NativeFn::GeneratorFunction, generator_function_prototype);
 }
 
 /// The generator a method was called on, or V8's incompatible-receiver error.

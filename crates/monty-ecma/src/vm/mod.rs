@@ -13,21 +13,25 @@ pub(crate) mod generator;
 pub(crate) mod inspect;
 pub(crate) mod number;
 pub(crate) mod ops;
+pub(crate) mod promise;
 pub(crate) mod property;
 
-use std::{mem, string::ToString, sync::Arc};
+use std::{collections::VecDeque, mem, string::ToString, sync::Arc};
 
 use call::Invocation;
 use monty_heap::ContainsHeap;
 use monty_types::{MontyException, PrintWriter, ResourceError, ResourceTracker, StackFrame};
 
-use self::generator::ResumeMode;
+use self::{
+    generator::ResumeMode,
+    promise::{Job, Timer},
+};
 use crate::{
     builtins::regexp,
     bytecode::{Code, Opcode},
     error::{RunResult, Throw, stack_frame},
     function::Function,
-    heap::{Heap, HeapId, JsHeapData, JsObject, MapKey, PropFlags, PropertyKey},
+    heap::{GeneratorState, Heap, HeapId, JsHeapData, JsObject, MapKey, PropFlags, PropertyKey},
     intern::{AtomId, FunctionId, Interns, StaticAtom},
     realm::{ErrorKind, Realm, ScriptScope},
     string::JsString,
@@ -68,6 +72,19 @@ pub(crate) struct Vm<'p> {
     ticks: u8,
     /// Depth of nested `run` loops entered from natives.
     reentrancy: usize,
+    /// The microtask queue: promise reactions and `queueMicrotask` callbacks.
+    jobs: VecDeque<Job>,
+    /// Pending timers, run in due order once the microtasks drain.
+    timers: Vec<Timer>,
+    /// The virtual clock timers are scheduled against, in milliseconds.
+    timer_clock: f64,
+    /// Ids handed out by `setTimeout`; the next one.
+    timer_seq: u32,
+    /// Rejected promises that had no handler when they were rejected
+    /// (owned references); the first still unhandled at the end fails the feed.
+    unhandled: Vec<HeapId>,
+    /// Whether the module body ran as an async function (top-level `await`).
+    module_async: bool,
 }
 
 /// A function activation on the shared stack.
@@ -86,8 +103,12 @@ struct Frame {
     new_target: JsValue,
     /// How a `new` call's result is decided when the body returns.
     construct: Construct,
-    /// The generator object this frame belongs to, which a `Yield` parks it in.
+    /// The generator or coroutine object this frame belongs to (an owned
+    /// reference), which a `Yield` or `await` parks it in.
     generator: Option<HeapId>,
+    /// An async function's first run: its promise is the call's result, so
+    /// the first suspension or the return hands the promise to the caller.
+    async_initial: bool,
 }
 
 /// What a frame does with its return value under `new`.
@@ -113,6 +134,12 @@ impl<'p> Vm<'p> {
             traceback: Vec::new(),
             ticks: 0,
             reentrancy: 0,
+            jobs: VecDeque::new(),
+            timers: Vec::new(),
+            timer_clock: 0.0,
+            timer_seq: 1,
+            unhandled: Vec::new(),
+            module_async: false,
         }
     }
 
@@ -122,6 +149,7 @@ impl<'p> Vm<'p> {
         if let Some(pending) = self.pending.take() {
             pending.drop_with(&mut self.session.heap);
         }
+        self.discard_jobs();
         self.session
     }
 
@@ -133,10 +161,16 @@ impl<'p> Vm<'p> {
         &self.session.realm
     }
 
-    /// Runs a module body to completion, returning its completion value.
+    /// Runs a module body to completion, returning its completion value (the
+    /// promise of that value for a body with a top-level `await`).
     pub fn run_module(&mut self, module: Arc<Function>) -> RunResult<JsValue> {
         self.traceback.clear();
+        let is_async = module.kind.is_async();
+        self.module_async = is_async;
         self.push_frame(module, None, Vec::new(), Invocation::call(JsValue::Undefined))?;
+        if is_async {
+            self.start_coroutine();
+        }
         self.run_to_return(0)
     }
 
@@ -149,59 +183,106 @@ impl<'p> Vm<'p> {
 
     // === Dispatch ===
 
-    /// Executes frames until the one at depth `stop_depth` returns, yielding
-    /// its value; a generator frame yielding at that depth ends the run too.
-    /// A throw no frame above `stop_depth` catches unwinds those frames and
-    /// surfaces as `Err`.
+    /// Executes frames until the one at depth `stop_depth` returns (or, for
+    /// a generator or async frame, suspends). A throw no frame above
+    /// `stop_depth` catches unwinds those frames and surfaces as `Err`.
     pub(super) fn run(&mut self, stop_depth: usize) -> RunResult<Outcome> {
         loop {
-            let value = match self.step() {
+            let delivery = match self.step() {
                 Ok(Step::Continue) => continue,
-                Ok(Step::Return(value)) => match self.finish_return(value) {
-                    Ok(value) => {
-                        let frame = self.frames.pop().expect("returning from a frame");
-                        self.clear_stack(frame.base);
-                        frame.new_target.drop_with(&mut self.session.heap);
-                        if let Some(callee) = frame.callee {
-                            self.session.heap.dec_ref(callee);
-                        }
-                        value
-                    }
-                    Err(throw) => {
-                        self.handle_throw(throw, stop_depth)?;
-                        continue;
-                    }
-                },
-                Ok(Step::InitialYield) => match self.create_generator() {
-                    Ok(generator) => generator,
-                    Err(throw) => {
-                        self.handle_throw(throw, stop_depth)?;
-                        continue;
-                    }
-                },
-                Ok(Step::Yield { value, raw }) => {
-                    let result = if raw { value } else { self.iter_result(value, false) };
-                    let Some(generator) = self.frames.last().expect("frame").generator else {
-                        result.drop_with(&mut self.session.heap);
-                        return Err(self.internal_error("yield outside a generator"));
-                    };
-                    self.suspend_frame(generator);
-                    if self.frames.len() != stop_depth {
-                        result.drop_with(&mut self.session.heap);
-                        return Err(self.internal_error("yield below the resume boundary"));
-                    }
-                    return Ok(Outcome::Yield(result));
-                }
-                Err(throw) => {
-                    self.handle_throw(throw, stop_depth)?;
-                    continue;
-                }
+                Ok(Step::Return(value)) => self.finish_return(value).and_then(|value| self.leave_frame(value)),
+                Ok(Step::InitialYield) => self.create_generator().map(Delivery::Value),
+                Ok(Step::Yield { value, kind }) => self.yield_frame(value, kind),
+                Err(throw) => Err(throw),
             };
-            if self.frames.len() == stop_depth {
-                return Ok(Outcome::Return(value));
+            let delivery = match delivery {
+                Ok(delivery) => delivery,
+                Err(throw) => match self.handle_throw(throw, stop_depth)? {
+                    Some(delivery) => delivery,
+                    None => continue,
+                },
+            };
+            let at_stop = self.frames.len() == stop_depth;
+            match delivery {
+                Delivery::Value(value) if at_stop => return Ok(Outcome::Return(value)),
+                Delivery::Value(value) => self.stack.push(value),
+                Delivery::Yielded(value) if at_stop => return Ok(Outcome::Yield(value)),
+                Delivery::Nothing if at_stop => return Ok(Outcome::Return(JsValue::Undefined)),
+                Delivery::Yielded(value) => {
+                    value.drop_with(&mut self.session.heap);
+                    return Err(self.internal_error("suspension below the resume boundary"));
+                }
+                Delivery::Nothing => return Err(self.internal_error("async frame below the resume boundary")),
             }
-            self.stack.push(value);
         }
+    }
+
+    /// Pops a frame that returned `value`: an async frame settles its promise
+    /// instead, handing the promise to its original caller.
+    fn leave_frame(&mut self, value: JsValue) -> RunResult<Delivery> {
+        let frame = self.frames.pop().expect("returning from a frame");
+        self.clear_stack(frame.base);
+        frame.new_target.drop_with(&mut self.session.heap);
+        if let Some(callee) = frame.callee {
+            self.session.heap.dec_ref(callee);
+        }
+        let delivery = match frame.generator.filter(|id| self.is_coroutine(*id)) {
+            Some(coroutine) => {
+                let promise = self.coroutine_promise(coroutine);
+                self.set_coroutine_state(coroutine, GeneratorState::Completed);
+                let resolved = self.resolve_promise(promise, value);
+                if let Err(err) = resolved {
+                    self.session.heap.dec_ref(coroutine);
+                    return Err(err);
+                }
+                if frame.async_initial {
+                    self.session.heap.inc_ref(promise);
+                    Delivery::Value(JsValue::Ref(promise))
+                } else {
+                    Delivery::Nothing
+                }
+            }
+            None => Delivery::Value(value),
+        };
+        if let Some(owner) = frame.generator {
+            self.session.heap.dec_ref(owner);
+        }
+        Ok(delivery)
+    }
+
+    /// Parks the top frame at a `yield` or `await`.
+    fn yield_frame(&mut self, value: JsValue, kind: YieldKind) -> RunResult<Delivery> {
+        let frame = self.frames.last().expect("frame");
+        let Some(owner) = frame.generator else {
+            value.drop_with(&mut self.session.heap);
+            return Err(self.internal_error("suspension outside a generator"));
+        };
+        let initial = frame.async_initial;
+        let delivery = match kind {
+            YieldKind::Wrap | YieldKind::Raw => {
+                let result = if kind == YieldKind::Raw {
+                    value
+                } else {
+                    self.iter_result(value, false)
+                };
+                self.suspend_frame(owner);
+                Delivery::Yielded(result)
+            }
+            YieldKind::Await => {
+                self.suspend_frame(owner);
+                self.await_value(owner, value)?;
+                if initial {
+                    let promise = self.coroutine_promise(owner);
+                    self.session.heap.inc_ref(promise);
+                    Delivery::Value(JsValue::Ref(promise))
+                } else {
+                    Delivery::Nothing
+                }
+            }
+        };
+        // the frame's reference; reactions keep an awaiting coroutine alive
+        self.session.heap.dec_ref(owner);
+        Ok(delivery)
     }
 
     /// [`run`](Self::run) for a frame that cannot yield.
@@ -215,9 +296,10 @@ impl<'p> Vm<'p> {
         }
     }
 
-    /// Routes a throw: a value goes to the nearest handler, a resource error
-    /// ends the feed after recording where it happened.
-    fn handle_throw(&mut self, throw: Throw, stop_depth: usize) -> RunResult<()> {
+    /// Routes a throw: a value goes to the nearest handler (or rejects the
+    /// async frame it escapes, which then delivers its promise), a resource
+    /// error ends the feed after recording where it happened.
+    fn handle_throw(&mut self, throw: Throw, stop_depth: usize) -> RunResult<Option<Delivery>> {
         match throw {
             Throw::Value(value) => self.unwind(value, stop_depth),
             Throw::Resource(err) => {
@@ -304,8 +386,9 @@ impl<'p> Vm<'p> {
     }
 
     /// Delivers a thrown value to the nearest handler above `stop_depth`, or
-    /// unwinds those frames and propagates it.
-    fn unwind(&mut self, value: JsValue, stop_depth: usize) -> RunResult<()> {
+    /// unwinds those frames and propagates it. An async frame it escapes
+    /// rejects its promise instead and delivers like a return.
+    fn unwind(&mut self, value: JsValue, stop_depth: usize) -> RunResult<Option<Delivery>> {
         while self.frames.len() > stop_depth {
             let frame = self.frames.last().expect("frame");
             if let Some(entry) = frame.function.code.handler_for(frame.op_start).copied() {
@@ -318,15 +401,32 @@ impl<'p> Vm<'p> {
                     old.drop_with(&mut self.session.heap);
                 }
                 self.traceback.clear();
-                return Ok(());
+                return Ok(None);
             }
+            let coroutine = frame.generator.filter(|id| self.is_coroutine(*id));
+            let initial = frame.async_initial;
             self.record_frame();
             self.pop_frame();
+            if let Some(coroutine) = coroutine {
+                let promise = self.coroutine_promise(coroutine);
+                self.set_coroutine_state(coroutine, GeneratorState::Completed);
+                self.reject_promise(promise, value);
+                self.traceback.clear();
+                let delivery = if initial {
+                    self.session.heap.inc_ref(promise);
+                    Delivery::Value(JsValue::Ref(promise))
+                } else {
+                    Delivery::Nothing
+                };
+                self.session.heap.dec_ref(coroutine);
+                return Ok(Some(delivery));
+            }
         }
         Err(Throw::Value(value))
     }
 
-    /// Discards the top frame: its stack region and what it owned.
+    /// Discards the top frame: its stack region and what it owned (a frame
+    /// of an async function keeps its coroutine alive for the caller to settle).
     fn pop_frame(&mut self) {
         let frame = self.frames.pop().expect("frame");
         self.clear_stack(frame.base);
@@ -337,6 +437,11 @@ impl<'p> Vm<'p> {
         match frame.construct {
             Construct::Base(this) => this.drop_with(&mut self.session.heap),
             Construct::Call | Construct::Derived => {}
+        }
+        if let Some(owner) = frame.generator
+            && !self.is_coroutine(owner)
+        {
+            self.session.heap.dec_ref(owner);
         }
     }
 
@@ -958,9 +1063,13 @@ impl<'p> Vm<'p> {
             }
             Opcode::InitialYield => return Ok(Step::InitialYield),
             Opcode::Yield => {
-                let raw = self.operand_u8() == 1;
+                let kind = match self.operand_u8() {
+                    0 => YieldKind::Wrap,
+                    1 => YieldKind::Raw,
+                    _ => YieldKind::Await,
+                };
                 let value = self.pop();
-                return Ok(Step::Yield { value, raw });
+                return Ok(Step::Yield { value, kind });
             }
             Opcode::ResumeGenerator => {
                 let offset = self.operand_i16();
@@ -1291,11 +1400,32 @@ enum Step {
     Return(JsValue),
     /// A generator's prologue finished: park the frame and return the new generator object.
     InitialYield,
-    /// The frame yielded `value`; `raw` hands it over as the iterator result itself.
+    /// The frame suspended with `value`.
     Yield {
         value: JsValue,
-        raw: bool,
+        kind: YieldKind,
     },
+}
+
+/// What a `Yield` instruction's operand asks for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum YieldKind {
+    /// Wrap the value in an iterator result.
+    Wrap,
+    /// Hand the value over as the iterator result itself (`yield*`).
+    Raw,
+    /// `await`: resume when the value settles.
+    Await,
+}
+
+/// What a frame leaving the stack hands to the frame below it.
+enum Delivery {
+    /// The frame's result: pushed for a caller, or returned at the stop depth.
+    Value(JsValue),
+    /// A generator frame yielded this at the stop depth.
+    Yielded(JsValue),
+    /// An async frame resumed by a job suspended or finished: nothing to deliver.
+    Nothing,
 }
 
 /// How a nested run ended: the frame at the stop depth returned, or it was a

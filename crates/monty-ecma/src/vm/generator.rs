@@ -1,8 +1,10 @@
-//! Generators: a `function*` call parks its frame in a heap object after the
-//! prologue, and each `next`/`return`/`throw` puts the frame back on the
-//! stack with the sent value and a [`ResumeMode`], runs it to the next
-//! suspension point, and parks it again. `yield*` forwards each resumption to
-//! an inner iterator through [`Vm::delegate_step`].
+//! Suspendable frames: a `function*` call parks its frame in a heap object
+//! after the prologue, and each `next`/`return`/`throw` puts the frame back
+//! on the stack with the sent value and a [`ResumeMode`], runs it to the
+//! next suspension point, and parks it again. An async function's frame is
+//! parked the same way in a `Coroutine` (`await`) and resumed by promise
+//! jobs. `yield*` forwards each resumption to an inner iterator through
+//! [`Vm::delegate_step`].
 
 use std::{mem, sync::Arc};
 
@@ -11,7 +13,7 @@ use monty_types::ResourceError;
 use super::{Construct, Frame, Outcome, Vm};
 use crate::{
     error::{RunResult, Throw},
-    heap::{FunctionObject, GeneratorState, HeapId, JsHeapData, JsObject, ObjectClass, SavedFrame},
+    heap::{Coroutine, GeneratorState, HeapId, JsHeapData, JsObject, ObjectClass, SavedFrame},
     intern::StaticAtom,
     value::JsValue,
 };
@@ -88,15 +90,78 @@ impl Vm<'_> {
         }
     }
 
+    /// Resumes an async function's parked frame with a settlement; it runs
+    /// to its next `await` (which schedules the following resumption) or to
+    /// the end (which settles its promise inside the run loop).
+    pub(crate) fn resume_coroutine(&mut self, id: HeapId, mode: ResumeMode, value: JsValue) -> RunResult<()> {
+        let Some(ObjectClass::Coroutine(coroutine)) = self.object_mut(id).map(|o| &mut o.class) else {
+            value.drop_with(&mut self.session.heap);
+            return Err(self.internal_error("resuming a non-coroutine"));
+        };
+        let GeneratorState::Suspended(saved) = mem::replace(&mut coroutine.state, GeneratorState::Running) else {
+            value.drop_with(&mut self.session.heap);
+            return Err(self.internal_error("resuming an async function that is not suspended"));
+        };
+        let depth = self.frames.len();
+        let outcome = self.enter_nested(|vm| {
+            vm.restore_frame(id, saved, value, mode)?;
+            vm.run(depth)
+        });
+        match outcome {
+            Ok(Outcome::Return(value) | Outcome::Yield(value)) => {
+                value.drop_with(&mut self.session.heap);
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Marks the top frame as an async function's: its coroutine object (a
+    /// reference the frame owns) holds the promise the call returns.
+    pub(crate) fn start_coroutine(&mut self) {
+        let promise = self.new_promise();
+        let coroutine = self.session.heap.allocate(JsHeapData::Object(JsObject::with_class(
+            None,
+            ObjectClass::Coroutine(Box::new(Coroutine {
+                state: GeneratorState::Running,
+                promise,
+            })),
+        )));
+        let frame = self.frames.last_mut().expect("frame");
+        frame.generator = Some(coroutine);
+        frame.async_initial = true;
+    }
+
+    /// Whether `id` is an async function's activation.
+    pub(super) fn is_coroutine(&self, id: HeapId) -> bool {
+        matches!(self.object(id).map(|o| &o.class), Some(ObjectClass::Coroutine(_)))
+    }
+
+    /// The promise an async function's call returned.
+    pub(super) fn coroutine_promise(&self, id: HeapId) -> HeapId {
+        match self.object(id).map(|o| &o.class) {
+            Some(ObjectClass::Coroutine(coroutine)) => coroutine.promise,
+            _ => unreachable!("checked by `is_coroutine`"),
+        }
+    }
+
+    pub(super) fn set_coroutine_state(&mut self, id: HeapId, state: GeneratorState) {
+        if let Some(ObjectClass::Coroutine(coroutine)) = self.object_mut(id).map(|o| &mut o.class) {
+            coroutine.state = state;
+        }
+    }
+
     fn set_generator_state(&mut self, id: HeapId, state: GeneratorState) {
-        if let Some(ObjectClass::Generator(slot)) = self.object_mut(id).map(|o| &mut o.class) {
-            **slot = state;
+        match self.object_mut(id).map(|o| &mut o.class) {
+            Some(ObjectClass::Generator(slot)) => **slot = state,
+            Some(ObjectClass::Coroutine(coroutine)) => coroutine.state = state,
+            _ => {}
         }
     }
 
     /// A generator function's call result: the generator object holding the
     /// frame that just finished its prologue, inheriting from the function's
-    /// `prototype` property.
+    /// `prototype` property. The frame owns a reference to it until it is parked.
     pub(super) fn create_generator(&mut self) -> RunResult<JsValue> {
         let frame = self.frames.last().expect("frame");
         let Some(callee) = frame.callee else {
@@ -120,41 +185,38 @@ impl Vm<'_> {
         Ok(JsValue::Ref(generator))
     }
 
-    /// Parks the top frame in `generator`: its stack region moves into the
-    /// heap and the frame's reference to the callee goes with it.
-    pub(super) fn suspend_frame(&mut self, generator: HeapId) {
+    /// Parks the top frame in `owner` (a generator or coroutine): its stack
+    /// region moves into the heap and the frame's reference to the callee
+    /// goes with it. The frame's own reference to `owner` stays for the
+    /// caller to release once it has finished with the object.
+    pub(super) fn suspend_frame(&mut self, owner: HeapId) {
         let frame = self.frames.pop().expect("frame");
         let values: Vec<JsValue> = self.stack.drain(frame.base..).collect();
         frame.new_target.drop_with(&mut self.session.heap);
-        let callee = frame.callee.expect("generator frames run a function object");
         let saved = SavedFrame {
-            callee,
+            function: frame.function.id,
+            callee: frame.callee,
             ip: u32::try_from(frame.ip).expect("bytecode offsets fit u32"),
             values,
         };
-        self.set_generator_state(generator, GeneratorState::Suspended(saved));
+        self.set_generator_state(owner, GeneratorState::Suspended(saved));
     }
 
     /// Puts a parked frame back on the stack to continue at its saved
     /// instruction, with `value` and the resume `mode` pushed for the
     /// `ResumeGenerator` that follows every suspension point.
-    fn restore_frame(
-        &mut self,
-        generator: HeapId,
-        saved: SavedFrame,
-        value: JsValue,
-        mode: ResumeMode,
-    ) -> RunResult<()> {
-        let SavedFrame { callee, ip, values } = saved;
-        let Some(ObjectClass::Function(FunctionObject::Closure { func, .. })) = self.object(callee).map(|o| &o.class)
-        else {
-            self.session.heap.dec_ref(callee);
-            self.drop_all(value, values);
-            return Err(self.internal_error("generator without a compiled function"));
-        };
-        let function = Arc::clone(self.session.interns.function(*func));
+    fn restore_frame(&mut self, owner: HeapId, saved: SavedFrame, value: JsValue, mode: ResumeMode) -> RunResult<()> {
+        let SavedFrame {
+            function,
+            callee,
+            ip,
+            values,
+        } = saved;
+        let function = Arc::clone(self.session.interns.function(function));
         if let Err(err) = self.tracker().check_recursion_depth(self.frames.len() + 1) {
-            self.session.heap.dec_ref(callee);
+            if let Some(callee) = callee {
+                self.session.heap.dec_ref(callee);
+            }
             self.drop_all(value, values);
             return Err(match err {
                 ResourceError::Recursion { .. } => self.range_error("Maximum call stack size exceeded"),
@@ -164,16 +226,18 @@ impl Vm<'_> {
         let base = self.stack.len();
         let operands = base + usize::from(function.locals);
         self.stack.extend(values);
+        self.session.heap.inc_ref(owner);
         self.frames.push(Frame {
             function,
             ip: ip as usize,
             op_start: ip as usize,
             base,
             operands,
-            callee: Some(callee),
+            callee,
             new_target: JsValue::Undefined,
             construct: Construct::Call,
-            generator: Some(generator),
+            generator: Some(owner),
+            async_initial: false,
         });
         self.stack.push(value);
         self.stack.push(JsValue::Number(f64::from(mode as u8)));

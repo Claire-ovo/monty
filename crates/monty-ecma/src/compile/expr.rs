@@ -162,7 +162,11 @@ impl<'c> Compiler<'c> {
                 }
             }
             Expression::ClassExpression(class) => self.compile_class(class, name),
-            Expression::AwaitExpression(_) => Err(CompileError::unsupported("async functions", Self::span_of(expr))),
+            Expression::AwaitExpression(await_expr) => {
+                self.compile_expression(&await_expr.argument)?;
+                self.builder().emit_u8(Opcode::Yield, 2)?;
+                self.emit_resume_dispatch()
+            }
             Expression::YieldExpression(yield_expr) => self.compile_yield(yield_expr),
             Expression::RegExpLiteral(lit) => self.compile_regexp(lit),
             Expression::BigIntLiteral(_) => Err(CompileError::unsupported("BigInt", Self::span_of(expr))),
@@ -273,11 +277,16 @@ impl<'c> Compiler<'c> {
         name: AtomId,
         kind: FunctionKind,
     ) -> Result<FunctionId, CompileError> {
-        if function.r#async {
-            return Err(CompileError::unsupported("async functions", Self::span_of(function)));
+        if function.r#async && function.generator {
+            return Err(CompileError::unsupported("async generators", Self::span_of(function)));
         }
         let kind = if function.generator {
             FunctionKind::Generator {
+                method: kind == FunctionKind::Method,
+            }
+        } else if function.r#async {
+            FunctionKind::Async {
+                arrow: false,
                 method: kind == FunctionKind::Method,
             }
         } else {
@@ -308,16 +317,21 @@ impl<'c> Compiler<'c> {
         arrow: &'c ArrowFunctionExpression<'c>,
         name: AtomId,
     ) -> Result<FunctionId, CompileError> {
-        if arrow.r#async {
-            return Err(CompileError::unsupported("async functions", Self::span_of(arrow)));
-        }
+        let kind = if arrow.r#async {
+            FunctionKind::Async {
+                arrow: true,
+                method: false,
+            }
+        } else {
+            FunctionKind::Arrow
+        };
         let scope = scope_of(&arrow.scope_id)?;
         let body = match &arrow.body {
             ArrowFunctionBody::FunctionBody(body) => FunctionBody::Block(&body.statements),
             other => FunctionBody::Expression(other.to_expression()),
         };
         self.compile_function(FunctionSpec {
-            kind: FunctionKind::Arrow,
+            kind,
             scope,
             name,
             span: arrow.span,
@@ -854,7 +868,7 @@ impl<'c> Compiler<'c> {
     /// `yield value`: suspends with the value, then dispatches on how the
     /// generator was resumed. `yield* iterable` loops a [`Opcode::DelegateStep`]
     /// that forwards each resumption to the inner iterator and yields its
-    /// results unwrapped.
+    /// results unwrapped. (`await` is the same suspension with operand 2.)
     fn compile_yield(&mut self, yield_expr: &'c YieldExpression<'c>) -> Result<(), CompileError> {
         match &yield_expr.argument {
             Some(argument) => self.compile_expression(argument)?,

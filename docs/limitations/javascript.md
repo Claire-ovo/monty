@@ -32,15 +32,27 @@ Each of these is a `SyntaxError` at compile time naming the feature (`generators
 - Private fields and methods (`#x`), `accessor` properties, decorators
 - `super()` inside an arrow function in a derived constructor
 - A computed key before a rest element in an object pattern (`const { [k]: a, ...rest } = o`)
-- Async functions, `await`, `for await` and async generators
+- `for await` and async generators (`async function*`)
 - `BigInt` literals; the `BigInt` global exists so feature checks work, but calling it throws a `TypeError`
 - Tagged templates
 - `using` declarations
 - TypeScript and JSX syntax
 
-Generators (`function*`, `yield`, `yield*`, generator methods) work as in Node, except that
-`Object.getPrototypeOf(function* () {}).constructor` (the `GeneratorFunction` constructor) does not exist, so a
-generator function cannot be built from source text.
+Generators (`function*`, `yield`, `yield*`, generator methods) and async functions (`async function`, async
+arrows and methods, `await`, top-level `await`) work as in Node, with these differences:
+
+- The `GeneratorFunction` and `AsyncFunction` constructors exist as `prototype.constructor` so identity checks work,
+    but calling them throws an `EvalError` like `Function()`.
+- `setTimeout`, `setInterval` and `setImmediate` run on a virtual clock: timers fire in due order once the microtask
+    queue is empty, without waiting, and the feed ends when both queues are empty. They return a numeric id rather
+    than Node's `Timeout`/`Immediate` object, and `clearTimeout` accepts only that id.
+- A promise rejection that still has no handler when the feed's queues drain fails the feed with the rejection
+    reason as the uncaught error (Node prints it and exits with code 1); a rejection handled later in the same feed is
+    not reported, so there is no `unhandledrejection` event.
+- `Promise[Symbol.species]` is defined but not consulted: `then`, the combinators and `finally` always build plain
+    promises, so a `class MyPromise extends Promise` gets plain `Promise` results from them.
+- A `Promise.all`/`allSettled`/`any` element function that is called twice (a misbehaving thenable) records both calls
+    instead of ignoring the second.
 
 Within classes:
 
@@ -57,12 +69,12 @@ Within classes:
 Available: `globalThis`, `undefined`, `NaN`, `Infinity`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `console`
 (`log`, `info`, `debug` to stdout; `error`, `warn` to stderr), `Object`, `Function.prototype` (`call`, `apply`,
 `bind`, `toString`), `Array`, `String`, `Number`, `Boolean`, `Symbol` (with the well-known symbols), `Map`, `Set`,
-`WeakMap`, `WeakSet`, `RegExp`, `Math`, `JSON` and the `Error` family.
+`WeakMap`, `WeakSet`, `RegExp`, `Promise`, `queueMicrotask`, `setTimeout`/`setInterval`/`setImmediate` and their
+`clear*` counterparts, `Math`, `JSON` and the `Error` family.
 
-Not available: `WeakRef`, `FinalizationRegistry`, `Promise`, `Date`, `Proxy`, `Reflect`,
-`ArrayBuffer` and the typed arrays, `TextEncoder`/`TextDecoder`, `structuredClone`, `queueMicrotask`,
-`setTimeout` and the other timers, `encodeURIComponent` and its relatives, `Intl`, `Atomics`, `globalThis.process`
-and every Node module.
+Not available: `WeakRef`, `FinalizationRegistry`, `Date`, `Proxy`, `Reflect`,
+`ArrayBuffer` and the typed arrays, `TextEncoder`/`TextDecoder`, `structuredClone`, `encodeURIComponent` and its
+relatives, `Intl`, `Atomics`, `globalThis.process` and every Node module.
 
 Differences within the available builtins:
 

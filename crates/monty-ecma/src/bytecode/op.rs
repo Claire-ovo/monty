@@ -256,8 +256,9 @@ pub(crate) enum Opcode {
     /// End of a generator's prologue: suspend the frame into a new generator
     /// object, which the call returns. On resume: `` → `sent mode`.
     InitialYield = 150,
-    /// `value` → (suspended) → `sent mode`. Operand: u8, 1 to hand `value` to
-    /// the caller as the iterator result itself (`yield*`), 0 to wrap it.
+    /// `value` → (suspended) → `sent mode`. Operand: u8: 0 wraps `value` in an
+    /// iterator result, 1 hands it to the caller as is (`yield*`), 2 is
+    /// `await` (the frame resumes when the value settles).
     Yield = 151,
     /// `value mode` → `value`: jump when the generator was resumed with
     /// `next`, fall through for `return` (the return path follows), throw
