@@ -1,0 +1,44 @@
+[package]
+name = "monty-ecma"
+version = { workspace = true }
+license = { workspace = true }
+rust-version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+description = "A sandboxed JavaScript interpreter on Monty's heap and protocol: the engine behind the `monty-js` worker"
+keywords = ["javascript", "ecmascript", "interpreter", "sandbox", "embedded"]
+categories = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+readme = "README.md"
+
+[dependencies]
+monty-heap = { workspace = true }
+monty-regexp = { workspace = true }
+monty-types = { workspace = true }
+# The JavaScript front end: parser and AST (the same role ruff's parser plays for Python).
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_ast_visit = { workspace = true }
+oxc_diagnostics = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_semantic = { workspace = true }
+oxc_span = { workspace = true }
+oxc_str = { workspace = true }
+oxc_syntax = { workspace = true }
+ahash = { workspace = true }
+indexmap = { workspace = true, features = ["serde"] }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+strum = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+
+[features]
+default = []
+# Collect on every GC-tracked allocation, to shake out missed releases.
+memory-model-checks = ["monty-heap/memory-model-checks"]
+
+[lints]
+workspace = true

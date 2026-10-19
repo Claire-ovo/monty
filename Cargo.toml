@@ -21,6 +21,7 @@ members = [
     "crates/monty-typeshed",
     "crates/monty-macros",
     "crates/monty-regexp",
+    "crates/monty-ecma",
     "crates/fuzz"
 ]
 default-members = ["crates/monty-runtime"]
@@ -66,6 +67,8 @@ strip = false
 monty = { path = "crates/monty", version = "1.2.0" }
 monty-types = { path = "crates/monty-types", version = "1.2.0" }
 monty-heap = { path = "crates/monty-heap", version = "1.2.0" }
+monty-regexp = { path = "crates/monty-regexp", version = "1.2.0" }
+monty-ecma = { path = "crates/monty-ecma", version = "1.2.0" }
 monty-alloc = { path = "crates/monty-alloc", version = "1.2.0" }
 monty-fs = { path = "crates/monty-fs", version = "1.2.0" }
 monty-macros = { path = "crates/monty-macros", version = "1.2.0" }
@@ -73,6 +76,16 @@ monty-proto = { path = "crates/monty-proto", version = "1.2.0" }
 monty-pool = { path = "crates/monty-pool", version = "1.2.0" }
 monty-type-checking = { path = "crates/monty-type-checking", version = "1.2.0" }
 monty-typeshed = { path = "crates/monty-typeshed", version = "1.2.0" }
+# oxc: the JavaScript parser and AST for monty-ecma (the role ruff plays for Python)
+oxc_allocator = "0.155.0"
+oxc_ast = "0.155.0"
+oxc_ast_visit = "0.155.0"
+oxc_diagnostics = "0.155.0"
+oxc_parser = "0.155.0"
+oxc_semantic = "0.155.0"
+oxc_span = "0.155.0"
+oxc_str = "0.155.0"
+oxc_syntax = "0.155.0"
 # ruff, ty and related crates
 ruff_python_parser = "0.0.14"
 ruff_python_stdlib = "0.0.14"
