@@ -241,7 +241,7 @@ Monty runs JavaScript as a second language behind the same wire protocol and poo
 - `crates/monty-regexp` — a vendored copy of quickjs-oxide's `oxide-regexp` (MIT; a safe-Rust port of QuickJS's
     `libregexp`/`libunicode`, `#![forbid(unsafe_code)]`, no dependencies): an ECMAScript `RegExp` compiler and
     backtracking executor over UTF-16 code units plus the Unicode 17 case, normalization and property tables, for the
-    engine's `RegExp` (not wired up yet). Its README records the upstream commit and how to sync; the generated tables
+    engine's `RegExp` (`builtins/regexp.rs`). Its README records the upstream commit and how to sync; the generated tables
     under `src/unicode/generated/` stay byte-identical to upstream, so lint expectations for them sit on the
     `mod tables` declarations, never inside the generated files.
 

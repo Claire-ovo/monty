@@ -139,7 +139,7 @@ impl Vm<'_> {
             Some(Callable::Closure { function, cells }) => self.enter_nested(|vm| {
                 let depth = vm.frames.len();
                 vm.push_closure_frame(function, &cells, callee, args, Invocation::call(this))?;
-                vm.run(depth)
+                vm.run_to_return(depth)
             }),
         }
     }
@@ -157,7 +157,7 @@ impl Vm<'_> {
             Some(Callable::Closure { function, cells }) if function.kind.is_constructor() => self.enter_nested(|vm| {
                 let depth = vm.frames.len();
                 vm.push_construct_frame(function, &cells, callee, args, new_target)?;
-                vm.run(depth)
+                vm.run_to_return(depth)
             }),
             Some(Callable::Native(native)) if native.is_constructor() => {
                 let subclassed = new_target != callee;
@@ -462,7 +462,7 @@ impl Vm<'_> {
 
     /// Runs a nested dispatch loop for a call made from Rust, bounding how
     /// deep natives and compiled code may alternate.
-    fn enter_nested<T>(&mut self, body: impl FnOnce(&mut Self) -> RunResult<T>) -> RunResult<T> {
+    pub(super) fn enter_nested<T>(&mut self, body: impl FnOnce(&mut Self) -> RunResult<T>) -> RunResult<T> {
         if self.reentrancy >= MAX_REENTRANCY {
             return Err(self.range_error("Maximum call stack size exceeded"));
         }
@@ -616,6 +616,7 @@ impl Vm<'_> {
             callee,
             new_target,
             construct,
+            generator: None,
         });
         Ok(())
     }
@@ -642,6 +643,20 @@ impl Vm<'_> {
             fields: None,
         };
         let object = self.new_function_object(callable, function.name, function.param_count);
+        if function.kind.is_generator() {
+            // a generator function inherits from %GeneratorFunction.prototype% and
+            // carries a fresh `prototype` for its generators, without a `constructor`
+            let function_proto = self.session.realm.generator_function_prototype;
+            self.set_prototype(object, Some(function_proto));
+            let generator_proto = self.session.realm.generator_prototype;
+            let prototype = self.new_object_with_proto(Some(generator_proto));
+            self.define_with_flags(
+                object,
+                PropertyKey::Atom(StaticAtom::Prototype.id()),
+                prototype,
+                PropFlags::WRITABLE,
+            );
+        }
         if function.kind == FunctionKind::Normal {
             // a constructible function carries a fresh `prototype` whose `constructor` is the function
             let prototype = self.new_object();

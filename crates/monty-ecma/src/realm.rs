@@ -39,6 +39,9 @@ pub(crate) struct Realm {
     pub set_iterator_prototype: HeapId,
     pub regexp_prototype: HeapId,
     pub regexp_string_iterator_prototype: HeapId,
+    pub generator_prototype: HeapId,
+    /// `%GeneratorFunction.prototype%`: the prototype of every `function*` object.
+    pub generator_function_prototype: HeapId,
 }
 
 impl Realm {
@@ -74,6 +77,8 @@ impl Realm {
             set_iterator_prototype: zero,
             regexp_prototype: zero,
             regexp_string_iterator_prototype: zero,
+            generator_prototype: zero,
+            generator_function_prototype: zero,
         }
     }
 

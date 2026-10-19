@@ -294,6 +294,49 @@ pub(crate) enum ObjectClass {
         string: JsString,
         done: bool,
     },
+    Generator(Box<GeneratorState>),
+}
+
+/// Where a generator is in its life: its frame is parked here between
+/// `next` calls, taken out while it runs, and gone once the body returns.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) enum GeneratorState {
+    Suspended(SavedFrame),
+    Running,
+    Completed,
+}
+
+/// A generator's frame between resumptions: the function object it runs
+/// (an owned reference), the instruction to continue at, and its locals and
+/// operands as they were on the stack.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct SavedFrame {
+    #[serde(rename = "C")]
+    pub callee: HeapId,
+    #[serde(rename = "I")]
+    pub ip: u32,
+    #[serde(rename = "V")]
+    pub values: Vec<JsValue>,
+}
+
+impl GeneratorState {
+    fn for_each_child(&self, mut on_child: impl FnMut(HeapId)) {
+        if let Self::Suspended(frame) = self {
+            on_child(frame.callee);
+            for value in &frame.values {
+                if let Some(id) = value.heap_id() {
+                    on_child(id);
+                }
+            }
+        }
+    }
+
+    fn dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
+        if let Self::Suspended(frame) = mem::replace(self, Self::Completed) {
+            stack.push(frame.callee);
+            stack.extend(frame.values.into_iter().filter_map(|value| value.heap_id()));
+        }
+    }
 }
 
 /// A `RegExp` object's internal slots: the pattern text and flags it was
@@ -405,6 +448,7 @@ impl ObjectClass {
             Self::ArrayIterator { array, .. } => on_child(*array),
             Self::MapIterator { map, .. } => on_child(*map),
             Self::RegExpStringIterator { regexp, .. } => on_child(*regexp),
+            Self::Generator(state) => state.for_each_child(on_child),
             Self::Map(data) | Self::Set(data) | Self::WeakMap(data) | Self::WeakSet(data) => {
                 data.for_each_child(on_child);
             }
@@ -418,6 +462,7 @@ impl ObjectClass {
             Self::ArrayIterator { array, .. } => stack.push(*array),
             Self::MapIterator { map, .. } => stack.push(*map),
             Self::RegExpStringIterator { regexp, .. } => stack.push(*regexp),
+            Self::Generator(state) => state.dec_ref_ids(stack),
             Self::Map(data) | Self::Set(data) | Self::WeakMap(data) | Self::WeakSet(data) => data.dec_ref_ids(stack),
             _ => {}
         }

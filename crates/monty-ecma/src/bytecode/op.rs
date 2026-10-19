@@ -251,6 +251,22 @@ pub(crate) enum Opcode {
     RequireObjectCoercible = 144,
     /// Push a new `RegExp` object for a literal. Operands: u16 pattern atom, u16 flags atom.
     MakeRegExp = 145,
+
+    // === Generators ===
+    /// End of a generator's prologue: suspend the frame into a new generator
+    /// object, which the call returns. On resume: `` → `sent mode`.
+    InitialYield = 150,
+    /// `value` → (suspended) → `sent mode`. Operand: u8, 1 to hand `value` to
+    /// the caller as the iterator result itself (`yield*`), 0 to wrap it.
+    Yield = 151,
+    /// `value mode` → `value`: jump when the generator was resumed with
+    /// `next`, fall through for `return` (the return path follows), throw
+    /// `value` for `throw`.
+    ResumeGenerator = 152,
+    /// One `yield*` step: `iter sent mode` → `iter result` (fall through to
+    /// yield `result` as is), or `value mode` with a jump once the inner
+    /// iterator is done.
+    DelegateStep = 153,
 }
 
 /// How many operand bytes follow an opcode.
@@ -336,9 +352,10 @@ impl Opcode {
             | Self::ForInStart
             | Self::ToString
             | Self::ToPropertyKey
+            | Self::InitialYield
             | Self::Nop => OperandShape::None,
             Self::LoadInt | Self::IncDec => OperandShape::I8,
-            Self::DefineAccessor | Self::TemplateConcat | Self::Call | Self::New => OperandShape::U8,
+            Self::DefineAccessor | Self::TemplateConcat | Self::Call | Self::New | Self::Yield => OperandShape::U8,
             Self::SuperCall => OperandShape::U8,
             Self::LoadConst
             | Self::LoadLocal
@@ -374,7 +391,9 @@ impl Opcode {
             | Self::JumpIfNotNullishKeep
             | Self::JumpIfNullishKeep
             | Self::JumpIfUndefinedKeep
-            | Self::IteratorNext => OperandShape::I16,
+            | Self::IteratorNext
+            | Self::ResumeGenerator
+            | Self::DelegateStep => OperandShape::I16,
             Self::LoadLocalChecked | Self::LoadCellChecked | Self::LoadScript | Self::MakeRegExp => {
                 OperandShape::U16U16
             }

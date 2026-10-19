@@ -10,7 +10,7 @@ use crate::{
     builtins::regexp,
     error::RunResult,
     heap::{FunctionObject, HeapId, IterKind, JsObject, ObjectClass, PropertyKey, Slot},
-    intern::StaticAtom,
+    intern::{StaticAtom, WellKnownSymbol},
     value::JsValue,
 };
 
@@ -85,8 +85,13 @@ impl Vm<'_> {
                 "[object Array]".to_owned()
             } else if matches!(self.object(*id).map(|o| &o.class), Some(ObjectClass::RegExp(_))) {
                 "[object RegExp]".to_owned()
+            } else if matches!(self.object(*id).map(|o| &o.class), Some(ObjectClass::Error)) {
+                self.error_base(*id)?.lines().next().unwrap_or_default().to_owned()
+            } else if let Some(name) = self.constructor_name(*id, false) {
+                format!("#<{name}>")
             } else {
-                "#<Object>".to_owned()
+                let tag = self.string_tag(*id, true).unwrap_or_else(|| "Object".to_owned());
+                format!("[object {tag}]")
             }),
             JsValue::Atom(_) | JsValue::Str(_) => Ok(self.string_of(value).expect("string").to_string_lossy()),
             other => self.inspect(other),
@@ -175,6 +180,7 @@ impl Vm<'_> {
             ObjectClass::RegExpStringIterator { .. } => {
                 ("Object [RegExp String Iterator]".to_owned(), ["{", "}"], false, false)
             }
+            ObjectClass::Generator(_) => (self.ordinary_prefix(id), ["{", "}"], false, false),
             ObjectClass::Ordinary => (self.ordinary_prefix(id), ["{", "}"], false, false),
         };
         // a regexp without extra properties prints whole at any depth, like a primitive
@@ -422,6 +428,13 @@ impl Vm<'_> {
             };
         }
         let bound = matches!(object.class, ObjectClass::Function(FunctionObject::Bound { .. }));
+        let is_generator = matches!(&object.class, ObjectClass::Function(FunctionObject::Closure { func, .. }) if self.session.interns.function(*func).kind.is_generator());
+        if is_generator {
+            return match name {
+                Some(name) if !name.is_empty() => format!("[GeneratorFunction: {name}]"),
+                _ => "[GeneratorFunction (anonymous)]".to_owned(),
+            };
+        }
         match name {
             Some(name) if !name.is_empty() => format!("[Function: {name}]"),
             _ if bound => "[Function: bound]".to_owned(),
@@ -466,35 +479,62 @@ impl Vm<'_> {
         let Some(object) = self.object(id) else {
             return String::new();
         };
-        let Some(proto) = object.proto else {
+        if object.proto.is_none() {
             return "[Object: null prototype]".to_owned();
-        };
-        if proto == self.session.realm.object_prototype {
-            return String::new();
         }
-        let mut current = Some(proto);
-        while let Some(proto_id) = current {
-            let Some(proto_object) = self.object(proto_id) else {
-                break;
-            };
-            if let Some(Slot::Data {
-                value: JsValue::Ref(ctor),
-                ..
-            }) = proto_object.props.get(&PropertyKey::Atom(StaticAtom::Constructor.id()))
-            {
-                let name = self
-                    .object(*ctor)
-                    .and_then(|c| match c.props.get(&PropertyKey::Atom(StaticAtom::Name.id())) {
-                        Some(Slot::Data { value, .. }) => self.string_of(value),
-                        _ => None,
-                    })
-                    .map(|s| s.to_string_lossy())
-                    .unwrap_or_default();
-                return name;
+        let name = self.constructor_name(id, true).unwrap_or_default();
+        // Node shows an inherited (or hidden own) `Symbol.toStringTag` that differs from the constructor
+        match self.string_tag(id, false) {
+            Some(tag) if tag != name => {
+                let name = if name.is_empty() { "Object" } else { &name };
+                format!("{name} [{tag}]")
             }
-            current = proto_object.proto;
+            _ if name == "Object" => String::new(),
+            _ => name,
         }
-        String::new()
+    }
+
+    /// The name of the nearest `constructor` along the prototype chain (own
+    /// property included) that is a function with a non-empty name. Node keeps
+    /// looking past a `constructor` that is not a function (`skip_non_functions`);
+    /// V8's error messages stop at the first one.
+    fn constructor_name(&self, id: HeapId, skip_non_functions: bool) -> Option<String> {
+        let mut current = Some(id);
+        while let Some(current_id) = current {
+            let object = self.object(current_id)?;
+            if let Some(Slot::Data { value, .. }) = object.props.get(&PropertyKey::Atom(StaticAtom::Constructor.id())) {
+                let function = value.heap_id().filter(|ctor| self.is_callable_id(*ctor));
+                if function.is_some() || !skip_non_functions {
+                    return function
+                        .and_then(|ctor| self.object(ctor))
+                        .and_then(|c| self.own_name(c))
+                        .filter(|name| !name.is_empty());
+                }
+            }
+            current = object.proto;
+        }
+        None
+    }
+
+    /// A string `Symbol.toStringTag` found on the object or its prototypes;
+    /// an own enumerable tag is ignored unless `own_enumerable` is set.
+    fn string_tag(&self, id: HeapId, own_enumerable: bool) -> Option<String> {
+        let key = PropertyKey::Symbol(WellKnownSymbol::ToStringTag.id());
+        let mut current = Some(id);
+        let mut own = true;
+        while let Some(current_id) = current {
+            let object = self.object(current_id)?;
+            if let Some(Slot::Data { value, flags }) = object.props.get(&key) {
+                let visible = own_enumerable || !own || !flags.enumerable();
+                return match self.string_of(value) {
+                    Some(tag) if visible && !tag.is_empty() => Some(tag.to_string_lossy()),
+                    _ => None,
+                };
+            }
+            own = false;
+            current = object.proto;
+        }
+        None
     }
 
     /// A key as a property label: bare identifiers, quoted strings, `[Symbol(x)]`.

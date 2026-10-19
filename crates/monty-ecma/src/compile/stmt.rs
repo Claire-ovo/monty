@@ -445,7 +445,7 @@ impl<'c> Compiler<'c> {
     }
 
     /// Returns the top value, running enclosing `finally` blocks first.
-    fn emit_return(&mut self) -> Result<(), CompileError> {
+    pub(super) fn emit_return(&mut self) -> Result<(), CompileError> {
         for index in (0..self.func().controls.len()).rev() {
             match &self.func().controls[index] {
                 Control::Finally { .. } => {

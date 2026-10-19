@@ -5,7 +5,7 @@ use oxc_ast::ast::{
     AssignmentOperator, AssignmentTarget, BinaryOperator, CallExpression, ChainElement, ChainExpression, Expression,
     Function, IdentifierReference, LogicalOperator, MemberExpression, NewExpression, ObjectExpression,
     ObjectPropertyKind, PropertyKey, PropertyKind, RegExpFlags, RegExpLiteral, SimpleAssignmentTarget, TemplateLiteral,
-    UnaryOperator, UpdateExpression, UpdateOperator,
+    UnaryOperator, UpdateExpression, UpdateOperator, YieldExpression,
 };
 use oxc_span::GetSpan;
 
@@ -163,7 +163,7 @@ impl<'c> Compiler<'c> {
             }
             Expression::ClassExpression(class) => self.compile_class(class, name),
             Expression::AwaitExpression(_) => Err(CompileError::unsupported("async functions", Self::span_of(expr))),
-            Expression::YieldExpression(_) => Err(CompileError::unsupported("generators", Self::span_of(expr))),
+            Expression::YieldExpression(yield_expr) => self.compile_yield(yield_expr),
             Expression::RegExpLiteral(lit) => self.compile_regexp(lit),
             Expression::BigIntLiteral(_) => Err(CompileError::unsupported("BigInt", Self::span_of(expr))),
             Expression::TaggedTemplateExpression(_) => {
@@ -273,14 +273,16 @@ impl<'c> Compiler<'c> {
         name: AtomId,
         kind: FunctionKind,
     ) -> Result<FunctionId, CompileError> {
-        if function.r#async || function.generator {
-            let feature = if function.generator {
-                "generators"
-            } else {
-                "async functions"
-            };
-            return Err(CompileError::unsupported(feature, Self::span_of(function)));
+        if function.r#async {
+            return Err(CompileError::unsupported("async functions", Self::span_of(function)));
         }
+        let kind = if function.generator {
+            FunctionKind::Generator {
+                method: kind == FunctionKind::Method,
+            }
+        } else {
+            kind
+        };
         let body = function
             .body
             .as_ref()
@@ -847,6 +849,40 @@ impl<'c> Compiler<'c> {
         let pattern = atom_operand(self.intern_units(pattern_units.into_iter()))?;
         let flags = atom_operand(self.intern_str(&flags))?;
         self.builder().emit_u16_u16(Opcode::MakeRegExp, pattern, flags)
+    }
+
+    /// `yield value`: suspends with the value, then dispatches on how the
+    /// generator was resumed. `yield* iterable` loops a [`Opcode::DelegateStep`]
+    /// that forwards each resumption to the inner iterator and yields its
+    /// results unwrapped.
+    fn compile_yield(&mut self, yield_expr: &'c YieldExpression<'c>) -> Result<(), CompileError> {
+        match &yield_expr.argument {
+            Some(argument) => self.compile_expression(argument)?,
+            None => self.builder().emit(Opcode::LoadUndefined)?,
+        }
+        if yield_expr.delegate {
+            self.builder()
+                .emit_u16(Opcode::GetIterator, atom_operand(StaticAtom::Empty.id())?)?;
+            self.builder().emit(Opcode::LoadUndefined)?;
+            self.builder().emit_i8(Opcode::LoadInt, 0)?;
+            let top = self.builder().target()?;
+            let done = self.builder().emit_jump(Opcode::DelegateStep)?;
+            self.builder().emit_u8(Opcode::Yield, 1)?;
+            self.builder().emit_jump_to(Opcode::Jump, top)?;
+            self.builder().patch_jump(done)?;
+        } else {
+            self.builder().emit_u8(Opcode::Yield, 0)?;
+        }
+        self.emit_resume_dispatch()
+    }
+
+    /// After a suspension point (`sent mode` on the stack): continue with
+    /// `sent` on `next`, or run the enclosing `finally` blocks and return it
+    /// on `return` (`throw` is raised by the instruction itself).
+    pub(super) fn emit_resume_dispatch(&mut self) -> Result<(), CompileError> {
+        let next = self.builder().emit_jump(Opcode::ResumeGenerator)?;
+        self.emit_return()?;
+        self.builder().patch_jump(next)
     }
 
     fn compile_object(&mut self, object: &'c ObjectExpression<'c>) -> Result<(), CompileError> {

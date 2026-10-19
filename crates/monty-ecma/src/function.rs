@@ -82,8 +82,9 @@ pub(crate) enum FunctionKind {
     ClassConstructor { derived: bool },
     /// `async function`.
     Async,
-    /// `function*`.
-    Generator,
+    /// `function*`; `method` when it is an object or class method, so it
+    /// has a home object for `super`.
+    Generator { method: bool },
     /// `async function*`.
     AsyncGenerator,
 }
@@ -97,6 +98,19 @@ impl FunctionKind {
     /// Whether this is a class constructor, which `new` alone may call.
     pub fn is_class_constructor(self) -> bool {
         matches!(self, Self::ClassConstructor { .. })
+    }
+
+    /// Whether a call creates a generator object instead of running the body.
+    pub fn is_generator(self) -> bool {
+        matches!(self, Self::Generator { .. })
+    }
+
+    /// Whether the body may use `super`: it was defined with a home object.
+    pub fn has_home_object(self) -> bool {
+        matches!(
+            self,
+            Self::Method | Self::ClassConstructor { .. } | Self::Generator { method: true }
+        )
     }
 
     /// A derived constructor's `this` exists only once `super()` returns.

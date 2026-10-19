@@ -32,11 +32,15 @@ Each of these is a `SyntaxError` at compile time naming the feature (`generators
 - Private fields and methods (`#x`), `accessor` properties, decorators
 - `super()` inside an arrow function in a derived constructor
 - A computed key before a rest element in an object pattern (`const { [k]: a, ...rest } = o`)
-- Generators (`function*`, `yield`), async functions, `await`, `for await`
+- Async functions, `await`, `for await` and async generators
 - `BigInt` literals; the `BigInt` global exists so feature checks work, but calling it throws a `TypeError`
 - Tagged templates
 - `using` declarations
 - TypeScript and JSX syntax
+
+Generators (`function*`, `yield`, `yield*`, generator methods) work as in Node, except that
+`Object.getPrototypeOf(function* () {}).constructor` (the `GeneratorFunction` constructor) does not exist, so a
+generator function cannot be built from source text.
 
 Within classes:
 

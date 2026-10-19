@@ -9,7 +9,7 @@ use super::{
 use crate::{
     error::RunResult,
     heap::{HeapId, IterKind, ObjectClass, PropFlags, PropertyKey},
-    intern::{StaticAtom, WellKnownSymbol},
+    intern::WellKnownSymbol,
     string::JsString,
     value::JsValue,
     vm::{Vm, number::to_usize, property::IteratorStep},
@@ -826,17 +826,7 @@ pub(super) fn iterator_next(vm: &mut Vm<'_>, this: &JsValue, _: &[JsValue], _: b
         IteratorStep::Done => (JsValue::Undefined, true),
         IteratorStep::NotBuiltin => return Err(vm.type_error("next method called on incompatible receiver")),
     };
-    let result = vm.new_object();
-    let JsValue::Ref(result_id) = &result else {
-        unreachable!()
-    };
-    vm.define_data(*result_id, PropertyKey::Atom(StaticAtom::Value.id()), value);
-    vm.define_data(
-        *result_id,
-        PropertyKey::Atom(StaticAtom::Done.id()),
-        JsValue::Bool(done),
-    );
-    Ok(result)
+    Ok(vm.iter_result(value, done))
 }
 
 /// `%IteratorPrototype%[Symbol.iterator]`: returns the receiver.

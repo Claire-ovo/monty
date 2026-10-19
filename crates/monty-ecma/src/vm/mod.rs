@@ -9,6 +9,7 @@
 //! and `inspect.rs` (`console.log` formatting).
 
 pub(crate) mod call;
+pub(crate) mod generator;
 pub(crate) mod inspect;
 pub(crate) mod number;
 pub(crate) mod ops;
@@ -20,6 +21,7 @@ use call::Invocation;
 use monty_heap::ContainsHeap;
 use monty_types::{MontyException, PrintWriter, ResourceError, ResourceTracker, StackFrame};
 
+use self::generator::ResumeMode;
 use crate::{
     builtins::regexp,
     bytecode::{Code, Opcode},
@@ -84,6 +86,8 @@ struct Frame {
     new_target: JsValue,
     /// How a `new` call's result is decided when the body returns.
     construct: Construct,
+    /// The generator object this frame belongs to, which a `Yield` parks it in.
+    generator: Option<HeapId>,
 }
 
 /// What a frame does with its return value under `new`.
@@ -133,7 +137,7 @@ impl<'p> Vm<'p> {
     pub fn run_module(&mut self, module: Arc<Function>) -> RunResult<JsValue> {
         self.traceback.clear();
         self.push_frame(module, None, Vec::new(), Invocation::call(JsValue::Undefined))?;
-        self.run(0)
+        self.run_to_return(0)
     }
 
     /// The frames an uncaught throw unwound, outermost first.
@@ -146,32 +150,67 @@ impl<'p> Vm<'p> {
     // === Dispatch ===
 
     /// Executes frames until the one at depth `stop_depth` returns, yielding
-    /// its value. A throw no frame above `stop_depth` catches unwinds those
-    /// frames and surfaces as `Err`.
-    fn run(&mut self, stop_depth: usize) -> RunResult<JsValue> {
+    /// its value; a generator frame yielding at that depth ends the run too.
+    /// A throw no frame above `stop_depth` catches unwinds those frames and
+    /// surfaces as `Err`.
+    pub(super) fn run(&mut self, stop_depth: usize) -> RunResult<Outcome> {
         loop {
-            match self.step() {
-                Ok(Step::Continue) => {}
-                Ok(Step::Return(value)) => {
-                    let value = match self.finish_return(value) {
-                        Ok(value) => value,
-                        Err(throw) => {
-                            self.handle_throw(throw, stop_depth)?;
-                            continue;
+            let value = match self.step() {
+                Ok(Step::Continue) => continue,
+                Ok(Step::Return(value)) => match self.finish_return(value) {
+                    Ok(value) => {
+                        let frame = self.frames.pop().expect("returning from a frame");
+                        self.clear_stack(frame.base);
+                        frame.new_target.drop_with(&mut self.session.heap);
+                        if let Some(callee) = frame.callee {
+                            self.session.heap.dec_ref(callee);
                         }
+                        value
+                    }
+                    Err(throw) => {
+                        self.handle_throw(throw, stop_depth)?;
+                        continue;
+                    }
+                },
+                Ok(Step::InitialYield) => match self.create_generator() {
+                    Ok(generator) => generator,
+                    Err(throw) => {
+                        self.handle_throw(throw, stop_depth)?;
+                        continue;
+                    }
+                },
+                Ok(Step::Yield { value, raw }) => {
+                    let result = if raw { value } else { self.iter_result(value, false) };
+                    let Some(generator) = self.frames.last().expect("frame").generator else {
+                        result.drop_with(&mut self.session.heap);
+                        return Err(self.internal_error("yield outside a generator"));
                     };
-                    let frame = self.frames.pop().expect("returning from a frame");
-                    self.clear_stack(frame.base);
-                    frame.new_target.drop_with(&mut self.session.heap);
-                    if let Some(callee) = frame.callee {
-                        self.session.heap.dec_ref(callee);
+                    self.suspend_frame(generator);
+                    if self.frames.len() != stop_depth {
+                        result.drop_with(&mut self.session.heap);
+                        return Err(self.internal_error("yield below the resume boundary"));
                     }
-                    if self.frames.len() == stop_depth {
-                        return Ok(value);
-                    }
-                    self.stack.push(value);
+                    return Ok(Outcome::Yield(result));
                 }
-                Err(throw) => self.handle_throw(throw, stop_depth)?,
+                Err(throw) => {
+                    self.handle_throw(throw, stop_depth)?;
+                    continue;
+                }
+            };
+            if self.frames.len() == stop_depth {
+                return Ok(Outcome::Return(value));
+            }
+            self.stack.push(value);
+        }
+    }
+
+    /// [`run`](Self::run) for a frame that cannot yield.
+    pub(super) fn run_to_return(&mut self, stop_depth: usize) -> RunResult<JsValue> {
+        match self.run(stop_depth)? {
+            Outcome::Return(value) => Ok(value),
+            Outcome::Yield(value) => {
+                value.drop_with(&mut self.session.heap);
+                Err(self.internal_error("unexpected yield"))
             }
         }
     }
@@ -917,6 +956,31 @@ impl<'p> Vm<'p> {
                 let value = self.pop();
                 return Ok(Step::Return(value));
             }
+            Opcode::InitialYield => return Ok(Step::InitialYield),
+            Opcode::Yield => {
+                let raw = self.operand_u8() == 1;
+                let value = self.pop();
+                return Ok(Step::Yield { value, raw });
+            }
+            Opcode::ResumeGenerator => {
+                let offset = self.operand_i16();
+                let mode = self.pop();
+                match ResumeMode::from_value(&mode) {
+                    Some(ResumeMode::Next) => self.jump(offset),
+                    Some(ResumeMode::Return) => {}
+                    Some(ResumeMode::Throw) => {
+                        let value = self.pop();
+                        return Err(Throw::Value(value));
+                    }
+                    None => return Err(self.internal_error("bad resume mode")),
+                }
+            }
+            Opcode::DelegateStep => {
+                let offset = self.operand_i16();
+                if self.delegate_step()? {
+                    self.jump(offset);
+                }
+            }
             Opcode::ReturnUndefined => return Ok(Step::Return(JsValue::Undefined)),
             Opcode::SuperCall => {
                 let count = usize::from(self.operand_u8());
@@ -1225,6 +1289,20 @@ enum Step {
     Continue,
     /// The frame returned this value.
     Return(JsValue),
+    /// A generator's prologue finished: park the frame and return the new generator object.
+    InitialYield,
+    /// The frame yielded `value`; `raw` hands it over as the iterator result itself.
+    Yield {
+        value: JsValue,
+        raw: bool,
+    },
+}
+
+/// How a nested run ended: the frame at the stop depth returned, or it was a
+/// generator frame that yielded (only `Vm::resume_generator` runs those).
+pub(crate) enum Outcome {
+    Return(JsValue),
+    Yield(JsValue),
 }
 
 impl ContainsHeap for Vm<'_> {

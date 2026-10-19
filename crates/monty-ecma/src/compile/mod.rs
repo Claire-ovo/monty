@@ -301,6 +301,12 @@ impl<'c> Compiler<'c> {
         }
         self.emit_parameter_defaults(params)?;
         self.emit_parameter_patterns()?;
+        if kind.is_generator() {
+            // the call runs the prologue, then hands back the generator object
+            self.builder().emit(Opcode::InitialYield)?;
+            self.emit_resume_dispatch()?;
+            self.builder().emit(Opcode::Pop)?;
+        }
         match body {
             FunctionBody::Block(statements) => {
                 self.hoist_functions(statements)?;
@@ -687,7 +693,7 @@ impl<'c> Compiler<'c> {
             .iter()
             .rev()
             .find(|state| state.kind != FunctionKind::Arrow)
-            .is_some_and(|state| matches!(state.kind, FunctionKind::Method | FunctionKind::ClassConstructor { .. }))
+            .is_some_and(|state| state.kind.has_home_object())
     }
 
     /// Resolves an implicit per-function binding held in `slot_of` the owning

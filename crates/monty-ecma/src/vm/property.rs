@@ -884,6 +884,15 @@ impl Vm<'_> {
         Ok(value)
     }
 
+    /// An iterator result object `{ value, done }`, consuming `value`.
+    pub fn iter_result(&mut self, value: JsValue, done: bool) -> JsValue {
+        let result = self.new_object();
+        let id = result.heap_id().expect("object");
+        self.define_data(id, PropertyKey::Atom(StaticAtom::Value.id()), value);
+        self.define_data(id, PropertyKey::Atom(StaticAtom::Done.id()), JsValue::Bool(done));
+        result
+    }
+
     /// Advances a builtin iterator.
     pub fn builtin_iterator_next(&mut self, id: HeapId) -> RunResult<IteratorStep> {
         let step = match self.object(id).map(|o| &o.class) {

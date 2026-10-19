@@ -433,6 +433,9 @@ impl Opcode {
             Self::SuperCallSpread => 0,
             Self::MakeClass => -1,
             Self::MakeRegExp => 1,
+            Self::InitialYield => 2,
+            Self::Yield => 1,
+            Self::ResumeGenerator | Self::DelegateStep => -1,
             Self::ReturnUndefined | Self::ThrowError | Self::Rethrow => 0,
         }
     }

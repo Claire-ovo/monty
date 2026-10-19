@@ -12,6 +12,7 @@ mod collections;
 mod console;
 mod error;
 mod function;
+mod generator;
 mod global;
 mod json;
 mod math;
@@ -254,6 +255,10 @@ natives! {
     WeakSetProtoHas => ("has", 1, false, collections::weak_set_has),
     WeakSetProtoDelete => ("delete", 1, false, collections::weak_set_delete),
     ObjectGroupBy => ("groupBy", 2, false, collections::object_group_by),
+    // Generators
+    GeneratorProtoNext => ("next", 1, false, generator::next),
+    GeneratorProtoReturn => ("return", 1, false, generator::return_),
+    GeneratorProtoThrow => ("throw", 1, false, generator::throw),
     // RegExp
     RegExp => ("RegExp", 2, true, regexp::constructor),
     RegExpProtoExec => ("exec", 1, false, regexp::exec),
@@ -334,6 +339,7 @@ pub(crate) fn create_realm(vm: &mut Vm<'_>) {
     error::install(vm, global);
     collections::install(vm, global);
     regexp::install(vm, global);
+    generator::install(vm, global);
     math::install(vm, global);
     json::install(vm, global);
     console::install(vm, global);
