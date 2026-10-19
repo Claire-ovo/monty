@@ -46,7 +46,7 @@ const CHECK_INTERVAL: u8 = 255;
 
 /// Nested `run` loops a native may stack (a callback calling a builtin
 /// calling a callback…) before the Rust stack is protected by a `RangeError`.
-const MAX_REENTRANCY: usize = 200;
+pub(super) const MAX_REENTRANCY: usize = 200;
 
 /// Everything a session keeps between feeds.
 #[derive(Serialize, Deserialize)]
@@ -88,6 +88,9 @@ pub(crate) struct Vm<'p> {
     ticks: u8,
     /// Depth of nested `run` loops entered from natives.
     reentrancy: usize,
+    /// Builtins on the Rust stack (a builtin calling `toString` calling a
+    /// builtin…), bounded like nested runs are.
+    native_depth: usize,
     /// The microtask queue: promise reactions and `queueMicrotask` callbacks.
     jobs: VecDeque<Job>,
     /// Pending timers, run in due order once the microtasks drain.
@@ -179,6 +182,7 @@ impl<'p> Vm<'p> {
             traceback: Vec::new(),
             ticks: 0,
             reentrancy: 0,
+            native_depth: 0,
             jobs: VecDeque::new(),
             timers: Vec::new(),
             timer_clock: 0.0,

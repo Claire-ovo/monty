@@ -19,6 +19,7 @@ use crate::{
     parse::parse,
     realm::{ErrorKind, Realm, ScriptScope},
     resolve::Analysis,
+    source_nesting::{TOO_DEEP, nesting_bound_exceeded},
     value::JsValue,
     vm::{
         Session, Vm,
@@ -276,12 +277,17 @@ impl JsRepl {
     }
 
     /// Rejects a snippet before parsing: nothing to check yet beyond size.
+    /// Rejects a snippet before anything parses it: one too large for the
+    /// parser's offsets, or nested too deeply for the parser's stack.
     pub fn check_source(&self, code: &str) -> Result<(), MontyException> {
         if code.len() > u32::MAX as usize / 2 {
             return Err(MontyException::new(
                 ExcType::SyntaxError,
                 Some("source is too large".to_owned()),
             ));
+        }
+        if nesting_bound_exceeded(code).is_some() {
+            return Err(MontyException::new(ExcType::SyntaxError, Some(TOO_DEEP.to_owned())));
         }
         Ok(())
     }

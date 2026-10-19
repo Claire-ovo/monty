@@ -736,22 +736,36 @@ pub(super) fn flat(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -
     vm.new_array(out)
 }
 
+/// Appends `array`'s elements flattened `depth` levels, walking nested
+/// arrays with an explicit stack so deep nesting cannot overflow the Rust one.
 fn flatten_into(vm: &mut Vm<'_>, array: HeapId, depth: f64, out: &mut Vec<JsValue>) -> RunResult<()> {
-    for index in 0..len(vm, array) {
-        if raw_element_is_hole(vm, array, index) {
+    // (array, next index, remaining depth); every array on the stack is borrowed from its parent
+    let mut stack = vec![(array, 0usize, depth)];
+    let mut steps = 0usize;
+    while let Some((current, index, remaining)) = stack.last_mut() {
+        if *index >= len(vm, *current) {
+            stack.pop();
             continue;
         }
-        let item = element(vm, array, index);
-        if depth >= 1.0 && vm.is_array(&item) {
+        let (current, remaining) = (*current, *remaining);
+        let at = *index;
+        *index += 1;
+        if raw_element_is_hole(vm, current, at) {
+            continue;
+        }
+        let item = element(vm, current, at);
+        if remaining >= 1.0 && vm.is_array(&item) {
             let JsValue::Ref(inner) = &item else { unreachable!() };
             let inner = *inner;
-            let result = flatten_into(vm, inner, depth - 1.0, out);
             item.drop_with(&mut vm.session.heap);
-            result?;
+            vm.tracker().check_growth(stack.len(), stack.capacity(), 32)?;
+            stack.push((inner, 0, remaining - 1.0));
         } else {
             vm.tracker().check_growth(out.len(), out.capacity(), 16)?;
             out.push(item);
         }
+        steps += 1;
+        vm.tracker().check_time_every(steps)?;
     }
     Ok(())
 }

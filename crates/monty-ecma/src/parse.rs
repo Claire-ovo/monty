@@ -14,7 +14,10 @@ use oxc_parser::Parser;
 use oxc_semantic::{Scoping, SemanticBuilder};
 use oxc_span::SourceType;
 
-use crate::error::CompileError;
+use crate::{
+    error::CompileError,
+    source_nesting::{TOO_DEEP, nesting_bound_exceeded},
+};
 
 /// Parses `source` into `allocator`, returning the annotated program and its scoping.
 ///
@@ -23,6 +26,10 @@ use crate::error::CompileError;
 // TODO(ts-syntax): take a `Language` and pick `SourceType::ts()` for TypeScript
 // feeds; the compiler already walks oxc's TypeScript-capable AST.
 pub(crate) fn parse<'a>(allocator: &'a Allocator, source: &'a str) -> Result<(Program<'a>, Scoping), CompileError> {
+    if let Some(offset) = nesting_bound_exceeded(source) {
+        let offset = u32::try_from(offset).unwrap_or(u32::MAX);
+        return Err(CompileError::syntax(TOO_DEEP, (offset, offset.saturating_add(1))));
+    }
     let parsed = Parser::new(allocator, source, SourceType::mjs()).parse();
     if let Some(error) = parsed.diagnostics.errors().next() {
         return Err(diagnostic_error(error));

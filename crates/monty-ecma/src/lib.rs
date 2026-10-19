@@ -24,6 +24,7 @@ mod parse;
 mod realm;
 mod repl;
 mod resolve;
+mod source_nesting;
 mod string;
 mod value;
 mod vm;

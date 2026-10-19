@@ -760,7 +760,13 @@ impl Vm<'_> {
         args: Vec<JsValue>,
         construct: bool,
     ) -> RunResult<JsValue> {
+        if self.native_depth >= MAX_REENTRANCY {
+            self.drop_all(this, args);
+            return Err(self.range_error("Maximum call stack size exceeded"));
+        }
+        self.native_depth += 1;
         let result = dispatch(self, native, &this, &args, construct);
+        self.native_depth -= 1;
         self.drop_all(this, args);
         result
     }

@@ -50,6 +50,9 @@ impl Vm<'_> {
     }
 }
 
+/// The deepest value the exporter follows.
+const MAX_EXPORT_DEPTH: usize = 1000;
+
 /// Builds the outgoing graph.
 struct Exporter {
     graph: MontyGraph,
@@ -78,6 +81,10 @@ impl Exporter {
     fn push_object(&mut self, vm: &mut Vm<'_>, id: HeapId) -> RunResult<NodeId> {
         if let Some(node) = self.seen.get(&id) {
             return Ok(*node);
+        }
+        // the export recurses per nesting level on the Rust stack
+        if self.path.len() >= MAX_EXPORT_DEPTH {
+            return Err(vm.range_error("value is nested too deeply to send to the host"));
         }
         if self.path.contains(&id) {
             let placeholder = if vm.is_array(&JsValue::Ref(id)) {

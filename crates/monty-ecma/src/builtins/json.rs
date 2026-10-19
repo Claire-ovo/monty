@@ -77,6 +77,11 @@ struct Serializer<'a> {
 impl Serializer<'_> {
     /// `SerializeJSONProperty`: writes `holder[key]`, returning whether anything was written.
     fn value(&mut self, vm: &mut Vm<'_>, holder: &JsValue, key: JsValue, depth: usize) -> RunResult<bool> {
+        // each nesting level recurses here, so the recursion limit applies to the structure too
+        if depth > MAX_JSON_DEPTH {
+            key.drop_with(&mut vm.session.heap);
+            return Err(vm.range_error("Maximum call stack size exceeded"));
+        }
         let property_key = vm.coerce_key(key.clone_with_heap(&vm.session.heap))?;
         let key_name = vm.key_display(property_key);
         let mut value = vm.get(holder, property_key)?;

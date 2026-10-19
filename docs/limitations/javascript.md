@@ -19,6 +19,14 @@ The engine is at an early stage, so most entries are features that are not imple
 - The completion value of the last top-level expression statement is the feed's result, as a REPL would report it.
 - Syntax errors carry oxc's wording (`Unexpected token`) rather than V8's, and the `SyntaxError` names the whole
     feed.
+- A feed whose estimated nesting (brackets, prefix and binary operator chains, arrows, conditionals, `else if`
+    chains, template holes, member chains) exceeds 500 levels is rejected with `SyntaxError: Source is too deeply   nested` before parsing, since the parser and compiler recurse on the native stack; the estimate overcounts, so a
+    convoluted source can be rejected well under that. `JsRepl::check_source` applies the same test for hosts.
+- Builtins that walk a structure recursively stop with `RangeError: Maximum call stack size exceeded` instead of
+    overflowing: `JSON.stringify` and `JSON.parse` beyond 512 levels, and chains of builtins calling each other
+    (`String` of arrays nested 200 deep, a `toString` that stringifies its own object); a value nested more than 1000
+    levels cannot be sent to the host (`RangeError: value is nested too deeply to send to the host`).
+    `Array.prototype.flat` walks any depth.
 - An uncaught throw ends the feed with the thrown error's nearest builtin class (`Error`, `TypeError`, `RangeError`,
     `ReferenceError`, `SyntaxError`, `EvalError`, `URIError`, `AggregateError`) and its `message`; a thrown non-error
     value is reported as `Error` with the message `Uncaught <value>`.
