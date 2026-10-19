@@ -30,7 +30,7 @@ The engine is at an early stage, so most entries are features that are not imple
 Each of these is a `SyntaxError` at compile time naming the feature (`classes is not supported`):
 
 - `class` declarations and expressions, `super`, `new.target`, private fields (`#x`)
-- Destructuring patterns in declarations, parameters, assignments and `for` heads
+- A computed key before a rest element in an object pattern (`const { [k]: a, ...rest } = o`)
 - Generators (`function*`, `yield`), async functions, `await`, `for await`
 - Regular expression literals
 - `BigInt` literals; the `BigInt` global exists so feature checks work, but calling it throws a `TypeError`
@@ -68,7 +68,11 @@ Differences within the available builtins:
     ("Array index too sparse") instead of creating a sparse array, and `length` can grow by at most that much at once.
 - `for…in` snapshots the enumerable keys before the first iteration, so keys added or deleted during the loop do not
     affect it.
-- A `for…of` loop does not call the iterator's `return()` when the body throws (it does on `break` and `return`).
+- A `for…of` loop does not call the iterator's `return()` when the body throws (it does on `break` and `return`),
+    and array destructuring does not call it when a `next()` call throws.
+- The not-iterable error of a destructuring declaration names the initializer as V8's call printer renders it
+    (`{}`, `null`, an identifier) and falls back to `(intermediate value)` for other expressions; V8 prints the full
+    source text.
 - `Symbol.toPrimitive` is consulted, but `Symbol.toStringTag`, `Symbol.hasInstance`, `Symbol.species`,
     `Symbol.isConcatSpreadable` and `Symbol.unscopables` have no effect.
 - `Math.random()` draws from a session-local generator with a fixed seed, so a session's sequence is reproducible

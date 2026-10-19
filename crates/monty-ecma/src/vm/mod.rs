@@ -24,7 +24,7 @@ use crate::{
     error::{RunResult, Throw, stack_frame},
     function::Function,
     heap::{Heap, HeapId, JsHeapData, JsObject, PropertyKey},
-    intern::{AtomId, FunctionId, Interns},
+    intern::{AtomId, FunctionId, Interns, StaticAtom},
     realm::{ErrorKind, Realm, ScriptScope},
     string::JsString,
     value::JsValue,
@@ -783,9 +783,18 @@ impl<'p> Vm<'p> {
             }
             Opcode::Rethrow => return Err(self.internal_error("Rethrow is not emitted")),
             Opcode::GetIterator => {
+                let name = AtomId::from_u16(self.operand_u16());
                 let iterable = self.pop();
-                let iterator = self.get_iterator(iterable)?;
+                let iterator = self.get_iterator_named(iterable, name)?;
                 self.stack.push(iterator);
+            }
+            Opcode::IteratorStep => {
+                let value = self.iterator_step()?;
+                self.stack.push(value);
+            }
+            Opcode::IteratorRest => {
+                let rest = self.iterator_rest()?;
+                self.stack.push(rest);
             }
             Opcode::IteratorNext => {
                 let offset = self.operand_i16();
@@ -828,9 +837,20 @@ impl<'p> Vm<'p> {
                 return Err(self.internal_error("CreateArguments is not emitted"));
             }
             Opcode::RequireObjectCoercible => {
+                let first = AtomId::from_u16(self.operand_u16());
                 if self.peek(0).is_nullish() {
-                    let shown = self.type_of(self.peek(0));
-                    return Err(self.type_error(&format!("Cannot destructure '{shown}' as it is {shown}.")));
+                    let what = if *self.peek(0) == JsValue::Null {
+                        "null"
+                    } else {
+                        "undefined"
+                    };
+                    let message = if first == StaticAtom::Empty.id() {
+                        format!("Cannot destructure '{what}' as it is {what}.")
+                    } else {
+                        let name = self.session.interns.atom(first).to_string_lossy();
+                        format!("Cannot destructure property '{name}' of '{what}' as it is {what}.")
+                    };
+                    return Err(self.type_error(&message));
                 }
             }
         }

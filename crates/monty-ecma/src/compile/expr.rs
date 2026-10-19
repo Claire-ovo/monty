@@ -19,7 +19,7 @@ use crate::{
 };
 
 /// The object (and key) of a member expression, pushed for the operation that follows.
-enum Member {
+pub(super) enum Member {
     /// `obj` is on the stack; the property name is this atom.
     Static(u16),
     /// `obj key` are on the stack.
@@ -220,7 +220,7 @@ impl<'c> Compiler<'c> {
     }
 
     /// Resolves an identifier used as an assignment target.
-    fn resolve_reference(&mut self, ident: &IdentifierReference<'c>) -> Result<Resolved, CompileError> {
+    pub(super) fn resolve_reference(&mut self, ident: &IdentifierReference<'c>) -> Result<Resolved, CompileError> {
         let symbol = ident
             .reference_id
             .get()
@@ -294,7 +294,7 @@ impl<'c> Compiler<'c> {
     // === Members and calls ===
 
     /// Pushes a member expression's object (and computed key).
-    fn compile_member_target(&mut self, member: &'c MemberExpression<'c>) -> Result<Member, CompileError> {
+    pub(super) fn compile_member_target(&mut self, member: &'c MemberExpression<'c>) -> Result<Member, CompileError> {
         match member {
             MemberExpression::StaticMemberExpression(member) => {
                 self.compile_expression(&member.object)?;
@@ -369,7 +369,7 @@ impl<'c> Compiler<'c> {
     /// How V8 names a callee in `x is not a function`: identifiers and member
     /// chains by their text, literals re-rendered, anything else as
     /// `(intermediate value)`.
-    fn callee_text(&mut self, callee: &Expression<'c>) -> AtomId {
+    pub(super) fn callee_text(&mut self, callee: &Expression<'c>) -> AtomId {
         let text = render_callee(callee);
         self.intern_str(&text)
     }
@@ -548,9 +548,17 @@ impl<'c> Compiler<'c> {
                 self.locate(assignment.span);
                 self.emit_member_op(set, atom)
             }
-            AssignmentTarget::ArrayAssignmentTarget(_) | AssignmentTarget::ObjectAssignmentTarget(_) => Err(
-                CompileError::unsupported("destructuring", Self::span_of(&assignment.left)),
-            ),
+            AssignmentTarget::ArrayAssignmentTarget(_) | AssignmentTarget::ObjectAssignmentTarget(_) => {
+                if assignment.operator != AssignmentOperator::Assign {
+                    return Err(CompileError::syntax(
+                        "Invalid left-hand side in assignment",
+                        Self::span_of(&assignment.left),
+                    ));
+                }
+                self.compile_expression(&assignment.right)?;
+                self.builder().emit(Opcode::Dup)?;
+                self.bind_target(&assignment.left)
+            }
             AssignmentTarget::TSAsExpression(_)
             | AssignmentTarget::TSSatisfiesExpression(_)
             | AssignmentTarget::TSNonNullExpression(_)

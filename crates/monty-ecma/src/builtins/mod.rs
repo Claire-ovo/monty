@@ -376,16 +376,7 @@ pub(crate) fn require_callable(vm: &mut Vm<'_>, value: &JsValue) -> RunResult<()
     if vm.is_callable(value) {
         return Ok(());
     }
-    let shown = match value {
-        JsValue::Undefined | JsValue::Hole => "undefined".to_owned(),
-        JsValue::Null => "object null".to_owned(),
-        JsValue::Bool(b) => format!("boolean {b}"),
-        JsValue::Number(_) => format!("number {}", vm.inspect(value)?),
-        JsValue::Atom(_) | JsValue::Str(_) => format!("string \"{}\"", vm.string_of(value).expect("string")),
-        JsValue::Symbol(_) => "symbol".to_owned(),
-        JsValue::BigInt(_) => "bigint".to_owned(),
-        JsValue::Ref(_) => "object".to_owned(),
-    };
+    let shown = vm.describe_for_error(value)?;
     Err(vm.type_error(&format!("{shown} is not a function")))
 }
 

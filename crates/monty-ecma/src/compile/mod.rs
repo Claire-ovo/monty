@@ -12,9 +12,10 @@
 //! state, scopes, resolution and function assembly.
 
 mod expr;
+mod pattern;
 mod stmt;
 
-use std::cell;
+use std::{cell, mem};
 
 use ahash::AHashMap;
 use oxc_ast::ast::{
@@ -115,6 +116,9 @@ struct FunctionState<'c> {
     scratch: Option<u16>,
     /// The slot a named function expression's own name reads.
     self_slot: Option<u16>,
+    /// Parameters written as patterns: the slot holding the argument and the
+    /// pattern to destructure it with once the scope is declared.
+    pattern_params: Vec<(u16, &'c BindingPattern<'c>)>,
     /// Optional chains being compiled, innermost last: each exit jump with
     /// how many operands it leaves to pop.
     chains: Vec<Vec<(JumpLabel, u16)>>,
@@ -239,6 +243,7 @@ impl<'c> Compiler<'c> {
             controls: Vec::new(),
             scratch: None,
             self_slot: None,
+            pattern_params: Vec::new(),
             chains: Vec::new(),
         });
     }
@@ -293,6 +298,7 @@ impl<'c> Compiler<'c> {
             self.func().self_slot = Some(slot.index);
         }
         self.emit_parameter_defaults(params)?;
+        self.emit_parameter_patterns()?;
         match body {
             FunctionBody::Block(statements) => {
                 self.hoist_functions(statements)?;
@@ -314,13 +320,13 @@ impl<'c> Compiler<'c> {
             .map_err(|_| CompileError::TooManyConstants)
     }
 
-    /// Assigns the first slots to the formal parameters, in order.
+    /// Assigns the first slots to the formal parameters, in order. A pattern
+    /// parameter gets an anonymous slot for its argument and is destructured
+    /// by [`emit_parameter_patterns`](Self::emit_parameter_patterns).
     fn bind_parameters(&mut self, params: &'c FormalParameters<'c>) -> Result<(), CompileError> {
         let mut saw_default = false;
         for param in &params.items {
-            let ident = binding_identifier(&param.pattern)?;
-            let symbol = symbol_of(ident)?;
-            self.declare_symbol(symbol)?;
+            self.bind_parameter_slot(&param.pattern)?;
             if param.initializer.is_some() {
                 saw_default = true;
             } else if !saw_default {
@@ -329,11 +335,33 @@ impl<'c> Compiler<'c> {
             self.func().formal_count += 1;
         }
         if let Some(rest) = &params.rest {
-            let ident = binding_identifier(&rest.rest.argument)?;
-            let symbol = symbol_of(ident)?;
-            self.declare_symbol(symbol)?;
+            self.bind_parameter_slot(&rest.rest.argument)?;
             self.func().formal_count += 1;
             self.func().has_rest = true;
+        }
+        Ok(())
+    }
+
+    /// The slot one parameter's argument lands in.
+    fn bind_parameter_slot(&mut self, pattern: &'c BindingPattern<'c>) -> Result<(), CompileError> {
+        match pattern {
+            BindingPattern::BindingIdentifier(ident) => {
+                self.declare_symbol(symbol_of(ident)?)?;
+            }
+            other => {
+                let slot = self.alloc_slot()?;
+                self.func().pattern_params.push((slot, other));
+            }
+        }
+        Ok(())
+    }
+
+    /// Destructures the pattern parameters from their argument slots.
+    fn emit_parameter_patterns(&mut self) -> Result<(), CompileError> {
+        let params = mem::take(&mut self.func().pattern_params);
+        for (slot, pattern) in params {
+            self.builder().emit_u16(Opcode::LoadLocal, slot)?;
+            self.bind_pattern(pattern, None)?;
         }
         Ok(())
     }
@@ -365,21 +393,37 @@ impl<'c> Compiler<'c> {
 
     /// Emits `param = default` for parameters whose argument is `undefined`.
     fn emit_parameter_defaults(&mut self, params: &'c FormalParameters<'c>) -> Result<(), CompileError> {
+        let mut pattern_index = 0;
         for param in &params.items {
+            let place = if let BindingPattern::BindingIdentifier(ident) = &param.pattern {
+                ParamPlace::Binding(self.resolve_symbol(symbol_of(ident)?)?)
+            } else {
+                let slot = self.func().pattern_params[pattern_index].0;
+                pattern_index += 1;
+                ParamPlace::Slot(slot)
+            };
             let Some(initializer) = &param.initializer else {
                 continue;
             };
-            let symbol = symbol_of(binding_identifier(&param.pattern)?)?;
-            let resolved = self.resolve_symbol(symbol)?;
             self.locate(param.span);
-            self.emit_load(resolved)?;
+            match place {
+                ParamPlace::Binding(resolved) => self.emit_load(resolved)?,
+                ParamPlace::Slot(slot) => self.builder().emit_u16(Opcode::LoadLocal, slot)?,
+            }
             let skip = self.builder().emit_jump(Opcode::JumpIfUndefinedKeep)?;
             // not undefined: the value was popped by the fall-through, nothing to do
             let done = self.builder().emit_jump(Opcode::Jump)?;
             self.builder().patch_jump(skip)?;
             self.builder().emit(Opcode::Pop)?;
-            self.compile_expression(initializer)?;
-            self.emit_store(resolved)?;
+            let name = match place {
+                ParamPlace::Binding(resolved) => Some(resolved.name),
+                ParamPlace::Slot(_) => None,
+            };
+            self.compile_expression_named(initializer, name)?;
+            match place {
+                ParamPlace::Binding(resolved) => self.emit_store(resolved)?,
+                ParamPlace::Slot(slot) => self.builder().emit_u16(Opcode::StoreLocal, slot)?,
+            }
             self.builder().patch_jump(done)?;
         }
         Ok(())
@@ -740,6 +784,13 @@ struct FunctionSpec<'c> {
     self_symbol: Option<SymbolId>,
 }
 
+/// Where a parameter's argument lives while defaults are applied.
+#[derive(Clone, Copy)]
+enum ParamPlace {
+    Binding(Resolved),
+    Slot(u16),
+}
+
 /// How a function's body is written.
 #[derive(Clone, Copy)]
 enum FunctionBody<'c> {
@@ -760,14 +811,6 @@ fn symbol_of(ident: &BindingIdentifier<'_>) -> Result<SymbolId, CompileError> {
         .symbol_id
         .get()
         .ok_or(CompileError::internal("binding not bound by semantic analysis"))
-}
-
-/// The identifier of a simple binding pattern.
-fn binding_identifier<'c>(pattern: &'c BindingPattern<'c>) -> Result<&'c BindingIdentifier<'c>, CompileError> {
-    match pattern {
-        BindingPattern::BindingIdentifier(ident) => Ok(ident),
-        other => Err(CompileError::unsupported("destructuring", Compiler::span_of(other))),
-    }
 }
 
 /// An atom as a 16-bit operand.

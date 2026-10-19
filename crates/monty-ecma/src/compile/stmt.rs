@@ -7,16 +7,17 @@
 use std::mem;
 
 use oxc_ast::ast::{
-    AssignmentTarget, BlockStatement, ForStatement, ForStatementInit, ForStatementLeft, Program, Statement,
+    BindingPattern, BlockStatement, ForStatement, ForStatementInit, ForStatementLeft, Program, Statement,
     SwitchStatement, TryStatement, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_span::GetSpan;
 use oxc_syntax::scope::ScopeId;
 
-use super::{Compiler, Control, binding_identifier, scope_of, symbol_of};
+use super::{Compiler, Control, atom_operand, scope_of, symbol_of};
 use crate::{
     bytecode::{Opcode, Target},
     error::CompileError,
+    intern::StaticAtom,
 };
 
 /// Which statement a `break` or `continue` leaves.
@@ -115,7 +116,8 @@ impl<'c> Compiler<'c> {
                 }
                 let scope = scope_of(&statement.scope_id)?;
                 self.compile_expression(&statement.right)?;
-                self.builder().emit(Opcode::GetIterator)?;
+                self.builder()
+                    .emit_u16(Opcode::GetIterator, atom_operand(StaticAtom::Empty.id())?)?;
                 self.compile_iteration_loop(scope, &statement.left, &statement.body, label)
             }
             Statement::ForInStatement(statement) => {
@@ -221,16 +223,27 @@ impl<'c> Compiler<'c> {
             ));
         }
         for declarator in &declaration.declarations {
-            let ident = binding_identifier(&declarator.id)?;
-            let resolved = self.resolve_symbol(symbol_of(ident)?)?;
-            match &declarator.init {
-                Some(init) => self.compile_expression_named(init, Some(resolved.name))?,
-                // `let x;` leaves the dead zone here; `var x;` changes nothing
-                None if declaration.kind == VariableDeclarationKind::Var => continue,
-                None => self.builder().emit(Opcode::LoadUndefined)?,
+            if let BindingPattern::BindingIdentifier(ident) = &declarator.id {
+                let resolved = self.resolve_symbol(symbol_of(ident)?)?;
+                match &declarator.init {
+                    Some(init) => self.compile_expression_named(init, Some(resolved.name))?,
+                    // `let x;` leaves the dead zone here; `var x;` changes nothing
+                    None if declaration.kind == VariableDeclarationKind::Var => continue,
+                    None => self.builder().emit(Opcode::LoadUndefined)?,
+                }
+                self.locate(declarator.span);
+                self.emit_initialize(resolved)?;
+            } else {
+                let init = declarator.init.as_ref().ok_or_else(|| {
+                    CompileError::syntax(
+                        "Missing initializer in destructuring declaration",
+                        Self::span_of(declarator),
+                    )
+                })?;
+                self.compile_expression(init)?;
+                self.locate(declarator.span);
+                self.bind_pattern(&declarator.id, Some(init))?;
             }
-            self.locate(declarator.span);
-            self.emit_initialize(resolved)?;
         }
         Ok(())
     }
@@ -351,35 +364,15 @@ impl<'c> Compiler<'c> {
                     .declarations
                     .first()
                     .ok_or(CompileError::internal("for-in/of without a declarator"))?;
-                let ident = binding_identifier(&declarator.id)?;
-                let resolved = self.resolve_symbol(symbol_of(ident)?)?;
-                self.emit_initialize(resolved)?;
+                self.bind_pattern(&declarator.id, None)?;
             }
-            left => self.store_to_target(left.to_assignment_target())?,
+            left => self.bind_target(left.to_assignment_target())?,
         }
         self.push_loop(label, true);
         self.compile_statement(body, None)?;
         self.finish_loop_iteration(top)?;
         self.builder().patch_jump(exit)?;
         self.pop_loop()
-    }
-
-    /// Stores the top value into an assignment target (a `for…of` left side).
-    fn store_to_target(&mut self, target: &'c AssignmentTarget<'c>) -> Result<(), CompileError> {
-        match target {
-            AssignmentTarget::AssignmentTargetIdentifier(ident) => {
-                let symbol = ident
-                    .reference_id
-                    .get()
-                    .and_then(|id| self.scoping().get_reference(id).symbol_id());
-                let resolved = match symbol {
-                    Some(symbol) => self.resolve_symbol(symbol)?,
-                    None => self.resolve_unbound(ident.name.as_str()),
-                };
-                self.emit_store(resolved)
-            }
-            other => Err(CompileError::unsupported("this loop target", Self::span_of(other))),
-        }
     }
 
     // === break / continue / return ===
@@ -506,11 +499,7 @@ impl<'c> Compiler<'c> {
                 self.declare_scope(body_scope, false)?;
             }
             match &handler.param {
-                Some(param) => {
-                    let ident = binding_identifier(&param.pattern)?;
-                    let resolved = self.resolve_symbol(symbol_of(ident)?)?;
-                    self.emit_initialize(resolved)?;
-                }
+                Some(param) => self.bind_pattern(&param.pattern, None)?,
                 None => self.builder().emit(Opcode::Pop)?,
             }
             self.hoist_functions(&handler.body.body)?;

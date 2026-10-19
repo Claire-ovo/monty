@@ -9,7 +9,7 @@ use super::{
     ops::Hint,
 };
 use crate::{
-    error::RunResult,
+    error::{RunResult, Throw},
     heap::{HeapId, IterKind, JsHeapData, JsObject, ObjectClass, PropFlags, PropertyKey, Slot},
     intern::{AtomId, StaticAtom, WellKnownSymbol},
     string::JsString,
@@ -681,6 +681,122 @@ impl Vm<'_> {
     }
 
     // === Iteration ===
+
+    /// Destructuring's `IteratorStep` on the iterator at the top of the stack:
+    /// the next value, or `undefined` once done (the exhausted iterator is
+    /// replaced by `undefined` so `IteratorClose` leaves it alone).
+    pub fn iterator_step(&mut self) -> RunResult<JsValue> {
+        let iterator = self.pop();
+        if iterator == JsValue::Undefined {
+            self.stack.push(iterator);
+            return Ok(JsValue::Undefined);
+        }
+        let next = self.iterator_next(&iterator);
+        match next {
+            Ok(Some(value)) => {
+                self.stack.push(iterator);
+                Ok(value)
+            }
+            Ok(None) => {
+                iterator.drop_with(&mut self.session.heap);
+                self.stack.push(JsValue::Undefined);
+                Ok(JsValue::Undefined)
+            }
+            Err(err) => {
+                // a throwing iterator is not closed
+                iterator.drop_with(&mut self.session.heap);
+                self.stack.push(JsValue::Undefined);
+                Err(err)
+            }
+        }
+    }
+
+    /// Destructuring's `IteratorRest`: the remaining values as an array; the
+    /// iterator is exhausted afterwards.
+    pub fn iterator_rest(&mut self) -> RunResult<JsValue> {
+        let iterator = self.pop();
+        self.stack.push(JsValue::Undefined);
+        if iterator == JsValue::Undefined {
+            return self.new_array(Vec::new());
+        }
+        let mut items: Vec<JsValue> = Vec::new();
+        loop {
+            match self.iterator_next(&iterator) {
+                Ok(Some(value)) => {
+                    if let Err(err) = self.tracker().check_growth(items.len(), items.capacity(), 16) {
+                        value.drop_with(&mut self.session.heap);
+                        self.drop_all(iterator, items);
+                        return Err(err.into());
+                    }
+                    items.push(value);
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    self.drop_all(iterator, items);
+                    return Err(err);
+                }
+            }
+        }
+        iterator.drop_with(&mut self.session.heap);
+        self.new_array(items)
+    }
+
+    /// `GetIterator` for a destructuring pattern, naming `source` (the
+    /// initializer's text) in the error when the value is not iterable.
+    pub fn get_iterator_named(&mut self, iterable: JsValue, source: AtomId) -> RunResult<JsValue> {
+        if self.is_array(&iterable) || iterable.is_string() || self.is_iterable_object(&iterable) {
+            return self.get_iterator(iterable);
+        }
+        let message = if source == StaticAtom::Empty.id() {
+            format!(
+                "{} is not iterable (cannot read property Symbol(Symbol.iterator))",
+                self.describe_for_error(&iterable)?
+            )
+        } else {
+            format!(
+                "{} is not iterable",
+                self.session.interns.atom(source).to_string_lossy()
+            )
+        };
+        iterable.drop_with(&mut self.session.heap);
+        Err(self.type_error(&message))
+    }
+
+    /// Whether an object value has a callable `Symbol.iterator`.
+    fn is_iterable_object(&mut self, value: &JsValue) -> bool {
+        let JsValue::Ref(_) = value else {
+            return false;
+        };
+        let method = self.get(value, PropertyKey::Symbol(WellKnownSymbol::Iterator.id()));
+        match method {
+            Ok(method) => {
+                let callable = self.is_callable(&method);
+                method.drop_with(&mut self.session.heap);
+                callable
+            }
+            Err(err) => {
+                if let Throw::Value(value) = err {
+                    value.drop_with(&mut self.session.heap);
+                }
+                false
+            }
+        }
+    }
+
+    /// A value as V8 names it in type errors: the type, then the value for
+    /// primitives (`number 5`, `object null`, `undefined`, `object`).
+    pub fn describe_for_error(&mut self, value: &JsValue) -> RunResult<String> {
+        Ok(match value {
+            JsValue::Undefined | JsValue::Hole => "undefined".to_owned(),
+            JsValue::Null => "object null".to_owned(),
+            JsValue::Bool(b) => format!("boolean {b}"),
+            JsValue::Number(_) => format!("number {}", self.inspect(value)?),
+            JsValue::Atom(_) | JsValue::Str(_) => format!("string \"{}\"", self.string_of(value).expect("string")),
+            JsValue::Symbol(_) => "symbol".to_owned(),
+            JsValue::BigInt(_) => "bigint".to_owned(),
+            JsValue::Ref(_) => "object".to_owned(),
+        })
+    }
 
     /// `GetIterator`: an array or string gets a builtin iterator; anything
     /// else must supply `Symbol.iterator`. Consumes `iterable`.

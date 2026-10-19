@@ -412,7 +412,7 @@ impl Opcode {
             | Self::RequireObjectCoercible
             | Self::Jump
             | Self::ArrayPushHole => 0,
-            Self::GetPropKeep | Self::GetElemKeep | Self::IteratorNext => 1,
+            Self::GetPropKeep | Self::GetElemKeep | Self::IteratorNext | Self::IteratorStep | Self::IteratorRest => 1,
             Self::SetElem | Self::DefineOwnElem | Self::DefineAccessor => -2,
             // the keep-variants pop on fall-through; the jump path is accounted in `emit_jump`
             Self::JumpIfTrueKeep | Self::JumpIfFalseKeep | Self::JumpIfNotNullishKeep | Self::JumpIfUndefinedKeep => -1,

@@ -210,6 +210,7 @@ pub(crate) enum Opcode {
 
     // === Iteration ===
     /// `iterable` → `iterator`: `GetIterator` through `Symbol.iterator`.
+    /// Operand: u16 atom naming the iterable in the error (empty: describe the value).
     GetIterator = 130,
     /// `iterator` → `iterator value`, or jump when done (popping the iterator). Operand: i16 offset.
     IteratorNext = 131,
@@ -217,6 +218,12 @@ pub(crate) enum Opcode {
     IteratorClose = 132,
     /// `obj` → `keys_iterator` for `for…in`.
     ForInStart = 133,
+    /// Destructuring: `iterator` → `iterator value`, `undefined` once the
+    /// iterator is done (which also replaces it with `undefined`, so the
+    /// final `IteratorClose` knows not to call `return`).
+    IteratorStep = 134,
+    /// Destructuring rest: `iterator` → `undefined array` of the remaining values.
+    IteratorRest = 135,
 
     // === Misc ===
     /// `value` → `string`.
@@ -227,7 +234,8 @@ pub(crate) enum Opcode {
     Nop = 142,
     /// Create the `arguments` object into a slot. Operand: u16 slot.
     CreateArguments = 143,
-    /// `value` → `value`: throw `TypeError` when not an object (destructuring `null`).
+    /// `value` → `value`: throw `TypeError` when nullish (destructuring `null`).
+    /// Operand: u16 atom of the first property destructured (empty: none).
     RequireObjectCoercible = 144,
 }
 
@@ -303,13 +311,13 @@ impl Opcode {
             | Self::Throw
             | Self::PushException
             | Self::Rethrow
-            | Self::GetIterator
             | Self::IteratorClose
+            | Self::IteratorStep
+            | Self::IteratorRest
             | Self::ForInStart
             | Self::ToString
             | Self::ToPropertyKey
-            | Self::Nop
-            | Self::RequireObjectCoercible => OperandShape::None,
+            | Self::Nop => OperandShape::None,
             Self::LoadInt | Self::IncDec => OperandShape::I8,
             Self::DefineAccessor | Self::TemplateConcat | Self::MakeClass | Self::Call | Self::New => OperandShape::U8,
             Self::SuperCall => OperandShape::U8,
@@ -335,7 +343,9 @@ impl Opcode {
             | Self::MakeClosure
             | Self::MakeMethod
             | Self::LoadThis
-            | Self::CreateArguments => OperandShape::U16,
+            | Self::CreateArguments
+            | Self::GetIterator
+            | Self::RequireObjectCoercible => OperandShape::U16,
             Self::Jump
             | Self::JumpIfFalse
             | Self::JumpIfTrue
