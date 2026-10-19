@@ -96,6 +96,8 @@ impl Exporter {
             ObjectClass::BoxedBool(b) => Kind::Primitive(JsValue::Bool(*b)),
             ObjectClass::BoxedNumber(n) => Kind::Primitive(JsValue::Number(*n)),
             ObjectClass::BoxedString(s) => Kind::BoxedString(s.clone()),
+            ObjectClass::Map(_) => Kind::Map,
+            ObjectClass::Set(_) => Kind::Set,
             _ => Kind::Other,
         });
         let node = match class_kind {
@@ -137,6 +139,46 @@ impl Exporter {
                 let exc_type = error_exc_type(vm, id);
                 MontyNode::Exception { exc_type, arg: text }
             }
+            Some(Kind::Map | Kind::Set) => {
+                self.path.push(id);
+                let is_map = class_kind == Some(Kind::Map);
+                let entries: Vec<(JsValue, JsValue)> = match vm.object(id).map(|o| &o.class) {
+                    Some(ObjectClass::Map(data) | ObjectClass::Set(data)) => data
+                        .entries
+                        .iter()
+                        .flatten()
+                        .map(|e| {
+                            (
+                                e.key.clone_with_heap(&vm.session.heap),
+                                e.value.clone_with_heap(&vm.session.heap),
+                            )
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let mut keys = Vec::with_capacity(entries.len());
+                let mut pairs = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    let key_node = self.push(vm, &key);
+                    let value_node = if is_map {
+                        self.push(vm, &value).map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    vm.drop_all(key, vec![value]);
+                    let key_node = key_node?;
+                    match value_node? {
+                        Some(value_node) => pairs.push((key_node, value_node)),
+                        None => keys.push(key_node),
+                    }
+                }
+                self.path.pop();
+                if is_map {
+                    MontyNode::Dict(pairs)
+                } else {
+                    MontyNode::Set(keys)
+                }
+            }
             Some(Kind::Primitive(primitive)) => return self.push(vm, &primitive),
             Some(Kind::BoxedString(string)) => MontyNode::String(string.to_string_lossy()),
             Some(Kind::Other) | None => MontyNode::Repr(vm.inspect_short(&JsValue::Ref(id))?),
@@ -148,10 +190,13 @@ impl Exporter {
 }
 
 /// How an object exports.
+#[derive(PartialEq)]
 enum Kind {
     Array,
     Object,
     Error,
+    Map,
+    Set,
     Primitive(JsValue),
     BoxedString(JsString),
     Other,

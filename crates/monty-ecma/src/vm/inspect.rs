@@ -8,7 +8,7 @@ use std::fmt::Write;
 use super::{Vm, number::number_to_string};
 use crate::{
     error::RunResult,
-    heap::{FunctionObject, HeapId, JsObject, ObjectClass, PropertyKey, Slot},
+    heap::{FunctionObject, HeapId, IterKind, JsObject, ObjectClass, PropertyKey, Slot},
     intern::StaticAtom,
     value::JsValue,
 };
@@ -144,6 +144,20 @@ impl Vm<'_> {
                 false,
             ),
             ObjectClass::ArrayIterator { .. } => ("Object [Array Iterator]".to_owned(), ["{", "}"], false, false),
+            ObjectClass::Map(data) => (format!("Map({})", data.live), ["{", "}"], false, false),
+            ObjectClass::Set(data) => (format!("Set({})", data.live), ["{", "}"], false, false),
+            ObjectClass::WeakMap(_) => ("WeakMap".to_owned(), ["{", "}"], false, false),
+            ObjectClass::WeakSet(_) => ("WeakSet".to_owned(), ["{", "}"], false, false),
+            ObjectClass::MapIterator { map, kind, .. } => {
+                let is_set = matches!(self.object(*map).map(|o| &o.class), Some(ObjectClass::Set(_)));
+                let name = match (is_set, kind) {
+                    (false, IterKind::Entries) => "[Map Entries]",
+                    (false, _) => "[Map Iterator]",
+                    (true, IterKind::Entries) => "[Set Entries]",
+                    (true, _) => "[Set Iterator]",
+                };
+                (name.to_owned(), ["{", "}"], false, false)
+            }
             ObjectClass::StringIterator { .. } => ("Object [String Iterator]".to_owned(), ["{", "}"], false, false),
             ObjectClass::Ordinary => (self.ordinary_prefix(id), ["{", "}"], false, false),
         };
@@ -162,6 +176,7 @@ impl Vm<'_> {
         ctx.current_depth = depth;
         let mut output = Vec::new();
         let mut shown_keys: Vec<PropertyKey> = Vec::new();
+        self.format_collection(ctx, id, depth, &mut output)?;
         if is_array {
             let len = self.object(id).map_or(0, |o| o.elements.len());
             let shown = len.min(MAX_ARRAY_LENGTH);
@@ -241,6 +256,13 @@ impl Vm<'_> {
                 format!("<ref *{index}> {base}")
             };
         }
+        let is_weak = matches!(
+            self.object(id).map(|o| &o.class),
+            Some(ObjectClass::WeakMap(_) | ObjectClass::WeakSet(_))
+        );
+        if output.is_empty() && is_weak {
+            return Ok(format!("{base} {{ <items unknown> }}"));
+        }
         if output.is_empty() {
             return Ok(if is_array {
                 if base.is_empty() {
@@ -273,6 +295,85 @@ impl Vm<'_> {
             return Ok(joined);
         }
         Ok(reduce_to_single_string(ctx, output, &base, braces, depth, !is_array))
+    }
+
+    /// The entries of a `Map`, `Set` or their iterators, as `key => value`,
+    /// values, or `[ key, value ]` pairs.
+    fn format_collection(
+        &mut self,
+        ctx: &mut Context,
+        id: HeapId,
+        depth: usize,
+        output: &mut Vec<String>,
+    ) -> RunResult<()> {
+        let (map, kind, is_set, start) = match self.object(id).map(|o| &o.class) {
+            Some(ObjectClass::Map(_)) => (id, IterKind::Entries, false, 0),
+            Some(ObjectClass::Set(_)) => (id, IterKind::Keys, true, 0),
+            Some(ObjectClass::MapIterator { map, kind, index }) => {
+                let is_set = matches!(self.object(*map).map(|o| &o.class), Some(ObjectClass::Set(_)));
+                (*map, *kind, is_set, *index as usize)
+            }
+            _ => return Ok(()),
+        };
+        let entries: Vec<(JsValue, JsValue)> = match self.object(map).map(|o| &o.class) {
+            Some(ObjectClass::Map(data) | ObjectClass::Set(data)) => data.entries[start.min(data.entries.len())..]
+                .iter()
+                .flatten()
+                .map(|entry| {
+                    (
+                        entry.key.clone_with_heap(&self.session.heap),
+                        entry.value.clone_with_heap(&self.session.heap),
+                    )
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let total = entries.len();
+        for (shown, (key, value)) in entries.into_iter().enumerate() {
+            if shown >= MAX_ARRAY_LENGTH {
+                key.drop_with(&mut self.session.heap);
+                value.drop_with(&mut self.session.heap);
+                continue;
+            }
+            ctx.indentation += 2;
+            let text = match kind {
+                IterKind::Keys => self.format_value(ctx, &key, depth + 1, false),
+                IterKind::Values => self.format_value(ctx, &value, depth + 1, false),
+                IterKind::Entries => {
+                    let key_text = self.format_value(ctx, &key, depth + 1, false);
+                    let value_text = if is_set {
+                        self.format_value(ctx, &key, depth + 1, false)
+                    } else {
+                        self.format_value(ctx, &value, depth + 1, false)
+                    };
+                    match (key_text, value_text) {
+                        (Ok(k), Ok(v))
+                            if is_set
+                                || matches!(
+                                    self.object(id).map(|o| &o.class),
+                                    Some(ObjectClass::MapIterator { .. })
+                                ) =>
+                        {
+                            Ok(format!("[ {k}, {v} ]"))
+                        }
+                        (Ok(k), Ok(v)) => Ok(format!("{k} => {v}")),
+                        (Err(err), _) | (_, Err(err)) => Err(err),
+                    }
+                }
+            };
+            ctx.indentation -= 2;
+            key.drop_with(&mut self.session.heap);
+            value.drop_with(&mut self.session.heap);
+            output.push(text?);
+        }
+        if total > MAX_ARRAY_LENGTH {
+            let remaining = total - MAX_ARRAY_LENGTH;
+            output.push(format!(
+                "... {remaining} more item{}",
+                if remaining == 1 { "" } else { "s" }
+            ));
+        }
+        Ok(())
     }
 
     /// The `[Function: name]` form of a function object, or `[class X extends Y]`.

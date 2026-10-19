@@ -11,6 +11,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+use ahash::AHashMap;
 use indexmap::IndexMap;
 pub(crate) use monty_heap::{HeapId, HeapObject, Payload};
 use serde::{Deserialize, Serialize};
@@ -270,6 +271,92 @@ pub(crate) enum ObjectClass {
         string: JsString,
         index: u32,
     },
+    Map(Box<MapData>),
+    Set(Box<MapData>),
+    /// Holds its keys strongly: there is no finalization in the sandbox.
+    WeakMap(Box<MapData>),
+    WeakSet(Box<MapData>),
+    /// An iterator over a `Map` or `Set` (`map` is an owned reference); it
+    /// walks the entry vector by index, so entries added while iterating are
+    /// seen and deleted ones (tombstones) skipped.
+    MapIterator {
+        map: HeapId,
+        index: u32,
+        kind: IterKind,
+    },
+}
+
+/// The storage of `Map`, `Set` and the weak collections: insertion-ordered
+/// entries, deleted ones left as tombstones so iterators keep their place,
+/// indexed by the key's `SameValueZero` identity.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct MapData {
+    #[serde(rename = "E")]
+    pub entries: Vec<Option<MapEntry>>,
+    /// Live entries (entries minus tombstones).
+    #[serde(rename = "L")]
+    pub live: usize,
+    /// Rebuilt from the entries' hashes on restore.
+    #[serde(skip)]
+    pub index: AHashMap<MapKey, usize>,
+}
+
+impl MapData {
+    fn for_each_child(&self, mut on_child: impl FnMut(HeapId)) {
+        for entry in self.entries.iter().flatten() {
+            if let Some(id) = entry.key.heap_id() {
+                on_child(id);
+            }
+            if let Some(id) = entry.value.heap_id() {
+                on_child(id);
+            }
+        }
+    }
+
+    fn dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
+        for entry in self.entries.drain(..).flatten() {
+            stack.extend(entry.key.heap_id());
+            stack.extend(entry.value.heap_id());
+        }
+        self.index.clear();
+        self.live = 0;
+    }
+
+    /// Rebuilds the key index after deserialization.
+    pub fn rebuild_index(&mut self) {
+        self.index = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| entry.as_ref().map(|entry| (entry.hash.clone(), index)))
+            .collect();
+    }
+}
+
+/// One `key => value` of a collection (a set stores `undefined` values).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct MapEntry {
+    #[serde(rename = "K")]
+    pub key: JsValue,
+    #[serde(rename = "V")]
+    pub value: JsValue,
+    /// The key's identity under `SameValueZero`.
+    #[serde(rename = "H")]
+    pub hash: MapKey,
+}
+
+/// A collection key's identity: `SameValueZero`, so `NaN` matches itself,
+/// `-0` is `0`, strings match by content and objects by heap identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub(crate) enum MapKey {
+    Undefined,
+    Null,
+    Bool(bool),
+    /// The canonical bit pattern (`NaN` normalized, `-0` as `0`).
+    Number(u64),
+    String(JsString),
+    Symbol(SymbolId),
+    Ref(HeapId),
 }
 
 /// What an array iterator yields.
@@ -285,6 +372,10 @@ impl ObjectClass {
         match self {
             Self::Function(function) => function.for_each_child(on_child),
             Self::ArrayIterator { array, .. } => on_child(*array),
+            Self::MapIterator { map, .. } => on_child(*map),
+            Self::Map(data) | Self::Set(data) | Self::WeakMap(data) | Self::WeakSet(data) => {
+                data.for_each_child(on_child);
+            }
             _ => {}
         }
     }
@@ -293,7 +384,16 @@ impl ObjectClass {
         match self {
             Self::Function(function) => function.dec_ref_ids(stack),
             Self::ArrayIterator { array, .. } => stack.push(*array),
+            Self::MapIterator { map, .. } => stack.push(*map),
+            Self::Map(data) | Self::Set(data) | Self::WeakMap(data) | Self::WeakSet(data) => data.dec_ref_ids(stack),
             _ => {}
+        }
+    }
+
+    /// Rebuilds derived state after deserialization.
+    fn on_restore(&mut self) {
+        if let Self::Map(data) | Self::Set(data) | Self::WeakMap(data) | Self::WeakSet(data) = self {
+            data.rebuild_index();
         }
     }
 }
@@ -430,7 +530,11 @@ impl HeapObject for JsHeapData {
 
     fn on_free(&mut self, _: &mut JsHeapState, _: HeapId) {}
 
-    fn on_restore(&mut self, _: &mut JsHeapState, _: HeapId) {}
+    fn on_restore(&mut self, _: &mut JsHeapState, _: HeapId) {
+        if let Self::Object(object) = self {
+            object.class.on_restore();
+        }
+    }
 }
 
 /// A typed read handle for any payload stored in the heap.

@@ -2755,6 +2755,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "monty-js-datatest"
+version = "1.2.0"
+dependencies = [
+ "datatest-stable",
+ "monty-ecma",
+ "monty-fixture",
+ "monty-types",
+ "similar 2.7.0",
+]
+
+[[package]]
 name = "monty-js-runtime"
 version = "1.2.0"
 dependencies = [

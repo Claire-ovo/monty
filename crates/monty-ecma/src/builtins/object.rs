@@ -46,6 +46,7 @@ pub(super) fn install(vm: &mut Vm<'_>, global: HeapId, prototype: HeapId) {
         NativeFn::ObjectIsSealed,
         NativeFn::ObjectPreventExtensions,
         NativeFn::ObjectIsExtensible,
+        NativeFn::ObjectGroupBy,
     ] {
         install_function(vm, constructor, native);
     }

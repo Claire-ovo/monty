@@ -24,7 +24,7 @@ use crate::{
     bytecode::{Code, Opcode},
     error::{RunResult, Throw, stack_frame},
     function::Function,
-    heap::{Heap, HeapId, JsHeapData, JsObject, PropFlags, PropertyKey},
+    heap::{Heap, HeapId, JsHeapData, JsObject, MapKey, PropFlags, PropertyKey},
     intern::{AtomId, FunctionId, Interns, StaticAtom},
     realm::{ErrorKind, Realm, ScriptScope},
     string::JsString,
@@ -1148,6 +1148,28 @@ impl<'p> Vm<'p> {
     /// with a message rather than a panic.
     pub fn internal_error(&mut self, message: &str) -> Throw {
         self.throw_error(ErrorKind::Error, &format!("internal error: {message}"))
+    }
+
+    /// A collection key's `SameValueZero` identity.
+    pub fn map_key(&self, value: &JsValue) -> MapKey {
+        match value {
+            JsValue::Undefined | JsValue::Hole => MapKey::Undefined,
+            JsValue::Null => MapKey::Null,
+            JsValue::Bool(b) => MapKey::Bool(*b),
+            JsValue::Number(n) => {
+                let canonical = if n.is_nan() {
+                    f64::NAN
+                } else if *n == 0.0 {
+                    0.0
+                } else {
+                    *n
+                };
+                MapKey::Number(canonical.to_bits())
+            }
+            JsValue::Atom(_) | JsValue::Str(_) => MapKey::String(self.string_of(value).expect("string")),
+            JsValue::Symbol(symbol) => MapKey::Symbol(*symbol),
+            JsValue::BigInt(id) | JsValue::Ref(id) => MapKey::Ref(*id),
+        }
     }
 
     /// Interns `text` as an atom value.

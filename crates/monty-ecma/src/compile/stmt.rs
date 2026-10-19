@@ -17,7 +17,6 @@ use super::{Compiler, Control, atom_operand, scope_of, symbol_of};
 use crate::{
     bytecode::{Opcode, Target},
     error::CompileError,
-    intern::StaticAtom,
 };
 
 /// Which statement a `break` or `continue` leaves.
@@ -116,8 +115,9 @@ impl<'c> Compiler<'c> {
                 }
                 let scope = scope_of(&statement.scope_id)?;
                 self.compile_expression(&statement.right)?;
-                self.builder()
-                    .emit_u16(Opcode::GetIterator, atom_operand(StaticAtom::Empty.id())?)?;
+                // the not-iterable error names the expression, as V8 does
+                let text = self.callee_text(&statement.right);
+                self.builder().emit_u16(Opcode::GetIterator, atom_operand(text)?)?;
                 self.compile_iteration_loop(scope, &statement.left, &statement.body, label)
             }
             Statement::ForInStatement(statement) => {

@@ -53,10 +53,10 @@ Within classes:
 
 Available: `globalThis`, `undefined`, `NaN`, `Infinity`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `console`
 (`log`, `info`, `debug` to stdout; `error`, `warn` to stderr), `Object`, `Function.prototype` (`call`, `apply`,
-`bind`, `toString`), `Array`, `String`, `Number`, `Boolean`, `Symbol` (with the well-known symbols), `Math`, `JSON`
-and the `Error` family.
+`bind`, `toString`), `Array`, `String`, `Number`, `Boolean`, `Symbol` (with the well-known symbols), `Map`, `Set`,
+`WeakMap`, `WeakSet`, `Math`, `JSON` and the `Error` family.
 
-Not available: `Map`, `Set`, `WeakMap`, `WeakSet`, `WeakRef`, `Promise`, `Date`, `RegExp`, `Proxy`, `Reflect`,
+Not available: `WeakRef`, `FinalizationRegistry`, `Promise`, `Date`, `RegExp`, `Proxy`, `Reflect`,
 `ArrayBuffer` and the typed arrays, `TextEncoder`/`TextDecoder`, `structuredClone`, `queueMicrotask`,
 `setTimeout` and the other timers, `encodeURIComponent` and its relatives, `Intl`, `Atomics`, `globalThis.process`
 and every Node module.
@@ -68,9 +68,10 @@ Differences within the available builtins:
     `localeCompare` with locales (it compares code units), `split` with a `RegExp`, `substr`, `anchor` and the other
     HTML methods; `String.prototype.replace` and `replaceAll` accept only string patterns and support the `$$`, `$&`,
     `` $` `` and `$'` replacement patterns (no `$<name>` or `$n`).
-- `Object.defineProperties`, `Object.getOwnPropertyDescriptor(s)`, `Object.getOwnPropertySymbols`,
-    `Object.seal`, `Object.isSealed`, `Object.preventExtensions`, `Object.isExtensible` and
-    `Object.groupBy` are missing.
+- `WeakMap` and `WeakSet` hold their keys strongly: a key stays alive as long as the collection does, since the
+    sandbox has no finalization. `console.log` prints them as Node does, `WeakMap { <items unknown> }`.
+- A `Map` or `Set` keeps a tombstone for each deleted entry until it is cleared, so a collection with heavy
+    insert/delete churn uses memory proportional to the insertions, within the memory limit.
 - `Object.freeze` on an array moves its elements into named properties to make them read-only; the array keeps
     reporting `Array.isArray(a) === true` and `a.length`, but later `push` calls append to a separate element store.
 - Arrays are always dense: assigning an index more than 1 048 576 past the end throws a `RangeError`

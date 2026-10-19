@@ -31,6 +31,12 @@ pub(crate) struct Realm {
     pub eval_error_prototype: HeapId,
     pub uri_error_prototype: HeapId,
     pub aggregate_error_prototype: HeapId,
+    pub map_prototype: HeapId,
+    pub set_prototype: HeapId,
+    pub weak_map_prototype: HeapId,
+    pub weak_set_prototype: HeapId,
+    pub map_iterator_prototype: HeapId,
+    pub set_iterator_prototype: HeapId,
 }
 
 impl Realm {
@@ -58,6 +64,12 @@ impl Realm {
             eval_error_prototype: zero,
             uri_error_prototype: zero,
             aggregate_error_prototype: zero,
+            map_prototype: zero,
+            set_prototype: zero,
+            weak_map_prototype: zero,
+            weak_set_prototype: zero,
+            map_iterator_prototype: zero,
+            set_iterator_prototype: zero,
         }
     }
 

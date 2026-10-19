@@ -8,6 +8,7 @@
 #![expect(clippy::unnecessary_wraps, reason = "every native shares the `NativeImpl` signature")]
 
 mod array;
+mod collections;
 mod console;
 mod error;
 mod function;
@@ -216,6 +217,38 @@ natives! {
     MathAtan => ("atan", 1, false, math::atan),
     MathAtan2 => ("atan2", 2, false, math::atan2),
     MathHypot => ("hypot", 2, false, math::hypot),
+    // Map, Set, WeakMap, WeakSet
+    Map => ("Map", 0, true, collections::map),
+    MapGroupBy => ("groupBy", 2, false, collections::map_group_by),
+    MapProtoGet => ("get", 1, false, collections::map_get),
+    MapProtoSet => ("set", 2, false, collections::map_set),
+    MapProtoHas => ("has", 1, false, collections::map_has),
+    MapProtoDelete => ("delete", 1, false, collections::map_delete),
+    MapProtoClear => ("clear", 0, false, collections::map_clear),
+    MapProtoSize => ("size", 0, false, collections::map_size),
+    MapProtoForEach => ("forEach", 1, false, collections::map_for_each),
+    MapProtoKeys => ("keys", 0, false, collections::map_keys),
+    MapProtoValues => ("values", 0, false, collections::map_values),
+    MapProtoEntries => ("entries", 0, false, collections::map_entries),
+    Set => ("Set", 0, true, collections::set),
+    SetProtoAdd => ("add", 1, false, collections::set_add),
+    SetProtoHas => ("has", 1, false, collections::set_has),
+    SetProtoDelete => ("delete", 1, false, collections::set_delete),
+    SetProtoClear => ("clear", 0, false, collections::set_clear),
+    SetProtoSize => ("size", 0, false, collections::set_size),
+    SetProtoForEach => ("forEach", 1, false, collections::set_for_each),
+    SetProtoValues => ("values", 0, false, collections::set_values),
+    SetProtoEntries => ("entries", 0, false, collections::set_entries),
+    WeakMap => ("WeakMap", 0, true, collections::weak_map),
+    WeakMapProtoGet => ("get", 1, false, collections::weak_map_get),
+    WeakMapProtoSet => ("set", 2, false, collections::weak_map_set),
+    WeakMapProtoHas => ("has", 1, false, collections::weak_map_has),
+    WeakMapProtoDelete => ("delete", 1, false, collections::weak_map_delete),
+    WeakSet => ("WeakSet", 0, true, collections::weak_set),
+    WeakSetProtoAdd => ("add", 1, false, collections::weak_set_add),
+    WeakSetProtoHas => ("has", 1, false, collections::weak_set_has),
+    WeakSetProtoDelete => ("delete", 1, false, collections::weak_set_delete),
+    ObjectGroupBy => ("groupBy", 2, false, collections::object_group_by),
     // JSON
     JsonStringify => ("stringify", 3, false, json::stringify),
     JsonParse => ("parse", 2, false, json::parse),
@@ -274,6 +307,7 @@ pub(crate) fn create_realm(vm: &mut Vm<'_>) {
     string::install(vm, global);
     number::install(vm, global);
     error::install(vm, global);
+    collections::install(vm, global);
     math::install(vm, global);
     json::install(vm, global);
     console::install(vm, global);

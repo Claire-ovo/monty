@@ -831,9 +831,11 @@ impl Vm<'_> {
         };
         if !self.is_callable(&method) {
             method.drop_with(&mut self.session.heap);
-            let shown = self.inspect_short(&iterable)?;
+            let shown = self.describe_for_error(&iterable)?;
             iterable.drop_with(&mut self.session.heap);
-            return Err(self.type_error(&format!("{shown} is not iterable")));
+            return Err(self.type_error(&format!(
+                "{shown} is not iterable (cannot read property Symbol(Symbol.iterator))"
+            )));
         }
         let iterator = self.call(method, iterable, Vec::new())?;
         if !iterator.is_object() {
@@ -934,6 +936,55 @@ impl Vm<'_> {
                     }
                 }
             }
+            Some(ObjectClass::MapIterator { map, index, kind }) => {
+                let (map, kind) = (*map, *kind);
+                let mut index = *index as usize;
+                // skip tombstones; stop at the end of the entries
+                let found = loop {
+                    let entry = match self.object(map).map(|o| &o.class) {
+                        Some(ObjectClass::Map(data) | ObjectClass::Set(data)) => data.entries.get(index),
+                        _ => None,
+                    };
+                    match entry {
+                        None => break None,
+                        Some(None) => index += 1,
+                        Some(Some(entry)) => {
+                            let key = entry.key.clone_with_heap(&self.session.heap);
+                            let value = entry.value.clone_with_heap(&self.session.heap);
+                            index += 1;
+                            break Some((key, value));
+                        }
+                    }
+                };
+                if let Some(ObjectClass::MapIterator { index: stored, .. }) = self.object_mut(id).map(|o| &mut o.class)
+                {
+                    *stored = index_u32(index);
+                }
+                match found {
+                    None => None,
+                    Some((key, value)) => Some(match kind {
+                        IterKind::Keys => {
+                            value.drop_with(&mut self.session.heap);
+                            key
+                        }
+                        IterKind::Values => {
+                            key.drop_with(&mut self.session.heap);
+                            value
+                        }
+                        IterKind::Entries => {
+                            // a set's entries pair the value with itself
+                            let is_set = matches!(self.object(map).map(|o| &o.class), Some(ObjectClass::Set(_)));
+                            if is_set {
+                                value.drop_with(&mut self.session.heap);
+                                let twin = key.clone_with_heap(&self.session.heap);
+                                self.new_array(vec![key, twin])?
+                            } else {
+                                self.new_array(vec![key, value])?
+                            }
+                        }
+                    }),
+                }
+            }
             _ => return Ok(IteratorStep::NotBuiltin),
         };
         Ok(step.map_or(IteratorStep::Done, IteratorStep::Value))
@@ -946,7 +997,11 @@ impl Vm<'_> {
         };
         if matches!(
             self.object(*id).map(|o| &o.class),
-            Some(ObjectClass::ArrayIterator { .. } | ObjectClass::StringIterator { .. })
+            Some(
+                ObjectClass::ArrayIterator { .. }
+                    | ObjectClass::StringIterator { .. }
+                    | ObjectClass::MapIterator { .. }
+            )
         ) {
             return Ok(());
         }
