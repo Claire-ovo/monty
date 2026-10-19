@@ -138,8 +138,8 @@ followed, even inside the mount (see `limitations/filesystem.md`) — do not
 check-then-use this removes.
 
 **Changes to `mount_table.rs` or `path_security.rs` require careful security
-review.** The `crates/monty/src/heap/` module and the mount boundary are the most security-critical
-code in the codebase.
+review.** The heap (`crates/monty-heap/src/` and `crates/monty/src/heap/`) and the mount boundary are the most
+security-critical code in the codebase.
 
 ## Subprocess isolation (`monty-proto`, `monty subprocess`, `monty-pool`)
 
@@ -284,9 +284,17 @@ Resolve filenames with `Interns::get_filename`; ordinary `get_str` only accepts 
 
 All heap-allocated Python objects (lists, dicts, strings, etc.) are stored in a paged arena (`Heap`). The `HeapReader` API provides **compile-time safe** access to heap data. This is the primary mechanism for reading and mutating heap objects throughout the codebase.
 
-**The `crates/monty/src/heap/` module is a critical safety boundary.** Its `mod.rs`, `stable_heap.rs` and `free_list.rs` contain `unsafe` code that underpins the soundness of the entire `HeapReader`/`HeapRead` system (pointer arithmetic, `UnsafeCell` access, reader-count invariants).
-Do NOT modify files under `crates/monty/src/heap/` without explicit user approval.
-Changes to this module require careful review of the safety invariants documented in the code comments.
+**The heap is a critical safety boundary.** The arena, reference counting, Bacon–Rajan collector and the
+`HeapReader`/`HeapRead` machinery are language-neutral and live in `crates/monty-heap` (`arena.rs`, `access.rs`,
+`collect.rs`, `stable_heap.rs`, `free_list.rs`), generic over a `HeapObject` payload type; that crate holds the
+`unsafe` code the system's soundness rests on (pointer arithmetic, `UnsafeCell` access, reader-count invariants).
+`crates/monty/src/heap/mod.rs` is the Python instantiation: `impl HeapObject for HeapData` (GC tracing, release,
+typed reads, the weak indexes in `PyHeapState`), the payload registry (`HeapReadOutput`, `Payload`), the
+`HeapExt`/`HeapReaderExt` extension traits (`get_empty_tuple`, `get_timezone_utc`, `protect`, …), and newtypes over
+the generic handles so the Python type methods can stay inherent impls (`impl<'h> HeapRead<'h, List>` — the orphan
+rules forbid that on a foreign type). A second language instantiates the same crate with its own payload enum.
+Do NOT modify files under `crates/monty-heap/src/` or `crates/monty/src/heap/` without explicit user approval.
+Changes there require careful review of the safety invariants documented in the code comments.
 
 #### Core concepts
 

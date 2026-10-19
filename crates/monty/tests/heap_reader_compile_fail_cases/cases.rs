@@ -8,6 +8,14 @@
 //! These tests are never compiled during normal builds — only when the
 //! `heap_reader_compile_fail_tests` cfg (plus a per-test cfg) is set.
 
+#[cfg(any(
+    heap_reader_compile_fail_test_heap_mutation_while_reading,
+    heap_reader_compile_fail_test_dec_ref_while_reading,
+    heap_reader_compile_fail_test_mutation_in_map_closure,
+    heap_reader_compile_fail_test_smuggle_and_swap_reader
+))]
+use monty_heap::ContainsHeap as _;
+
 use super::*;
 #[cfg(heap_reader_compile_fail_test_smuggle_vm)]
 use crate::bytecode::VM;

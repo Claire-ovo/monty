@@ -109,11 +109,13 @@ impl<C: ContainsHeap> DropWithContext<C> for CallResult {
             Self::External(_, args) | Self::MethodCall { args, .. } => {
                 args.drop_with(heap);
             }
-            Self::OsCall(call) => call.drop_with(heap),
+            // Owned args (String/Vec<u8>/bool/MontyPath/MontyObject) hold no live
+            // heap references, so a plain drop is correct.
+            Self::OsCall(call) => drop(call),
             Self::AttrLookup { effect, .. } => effect.drop_with(heap),
             Self::FramePushed => {}
             Self::OsCallWithEffect { call, effect } => {
-                call.drop_with(heap);
+                drop(call);
                 // Discarded before it ever became a `FrameExit`.
                 release_pending_effect(Some(effect), heap);
             }

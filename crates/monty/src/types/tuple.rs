@@ -32,7 +32,9 @@ use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunResult},
     hash::HashValue,
-    heap::{DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapItem, HeapObjectRead, HeapRead, HeapReadOutput},
+    heap::{
+        DropGuard, DropWithContext, Heap, HeapData, HeapExt, HeapId, HeapItem, HeapObjectRead, HeapRead, HeapReadOutput,
+    },
     intern::StaticStrings,
     modules::copy::{Memo, PyDeepCopy, deep_copy_slots},
     resource_checks::check_repeat_size,

@@ -1,11 +1,11 @@
 error: lifetime may not live long enough
-   --> crates/monty/src/heap/../../tests/heap_reader_compile_fail_cases/cases.rs:161:35
+   --> crates/monty/src/heap/../../tests/heap_reader_compile_fail_cases/cases.rs:169:35
     |
-161 |         |reader, (tables, print)| VM::new(Vec::new(), tables, program, reader, print.reborrow()),
+169 |         |reader, (tables, print)| VM::new(Vec::new(), tables, program, reader, print.reborrow()),
     |          ------                 - ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
     |          |                      |
     |          |                      return type of closure is VM<'2>
-    |          has type `&'1 mut heap::HeapReader<'1>`
+    |          has type `&'1 mut monty_heap::HeapReader<'1, _>`
     |
     = note: requirement occurs because of the type `VM<'_>`, which makes the generic argument `'_` invariant
     = note: the struct `VM<'h>` is invariant over the parameter `'h`

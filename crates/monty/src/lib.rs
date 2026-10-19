@@ -41,6 +41,9 @@ mod types;
 mod value;
 mod virtual_path;
 
+// The cleanup macros live with the shared heap; re-exported so `crate::defer_drop!` keeps resolving.
+pub use monty_heap::{defer_drop, defer_drop_mut};
+
 #[cfg(feature = "ref-count-return")]
 pub use crate::run::RefCountOutput;
 /// The import names of every module the sandbox provides itself; see `SANDBOX_MODULE_NAMES` in `monty_types`.

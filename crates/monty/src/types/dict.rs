@@ -17,7 +17,7 @@ use crate::{
     expressions::CmpOperator,
     heap::{
         ContainsHeap, DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapItem, HeapObjectRead, HeapRead,
-        HeapReadOutput,
+        HeapReadOutput, HeapReaderExt,
     },
     intern::{Interns, StaticStrings},
     modules::{

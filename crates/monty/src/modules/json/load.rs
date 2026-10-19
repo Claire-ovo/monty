@@ -7,6 +7,7 @@
 use std::{borrow::Cow, mem};
 
 use jiter::{Jiter, JiterError, JiterErrorType, JsonErrorType, NumberAny, NumberInt, Peek};
+use monty_heap::ContainsHeap as _;
 
 use super::{JsonStringCache, fp::FileTarget};
 use crate::{
@@ -14,7 +15,7 @@ use crate::{
     bytecode::{CallResult, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
-    heap::{ContainsHeap, DropGuard, HeapData, HeapId, HeapReadOutput, HeapReader},
+    heap::{DropGuard, HeapData, HeapId, HeapReadOutput, HeapReader},
     os_dispatch::PostConversionEffect,
     types::{
         Dict, List, LongInt,

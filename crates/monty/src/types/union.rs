@@ -19,7 +19,7 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunResult},
     hash::{HashValue, hash_one},
     heap::{
-        ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapItem, HeapObjectRead, HeapPayload,
+        ContainsHeap, DropGuard, DropWithContext, HeapData, HeapExt, HeapId, HeapItem, HeapObjectRead, HeapPayload,
         HeapReadOutput,
     },
     intern::StaticStrings,

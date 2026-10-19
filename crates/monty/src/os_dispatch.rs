@@ -49,14 +49,6 @@ use crate::{
     virtual_path::posix_join,
 };
 
-impl<C: ContainsHeap> DropWithContext<C> for OsFunctionCall {
-    // Owned args (String/Vec<u8>/bool/MontyPath/MontyObject) hold no live
-    // heap references, so a plain drop is correct.
-    fn drop_with(self, _heap: &mut C) {
-        drop(self);
-    }
-}
-
 /// Work the VM must perform on the result of a paused OS call when it
 /// resumes, instead of pushing the raw host value onto the operand stack.
 ///

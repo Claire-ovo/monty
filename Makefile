@@ -179,7 +179,7 @@ test-cases: ## Run tests cases only
 
 .PHONY: miri
 miri: ## Run library inline tests under miri (particularly relevant for heap.rs)
-	cargo +nightly miri test -p monty --lib
+	cargo +nightly miri test -p monty-heap -p monty --lib
 
 .PHONY: miri-test-cases
 miri-test-cases: ## Run library inline tests under miri (particularly relevant for heap.rs)

@@ -37,7 +37,7 @@ use crate::{
     },
     defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
-    heap::{ContainsHeap, DropWithContext, Heap, HeapData, HeapId, HeapReadOutput, HeapReader},
+    heap::{ContainsHeap, DropWithContext, Heap, HeapData, HeapExt, HeapId, HeapReadOutput, HeapReader},
     heap_data::{CellValue, Closure, FunctionDefaults},
     intern::{FunctionId, Interns, StaticStrings, StringId},
     modules::{
@@ -284,7 +284,8 @@ impl<C: ContainsHeap> DropWithContext<C> for FrameExit {
             Self::OsCall {
                 function_call, effect, ..
             } => {
-                function_call.drop_with(heap);
+                // The call holds no heap references (see `CallResult::OsCall`).
+                drop(function_call);
                 // Never reached the host, so no `resume` will consume it.
                 release_pending_effect(effect, heap);
             }
@@ -738,7 +739,7 @@ impl VMSnapshot {
 /// Executes compiled bytecode using a stack-based execution model.
 /// The instruction pointer (IP) lives in each `CallFrame`, not here,
 /// to avoid sync bugs on call/return.
-pub struct VM<'h> {
+pub(crate) struct VM<'h> {
     /// Operand stack — locals and operands interleaved per frame.
     ///
     /// Each function frame's locals occupy `stack[frame.stack_base..frame.stack_base + frame.locals_count]`,
@@ -2939,7 +2940,9 @@ impl<'h> VM<'h> {
 }
 
 // `heap` is not a public field on VM, so this implementation needs to go here rather than in `heap.rs`
-impl ContainsHeap for VM<'_> {
+impl monty_heap::ContainsHeap for VM<'_> {
+    type Data = HeapData;
+
     fn heap(&self) -> &Heap {
         self.heap
     }

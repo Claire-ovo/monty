@@ -12,7 +12,8 @@ use crate::{
     hash::HashValue,
     heap::{
         BorrowedHeapRead, BorrowedHeapReadMut, ContainsHeap, DropGuard, DropWithContext, Heap, HeapData, HeapId,
-        HeapItem, HeapObjectRead, HeapRead, HeapReadOutput, heap_read_ref_as_field, heap_read_ref_as_field_mut,
+        HeapItem, HeapObjectRead, HeapRead, HeapReadOutput, HeapReaderExt, heap_read_ref_as_field,
+        heap_read_ref_as_field_mut,
     },
     intern::StaticStrings,
     modules::copy::{Memo, PyDeepCopy, deep_copy},

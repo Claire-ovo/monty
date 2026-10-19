@@ -81,7 +81,8 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunResult, SimpleException},
     hash::{HashValue, hash_python_bytes},
     heap::{
-        DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapItem, HeapObjectRead, HeapRead, heap_read_ref_as_field,
+        DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapItem, HeapObjectRead, HeapRead, HeapReaderExt,
+        heap_read_ref_as_field,
     },
     intern::{BytesId, StaticStrings, StringId},
     percent_format::{copy_bytes_template, percent_format_bytes},

@@ -20,6 +20,8 @@ use monty_types::{
 use ruff_python_ast::token::TokenKind;
 use ruff_python_parser::{InterpolatedStringErrorType, LexicalErrorType, ParseErrorType, parse_module};
 
+#[cfg(feature = "ref-count-return")]
+use crate::heap::HeapExt;
 use crate::{
     args::{ArgValues, KwargsValues},
     bytecode::{FrameExit, VM, VMSnapshot},

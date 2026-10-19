@@ -19,6 +19,7 @@
 use std::iter;
 
 use ahash::RandomState;
+use monty_heap::ContainsHeap as _;
 
 use crate::{
     heap::{ContainsHeap, HeapReader},

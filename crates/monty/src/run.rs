@@ -12,6 +12,8 @@ use monty_types::{
 pub use monty_types::{CompileOptions, OsPolicy};
 use ruff_python_stdlib::identifiers::is_identifier;
 
+#[cfg(feature = "ref-count-return")]
+use crate::heap::{EMPTY_TUPLE_ID, HeapExt};
 use crate::{
     bytecode::{Code, CodeBuilder, Compiler, FrameExit, Opcode, VM},
     exception_private::{ExcTypeExt, RunError, RunResult},
@@ -647,11 +649,16 @@ impl Executor {
             }
             // Those are the only roots: locals are gone once the module frame exits, so
             // anything still live must hang off a name or the result to not be a leak.
+            // The empty-tuple singleton is always live and never named, so it is not a leak.
             let unreachable: Vec<String> = vm
                 .heap
                 .unreachable_entries(roots)
                 .into_iter()
-                .map(|(id, ty)| format!("{} (id {})", ty.name(vm.heap, vm.interns), id.index()))
+                .filter(|id| *id != EMPTY_TUPLE_ID)
+                .map(|id| {
+                    let ty = vm.heap.get(id).py_type();
+                    format!("{} (id {})", ty.name(vm.heap, vm.interns), id.index())
+                })
                 .collect();
             let heap_count = vm.heap.entry_count();
 

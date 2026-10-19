@@ -8,7 +8,7 @@ use crate::{
     bytecode::{CallResult, VM},
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
-    heap::{DropWithContext, Heap, HeapData, HeapId},
+    heap::{DropWithContext, Heap, HeapData, HeapExt, HeapId},
     intern::{Interns, StaticStrings, StringId},
     modules::{
         ModuleFunctions, collections, csv,

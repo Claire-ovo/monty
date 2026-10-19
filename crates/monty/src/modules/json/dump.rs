@@ -468,7 +468,9 @@ struct Encoder<'a, 'h> {
 /// pattern: passing the encoder as the "heap" argument re-borrows the whole
 /// encoder (including its `vm`) into the guard, which is exactly what we need
 /// so the rebound iter and the rebound encoder share a lifetime.
-impl ContainsHeap for Encoder<'_, '_> {
+impl monty_heap::ContainsHeap for Encoder<'_, '_> {
+    type Data = HeapData;
+
     fn heap(&self) -> &Heap {
         self.vm.heap()
     }

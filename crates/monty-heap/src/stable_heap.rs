@@ -264,6 +264,13 @@ mod stable_heap_entry {
             // is the only constructor
             unsafe { self.value.as_mut().unwrap_unchecked() }
         }
+
+        /// Consumes the handle, keeping the slot borrowed for the handle's full lifetime.
+        pub fn into_mut(self) -> &'a mut T {
+            // SAFETY: [DH] - impossible to get a `StableHeapEntry` with `None` slot - `new`
+            // is the only constructor
+            unsafe { self.value.as_mut().unwrap_unchecked() }
+        }
     }
 
     impl<T> Deref for StableHeapEntry<'_, T> {
