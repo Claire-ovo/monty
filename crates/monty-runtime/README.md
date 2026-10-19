@@ -18,6 +18,10 @@ uv add pydantic-monty-runtime
 pip install pydantic-monty-runtime
 ```
 
+The JavaScript sandbox's worker, `monty-js`, is the sibling
+[`monty-js-runtime`](https://crates.io/crates/monty-js-runtime) crate
+(`pydantic-monty-js-runtime` on PyPI).
+
 Or to install the `monty` binary as a tool
 
 ```bash

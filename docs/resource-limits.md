@@ -202,6 +202,9 @@ caps the dump's, so a worker cannot report a looser one.
 
 ## What is not covered
 
+- **The JavaScript sandbox's own caps.** The six settings apply unchanged to a `language='javascript'` pool, but
+    the engine's structural caps differ from the Python ones listed here (500 levels of source nesting, 512 for
+    `JSON`, 200 nested native calls); they are on the [JavaScript limitations page](limitations/javascript.md).
 - **Compilation time.** Parsing and bytecode compilation happen before the VM exists and are not charged to the duration
     budget; memory retained by compiled code does count toward `max_memory` in workers.
     Compilation has its own structural caps (AST nesting at 200 levels, bytecode operand sizes, comprehension nesting, and

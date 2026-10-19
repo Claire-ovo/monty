@@ -97,7 +97,25 @@ See [`limitations/datetime.md`](https://github.com/pydantic/monty/blob/main/limi
 `monty subprocess` runs the binary as a wire-protocol child: framed protobuf requests on stdin, framed events on stdout.
 This is how [`monty-pool`](https://crates.io/crates/monty-pool) — and through it the Python and JavaScript packages —
 runs Monty with crash isolation.
+A pool created with `language='javascript'` spawns `monty-js subprocess` instead (see below).
 
 It is meant to be driven by a parent process, not by hand.
 Normal execution flags are rejected alongside it, because a subprocess worker reads all its configuration from the
 protocol.
+
+## The JavaScript worker
+
+`monty-js` is the [JavaScript sandbox](javascript-sandbox.md)'s binary, from the `pydantic-monty-js-runtime` wheel
+(the `pydantic-monty[js]` extra) or the npm platform packages.
+It runs a file or a snippet the way `node` does, with the same limit flags as `monty`:
+
+```bash
+monty-js main.js
+monty-js -e "console.log([1, 2, 3].map((n) => n * 2))"
+monty-js --max-memory 50000000 --max-feed-duration 2 main.js
+```
+
+`monty-js subprocess` is its worker mode; `MONTY_JS_BIN` names the binary for the bindings as `MONTY_BIN` does for
+`monty`.
+Mounts, the REPL and type checking are not available; the differences from Node are on the
+[JavaScript limitations page](limitations/javascript.md).

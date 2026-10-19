@@ -1,7 +1,7 @@
 # @pydantic/monty
 
-Run Python in Monty's sandbox from JavaScript or TypeScript.
-Node uses subprocess workers; `@pydantic/monty/wasm` uses Node worker threads or browser Web Workers.
+Run Python, or JavaScript, in Monty's sandbox from JavaScript or TypeScript.
+Node uses subprocess workers; `@pydantic/monty/wasm` uses Node worker threads or browser Web Workers (Python only).
 
 ```sh
 npm install @pydantic/monty

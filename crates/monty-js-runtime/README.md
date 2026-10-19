@@ -19,5 +19,12 @@ hello [ 1, 2, 3 ]
   resource limits
 - `monty-js subprocess` — run as a protocol child for `monty-pool`
 
-Every program runs as a strict-mode ES module. See the Monty documentation
-for the supported subset of the language.
+`MONTY_JS_BIN` names this binary for the Python and npm bindings, which
+otherwise take it from the `pydantic-monty-js-runtime` wheel (the
+`pydantic-monty[js]` extra) or the npm platform package.
+
+Every program runs as a strict-mode ES module. The
+[JavaScript sandbox](https://pydantic.dev/docs/monty/javascript-sandbox/) page
+describes the surface and the
+[limitations page](https://pydantic.dev/docs/monty/limitations/javascript/)
+every difference from Node.

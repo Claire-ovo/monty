@@ -29,6 +29,12 @@ Install `pydantic-monty-client` on its own when the worker binary comes from
 somewhere else — a base image, a system package, a build of this repo — and
 point `pydantic_monty` at it via `MONTY_BIN`, `binary_path=`, or `PATH`.
 
+The `js` extra (`pip install "pydantic-monty[js]"`) adds
+[`pydantic-monty-js-runtime`](https://pypi.org/project/pydantic-monty-js-runtime/),
+the `monty-js` worker that `Monty(language='javascript')` spawns to run
+JavaScript in the sandbox instead of Python; see the
+[JavaScript sandbox](https://pydantic.dev/docs/monty/javascript-sandbox/) page.
+
 ## CLI
 
 Usage without installing via [uvx](https://docs.astral.sh/uv/guides/tools/):

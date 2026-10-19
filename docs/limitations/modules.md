@@ -1,6 +1,7 @@
 # Standard library modules
 
-Monty provides a fixed set of stdlib modules.
+Monty provides a fixed set of stdlib modules to Python code; the JavaScript sandbox has no modules at all (see
+[javascript.md](javascript.md)).
 Other imports request [host modules](#host-modules) and raise `ModuleNotFoundError` if none is provided.
 There is no `sys.path` or site-packages; sandboxed code cannot load additional modules itself.
 

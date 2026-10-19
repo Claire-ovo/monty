@@ -45,8 +45,9 @@ explicitly.
 
 An undeclared name that the snippet calls is a host function: the feed suspends with a `FunctionCall`, and the
 host's return value becomes the call's result, exactly as for Python (see [Host Functions](host-functions.md)).
-A host function that returns a future (an `async def` in Python, a promise in TypeScript) gives the snippet a
-promise, so `await fetchData()` works in both directions.
+A host function's return value is the call's result; one that returns a future (a coroutine under
+[`AsyncMonty`][pydantic_monty.AsyncMonty], a promise in TypeScript) gives the snippet a promise instead, so
+`await load("users")` works whether the host answers now or later.
 An undeclared name that is only read suspends with a `NameLookup`.
 
 === "Python"
@@ -77,11 +78,9 @@ An undeclared name that is only read suspends with a `NameLookup`.
     console.log(result)
     ```
 
-Values cross the boundary as the same graph the Python worker uses: arrays become lists, plain objects and `Map`s
-become dicts (`Map`s again in the JavaScript binding), `Set`s become sets, `Date`s become aware `datetime`s, and
-an uncaught error ends the feed as the exception of the nearest Python class (`TypeError`, `NameError` for a
-`ReferenceError`, `Exception` for a plain `Error`).
-The full mapping is in [the limitations page](limitations/javascript.md#host-values).
+Values cross the boundary as the same graph the Python worker uses, so arrays, plain objects, `Map`s, `Set`s,
+`Date`s and errors arrive as the host types the Python sandbox would produce.
+The mapping, and what it loses, is in [the limitations page](limitations/javascript.md#host-values).
 
 ## Limits, clocks and snapshots
 
@@ -89,6 +88,6 @@ The full mapping is in [the limitations page](limitations/javascript.md#host-val
 suspensions.
 A `Date` reads the session's `OsPolicy` clock and zone, and `Math.random` its entropy policy, so a fixed clock or
 seed makes a JavaScript session reproducible in the same way as a Python one.
-[Snapshots](snapshots.md) capture idle and suspended JavaScript sessions too, though a JavaScript dump cannot be
-loaded into a Python worker or vice versa.
-Type checking is not available for JavaScript yet.
+[Snapshots](snapshots.md) capture idle and suspended JavaScript sessions too.
+Type checking is not available for JavaScript yet; that and every other difference from Node are on the
+[JavaScript limitations page](limitations/javascript.md#host-functions).

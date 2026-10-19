@@ -20,7 +20,7 @@ The engine is at an early stage, so most entries are features that are not imple
 - Syntax errors carry oxc's wording (`Unexpected token`) rather than V8's, and the `SyntaxError` names the whole
     feed.
 - A feed whose estimated nesting (brackets, prefix and binary operator chains, arrows, conditionals, `else if`
-    chains, template holes, member chains) exceeds 500 levels is rejected with `SyntaxError: Source is too deeply   nested` before parsing, since the parser and compiler recurse on the native stack; the estimate overcounts, so a
+    chains, template holes, member chains) exceeds 500 levels is rejected with `SyntaxError: Source is too deeply nested` before parsing, since the parser and compiler recurse on the native stack; the estimate overcounts, so a
     convoluted source can be rejected well under that. `JsRepl::check_source` applies the same test for hosts.
 - Builtins that walk a structure recursively stop with `RangeError: Maximum call stack size exceeded` instead of
     overflowing: `JSON.stringify` and `JSON.parse` beyond 512 levels, and chains of builtins calling each other

@@ -471,6 +471,15 @@ See [resource limits](resource-limits.md) for the full picture; the security-rel
 
 ## Where the guarantees weaken
 
+### The JavaScript engine
+
+A pool created with `language='javascript'` runs the [JavaScript sandbox](javascript-sandbox.md): a separate engine
+behind the same worker boundary, allocator ceiling, turn timeout and three host-access mechanisms.
+The engine is young and has seen far less adversarial use than the Python interpreter, so treat its guarantees as
+the worker's, not the engine's: a bug in it costs a worker, which the pool replaces.
+Its structural caps (source nesting, JSON depth, native re-entrancy) are on the
+[JavaScript limitations page](limitations/javascript.md).
+
 ### Your own callbacks
 
 Host functions, the methods, lazy attributes and constructors exposed through [`ClassInstance`][pydantic_monty.ClassInstance]/[`ClassType`][pydantic_monty.ClassType], the `os=`
