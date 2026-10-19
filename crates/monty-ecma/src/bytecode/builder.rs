@@ -432,7 +432,7 @@ impl Opcode {
             Self::SuperCall => 1 - operand,
             Self::SuperCallSpread => 0,
             Self::MakeClass => -1,
-            Self::MakeRegExp => 1,
+            Self::MakeRegExp | Self::LoadGlobalCallable | Self::LoadGlobalTypeof => 1,
             Self::InitialYield => 2,
             Self::Yield => 1,
             Self::ResumeGenerator | Self::DelegateStep => -1,

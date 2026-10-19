@@ -1,0 +1,10 @@
+{"run_id":"1792445926-314012000","line":99,"new":{"module_name":"basics","snapshot_name":"exceptions","metadata":{"source":"crates/monty-ecma/tests/basics.rs","assertion_line":99,"expression":"run(r\"\nfunction f() {\n  try {\n    throw new TypeError('bad');\n  } catch (e) {\n    console.log(e instanceof TypeError, e.message);\n  } finally {\n    console.log('finally');\n  }\n}\nf();\ntry {\n  null.x;\n} catch (e) {\n  console.log(e.constructor === TypeError, e.message);\n}\nundefinedVariable;\n\")"},"snapshot":"true bad\nfinally\ntrue Cannot read properties of null (reading 'x')\n?? suspended"},"old":{"module_name":"basics","metadata":{},"snapshot":"true bad\nfinally\ntrue Cannot read properties of null (reading 'x')\n!! ReferenceError: undefinedVariable is not defined"}}
+{"run_id":"1792445940-597809000","line":99,"new":{"module_name":"basics","snapshot_name":"exceptions","metadata":{"source":"crates/monty-ecma/tests/basics.rs","assertion_line":99,"expression":"run(r\"\nfunction f() {\n  try {\n    throw new TypeError('bad');\n  } catch (e) {\n    console.log(e instanceof TypeError, e.message);\n  } finally {\n    console.log('finally');\n  }\n}\nf();\ntry {\n  null.x;\n} catch (e) {\n  console.log(e.constructor === TypeError, e.message);\n}\nundefinedVariable;\n\")"},"snapshot":"true bad\nfinally\ntrue Cannot read properties of null (reading 'x')\n?? suspended"},"old":{"module_name":"basics","metadata":{},"snapshot":"true bad\nfinally\ntrue Cannot read properties of null (reading 'x')\n!! ReferenceError: undefinedVariable is not defined"}}
+{"run_id":"1792445971-857480000","line":119,"new":null,"old":null}
+{"run_id":"1792445971-857480000","line":194,"new":null,"old":null}
+{"run_id":"1792445971-857480000","line":146,"new":null,"old":null}
+{"run_id":"1792445971-857480000","line":87,"new":null,"old":null}
+{"run_id":"1792445971-857480000","line":64,"new":null,"old":null}
+{"run_id":"1792445971-857480000","line":152,"new":null,"old":null}
+{"run_id":"1792445971-857480000","line":195,"new":null,"old":null}
+{"run_id":"1792445971-857480000","line":147,"new":null,"old":null}

@@ -251,6 +251,12 @@ pub(crate) enum Opcode {
     RequireObjectCoercible = 144,
     /// Push a new `RegExp` object for a literal. Operands: u16 pattern atom, u16 flags atom.
     MakeRegExp = 145,
+    /// Push a global for a call: the property when `globalThis` has it, else
+    /// a host function of that name (`FunctionCall` when called). Operand: u16 atom.
+    LoadGlobalCallable = 146,
+    /// Push a global for `typeof`: asks the host for an unknown name and
+    /// pushes `undefined` when it has none. Operand: u16 atom.
+    LoadGlobalTypeof = 147,
 
     // === Generators ===
     /// End of a generator's prologue: suspend the frame into a new generator
@@ -383,6 +389,8 @@ impl Opcode {
             | Self::LoadThis
             | Self::CreateArguments
             | Self::GetIterator
+            | Self::LoadGlobalCallable
+            | Self::LoadGlobalTypeof
             | Self::RequireObjectCoercible => OperandShape::U16,
             Self::Jump
             | Self::JumpIfFalse

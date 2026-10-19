@@ -15,9 +15,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use monty_ecma::{JsProgress, JsRepl};
+use monty_ecma::{JsProgress, JsRepl, JsSuspensionKind};
 use monty_fixture::Header;
-use monty_types::{CollectedStreams, NamedValues, PrintStream, PrintWriter, ResourceLimits};
+use monty_types::{
+    CollectedStreams, ExcType, ExtFunctionResult, MontyException, NameLookupResult, NamedValues, PrintStream,
+    PrintWriter, ResourceLimits,
+};
 use similar::TextDiff;
 
 const TEST_CASES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../monty-ecma/test_cases");
@@ -90,9 +93,28 @@ fn run_monty(path: &Path, code: &str) -> Outcome {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("case.js");
     let repl = JsRepl::new(name, ResourceLimits::default()).expect("session");
     let mut streams = CollectedStreams::default();
-    let error = match repl.feed(code, &NamedValues::new(), PrintWriter::collect_streams(&mut streams)) {
-        JsProgress::Complete { .. } => None,
-        JsProgress::Failed { error, .. } => Some(error.summary()),
+    let mut progress = repl.feed(code, &NamedValues::new(), PrintWriter::collect_streams(&mut streams));
+    // there is no host: an unknown name is unknown, as it is in Node
+    let error = loop {
+        progress = match progress {
+            JsProgress::Complete { .. } => break None,
+            JsProgress::Failed { error, .. } => break Some(error.summary()),
+            JsProgress::Suspended(mut suspension) => match suspension.kind() {
+                JsSuspensionKind::FunctionCall { function_name, .. } => {
+                    let name = function_name.to_owned();
+                    suspension.resume_call(
+                        ExtFunctionResult::NotFound(name),
+                        PrintWriter::collect_streams(&mut streams),
+                    )
+                }
+                JsSuspensionKind::NameLookup { .. } => suspension
+                    .resume_name_lookup(NameLookupResult::Undefined, PrintWriter::collect_streams(&mut streams)),
+                JsSuspensionKind::ResolveFutures { .. } => {
+                    let exc = MontyException::new(ExcType::Error, Some("no host to resolve futures".to_owned()));
+                    suspension.abort(&exc, PrintWriter::collect_streams(&mut streams))
+                }
+            },
+        };
     };
     // only stdout is compared: Node's stderr carries its own diagnostics
     let stdout = streams

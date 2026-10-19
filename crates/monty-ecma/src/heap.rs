@@ -663,6 +663,9 @@ pub(crate) enum FunctionObject {
     },
     /// A builtin implemented in Rust.
     Native(NativeFn),
+    /// A host function: an undeclared name in call position. Calling it
+    /// suspends the feed with a `FunctionCall` for the host to answer.
+    External(AtomId),
     /// `Function.prototype.bind`'s result: `target` and `this` are owned references.
     Bound {
         target: HeapId,
@@ -690,7 +693,7 @@ impl FunctionObject {
                     on_child(*fields);
                 }
             }
-            Self::Native(_) => {}
+            Self::Native(_) | Self::External(_) => {}
             Self::Bound { target, this, args } => {
                 on_child(*target);
                 if let Some(id) = this.heap_id() {
@@ -717,7 +720,7 @@ impl FunctionObject {
                 stack.extend(home_object.take());
                 stack.extend(fields.take());
             }
-            Self::Native(_) => {}
+            Self::Native(_) | Self::External(_) => {}
             Self::Bound { target, this, args } => {
                 stack.push(*target);
                 stack.extend(mem::replace(this, JsValue::Undefined).heap_id());

@@ -4,8 +4,10 @@
 
 use std::{fs, process::ExitCode, time::Duration};
 
-use monty_ecma::{JsProgress, JsRepl};
-use monty_types::{Language, NamedValues, PrintWriter, ResourceLimits};
+use monty_ecma::{JsProgress, JsRepl, JsSuspensionKind};
+use monty_types::{
+    ExcType, ExtFunctionResult, Language, MontyException, NameLookupResult, NamedValues, PrintWriter, ResourceLimits,
+};
 
 use crate::Cli;
 
@@ -49,15 +51,35 @@ pub(crate) fn run(cli: &Cli) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match repl.feed(&code, &NamedValues::new(), PrintWriter::Stdout) {
-        JsProgress::Complete { .. } => ExitCode::SUCCESS,
-        JsProgress::Failed { error, .. } => {
-            for frame in error.traceback() {
-                eprint!("{frame}");
+    let mut progress = repl.feed(&code, &NamedValues::new(), PrintWriter::Stdout);
+    loop {
+        progress = match progress {
+            JsProgress::Complete { .. } => return ExitCode::SUCCESS,
+            JsProgress::Failed { error, .. } => {
+                for frame in error.traceback() {
+                    eprint!("{frame}");
+                }
+                eprintln!("Uncaught {}", error.summary());
+                return ExitCode::FAILURE;
             }
-            eprintln!("Uncaught {}", error.summary());
-            ExitCode::FAILURE
-        }
+            // there is no host here: unknown names stay unknown and futures never settle
+            JsProgress::Suspended(mut suspension) => match suspension.kind() {
+                JsSuspensionKind::FunctionCall { function_name, .. } => {
+                    let name = function_name.to_owned();
+                    suspension.resume_call(ExtFunctionResult::NotFound(name), PrintWriter::Stdout)
+                }
+                JsSuspensionKind::NameLookup { .. } => {
+                    suspension.resume_name_lookup(NameLookupResult::Undefined, PrintWriter::Stdout)
+                }
+                JsSuspensionKind::ResolveFutures { .. } => {
+                    let exc = MontyException::new(
+                        ExcType::Error,
+                        Some("promises are waiting on host functions, but there is no host".to_owned()),
+                    );
+                    suspension.abort(&exc, PrintWriter::Stdout)
+                }
+            },
+        };
     }
 }
 

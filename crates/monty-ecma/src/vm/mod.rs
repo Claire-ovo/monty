@@ -9,7 +9,9 @@
 //! and `inspect.rs` (`console.log` formatting).
 
 pub(crate) mod call;
+pub(crate) mod feed;
 pub(crate) mod generator;
+pub(crate) mod host;
 pub(crate) mod inspect;
 pub(crate) mod number;
 pub(crate) mod ops;
@@ -18,12 +20,12 @@ pub(crate) mod property;
 
 use std::{collections::VecDeque, mem, string::ToString, sync::Arc};
 
-use call::Invocation;
 use monty_heap::ContainsHeap;
 use monty_types::{MontyException, PrintWriter, ResourceError, ResourceTracker, StackFrame};
 
 use self::{
     generator::ResumeMode,
+    host::HostRequest,
     promise::{Job, Timer},
 };
 use crate::{
@@ -31,7 +33,7 @@ use crate::{
     bytecode::{Code, Opcode},
     error::{RunResult, Throw, stack_frame},
     function::Function,
-    heap::{GeneratorState, Heap, HeapId, JsHeapData, JsObject, MapKey, PropFlags, PropertyKey},
+    heap::{GeneratorState, Heap, HeapId, JsHeapData, JsObject, MapKey, PropFlags, PropertyKey, Settled, Target},
     intern::{AtomId, FunctionId, Interns, StaticAtom},
     realm::{ErrorKind, Realm, ScriptScope},
     string::JsString,
@@ -56,6 +58,8 @@ pub(crate) struct Session {
     pub feed_count: u32,
     /// `Math.random`'s generator state.
     pub random_state: u64,
+    /// The id the next host call announces itself with.
+    pub next_call_id: u32,
 }
 
 /// The interpreter for one feed: the session plus the run-time stacks.
@@ -85,6 +89,10 @@ pub(crate) struct Vm<'p> {
     unhandled: Vec<HeapId>,
     /// Whether the module body ran as an async function (top-level `await`).
     module_async: bool,
+    /// The module body's completion value, kept while the queues drain.
+    feed_result: Option<JsValue>,
+    /// Promises waiting on host futures, by call id (owned references).
+    host_futures: Vec<(u32, HeapId)>,
 }
 
 /// A function activation on the shared stack.
@@ -106,9 +114,32 @@ struct Frame {
     /// The generator or coroutine object this frame belongs to (an owned
     /// reference), which a `Yield` or `await` parks it in.
     generator: Option<HeapId>,
-    /// An async function's first run: its promise is the call's result, so
-    /// the first suspension or the return hands the promise to the caller.
-    async_initial: bool,
+    /// What happens to the frame's result when it leaves the stack.
+    completion: Completion,
+}
+
+/// What a frame does with its result (or the throw escaping it) when it
+/// leaves the stack. Frames the job queue starts carry the continuation
+/// here instead of a Rust caller, so the dispatch loop stays flat and a
+/// host call can suspend from any of them.
+pub(crate) enum Completion {
+    /// Hand the value to the caller: push it, or return it at the stop depth.
+    Deliver,
+    /// An async function's first run: its coroutine's promise is the call's
+    /// result, delivered through the inner completion.
+    Async(Box<Self>),
+    /// An async function resumed by a job: the promise is settled, nothing is delivered.
+    AsyncResumed,
+    /// A promise reaction handler: settle `target` with the result or the throw.
+    Settle(Target),
+    /// A thenable's `then`: the result is discarded, a throw calls `reject`.
+    Thenable { reject: JsValue },
+    /// A `finally` callback: the stored settlement passes through to `target`
+    /// once the callback's result settles; a throw replaces it.
+    Finally { target: Target, settled: Settled },
+    /// A callback whose result is discarded (`queueMicrotask`, timers); a
+    /// throw is uncaught.
+    Discard,
 }
 
 /// What a frame does with its return value under `new`.
@@ -140,6 +171,8 @@ impl<'p> Vm<'p> {
             timer_seq: 1,
             unhandled: Vec::new(),
             module_async: false,
+            feed_result: None,
+            host_futures: Vec::new(),
         }
     }
 
@@ -150,6 +183,12 @@ impl<'p> Vm<'p> {
             pending.drop_with(&mut self.session.heap);
         }
         self.discard_jobs();
+        if let Some(value) = self.feed_result.take() {
+            value.drop_with(&mut self.session.heap);
+        }
+        for (_, promise) in mem::take(&mut self.host_futures) {
+            self.session.heap.dec_ref(promise);
+        }
         self.session
     }
 
@@ -159,19 +198,6 @@ impl<'p> Vm<'p> {
 
     pub fn realm(&self) -> &Realm {
         &self.session.realm
-    }
-
-    /// Runs a module body to completion, returning its completion value (the
-    /// promise of that value for a body with a top-level `await`).
-    pub fn run_module(&mut self, module: Arc<Function>) -> RunResult<JsValue> {
-        self.traceback.clear();
-        let is_async = module.kind.is_async();
-        self.module_async = is_async;
-        self.push_frame(module, None, Vec::new(), Invocation::call(JsValue::Undefined))?;
-        if is_async {
-            self.start_coroutine();
-        }
-        self.run_to_return(0)
     }
 
     /// The frames an uncaught throw unwound, outermost first.
@@ -193,6 +219,7 @@ impl<'p> Vm<'p> {
                 Ok(Step::Return(value)) => self.finish_return(value).and_then(|value| self.leave_frame(value)),
                 Ok(Step::InitialYield) => self.create_generator().map(Delivery::Value),
                 Ok(Step::Yield { value, kind }) => self.yield_frame(value, kind),
+                Ok(Step::Suspend(request)) => return Ok(Outcome::Suspend(request)),
                 Err(throw) => Err(throw),
             };
             let delivery = match delivery {
@@ -207,47 +234,103 @@ impl<'p> Vm<'p> {
                 Delivery::Value(value) if at_stop => return Ok(Outcome::Return(value)),
                 Delivery::Value(value) => self.stack.push(value),
                 Delivery::Yielded(value) if at_stop => return Ok(Outcome::Yield(value)),
-                Delivery::Nothing if at_stop => return Ok(Outcome::Return(JsValue::Undefined)),
-                Delivery::Yielded(value) => {
+                Delivery::Nothing if at_stop => return Ok(Outcome::Done),
+                Delivery::Nothing => {}
+                Delivery::Yielded(value) | Delivery::Propagate(value) => {
                     value.drop_with(&mut self.session.heap);
-                    return Err(self.internal_error("suspension below the resume boundary"));
+                    return Err(self.internal_error("misdelivered frame result"));
                 }
-                Delivery::Nothing => return Err(self.internal_error("async frame below the resume boundary")),
             }
         }
     }
 
-    /// Pops a frame that returned `value`: an async frame settles its promise
-    /// instead, handing the promise to its original caller.
+    /// Pops a frame that returned `value` and runs its continuation.
     fn leave_frame(&mut self, value: JsValue) -> RunResult<Delivery> {
-        let frame = self.frames.pop().expect("returning from a frame");
-        self.clear_stack(frame.base);
-        frame.new_target.drop_with(&mut self.session.heap);
-        if let Some(callee) = frame.callee {
-            self.session.heap.dec_ref(callee);
-        }
-        let delivery = match frame.generator.filter(|id| self.is_coroutine(*id)) {
-            Some(coroutine) => {
-                let promise = self.coroutine_promise(coroutine);
-                self.set_coroutine_state(coroutine, GeneratorState::Completed);
-                let resolved = self.resolve_promise(promise, value);
-                if let Err(err) = resolved {
-                    self.session.heap.dec_ref(coroutine);
-                    return Err(err);
-                }
-                if frame.async_initial {
-                    self.session.heap.inc_ref(promise);
-                    Delivery::Value(JsValue::Ref(promise))
-                } else {
-                    Delivery::Nothing
-                }
-            }
-            None => Delivery::Value(value),
-        };
-        if let Some(owner) = frame.generator {
+        let (owner, completion) = self.pop_frame();
+        let delivery = self.complete_frame(owner, completion, Settled::Fulfilled(value));
+        if let Some(owner) = owner {
             self.session.heap.dec_ref(owner);
         }
-        Ok(delivery)
+        delivery
+    }
+
+    /// Runs a popped frame's continuation on its outcome. An async frame
+    /// settles its promise first and delivers the promise instead.
+    fn complete_frame(
+        &mut self,
+        owner: Option<HeapId>,
+        completion: Completion,
+        outcome: Settled,
+    ) -> RunResult<Delivery> {
+        let (completion, outcome) = match completion {
+            Completion::Async(inner) => {
+                let promise = self.settle_coroutine(owner, outcome)?;
+                self.session.heap.inc_ref(promise);
+                (*inner, Settled::Fulfilled(JsValue::Ref(promise)))
+            }
+            Completion::AsyncResumed => {
+                self.settle_coroutine(owner, outcome)?;
+                return Ok(Delivery::Nothing);
+            }
+            other => (other, outcome),
+        };
+        self.complete(completion, outcome)
+    }
+
+    /// Settles the promise of an async frame's coroutine, which is finished.
+    fn settle_coroutine(&mut self, owner: Option<HeapId>, outcome: Settled) -> RunResult<HeapId> {
+        let Some(coroutine) = owner else {
+            outcome.into_value().drop_with(&mut self.session.heap);
+            return Err(self.internal_error("async frame without a coroutine"));
+        };
+        let promise = self.coroutine_promise(coroutine);
+        self.set_coroutine_state(coroutine, GeneratorState::Completed);
+        match outcome {
+            Settled::Fulfilled(value) => self.resolve_promise(promise, value)?,
+            Settled::Rejected(reason) => {
+                self.reject_promise(promise, reason);
+                self.traceback.clear();
+            }
+        }
+        Ok(promise)
+    }
+
+    /// Applies a continuation to a frame's outcome.
+    fn complete(&mut self, completion: Completion, outcome: Settled) -> RunResult<Delivery> {
+        Ok(match (completion, outcome) {
+            (Completion::Deliver, Settled::Fulfilled(value)) => Delivery::Value(value),
+            (Completion::Deliver | Completion::Discard, Settled::Rejected(reason)) => Delivery::Propagate(reason),
+            (Completion::Discard, Settled::Fulfilled(value)) => {
+                value.drop_with(&mut self.session.heap);
+                Delivery::Nothing
+            }
+            (Completion::Settle(target), outcome) => {
+                self.settle_target(target, outcome)?;
+                Delivery::Nothing
+            }
+            (Completion::Thenable { reject }, Settled::Fulfilled(value)) => {
+                self.drop_all(value, vec![reject]);
+                Delivery::Nothing
+            }
+            (Completion::Thenable { reject }, Settled::Rejected(reason)) => {
+                let result = self.call(reject, JsValue::Undefined, vec![reason])?;
+                result.drop_with(&mut self.session.heap);
+                Delivery::Nothing
+            }
+            (Completion::Finally { target, settled }, Settled::Fulfilled(result)) => {
+                self.finish_finally(target, settled, result)?;
+                Delivery::Nothing
+            }
+            (Completion::Finally { target, settled }, Settled::Rejected(reason)) => {
+                settled.into_value().drop_with(&mut self.session.heap);
+                self.settle_target(target, Settled::Rejected(reason))?;
+                Delivery::Nothing
+            }
+            (Completion::Async(_) | Completion::AsyncResumed, outcome) => {
+                outcome.into_value().drop_with(&mut self.session.heap);
+                return Err(self.internal_error("async completion without a coroutine"));
+            }
+        })
     }
 
     /// Parks the top frame at a `yield` or `await`.
@@ -257,7 +340,6 @@ impl<'p> Vm<'p> {
             value.drop_with(&mut self.session.heap);
             return Err(self.internal_error("suspension outside a generator"));
         };
-        let initial = frame.async_initial;
         let delivery = match kind {
             YieldKind::Wrap | YieldKind::Raw => {
                 let result = if kind == YieldKind::Raw {
@@ -269,14 +351,15 @@ impl<'p> Vm<'p> {
                 Delivery::Yielded(result)
             }
             YieldKind::Await => {
-                self.suspend_frame(owner);
+                let completion = self.suspend_frame(owner);
                 self.await_value(owner, value)?;
-                if initial {
-                    let promise = self.coroutine_promise(owner);
-                    self.session.heap.inc_ref(promise);
-                    Delivery::Value(JsValue::Ref(promise))
-                } else {
-                    Delivery::Nothing
+                match completion {
+                    Completion::Async(inner) => {
+                        let promise = self.coroutine_promise(owner);
+                        self.session.heap.inc_ref(promise);
+                        self.complete(*inner, Settled::Fulfilled(JsValue::Ref(promise)))?
+                    }
+                    _ => Delivery::Nothing,
                 }
             }
         };
@@ -289,10 +372,12 @@ impl<'p> Vm<'p> {
     pub(super) fn run_to_return(&mut self, stop_depth: usize) -> RunResult<JsValue> {
         match self.run(stop_depth)? {
             Outcome::Return(value) => Ok(value),
+            Outcome::Done => Ok(JsValue::Undefined),
             Outcome::Yield(value) => {
                 value.drop_with(&mut self.session.heap);
                 Err(self.internal_error("unexpected yield"))
             }
+            Outcome::Suspend(_) => Err(self.internal_error("a nested run suspended for the host")),
         }
     }
 
@@ -305,7 +390,11 @@ impl<'p> Vm<'p> {
             Throw::Resource(err) => {
                 while self.frames.len() > stop_depth {
                     self.record_frame();
-                    self.pop_frame();
+                    let (owner, completion) = self.pop_frame();
+                    self.discard_completion(completion);
+                    if let Some(owner) = owner {
+                        self.session.heap.dec_ref(owner);
+                    }
                 }
                 Err(Throw::Resource(err))
             }
@@ -386,9 +475,9 @@ impl<'p> Vm<'p> {
     }
 
     /// Delivers a thrown value to the nearest handler above `stop_depth`, or
-    /// unwinds those frames and propagates it. An async frame it escapes
-    /// rejects its promise instead and delivers like a return.
-    fn unwind(&mut self, value: JsValue, stop_depth: usize) -> RunResult<Option<Delivery>> {
+    /// unwinds those frames and propagates it. A frame whose continuation
+    /// consumes a throw (an async frame, a reaction handler) ends the unwinding.
+    fn unwind(&mut self, mut value: JsValue, stop_depth: usize) -> RunResult<Option<Delivery>> {
         while self.frames.len() > stop_depth {
             let frame = self.frames.last().expect("frame");
             if let Some(entry) = frame.function.code.handler_for(frame.op_start).copied() {
@@ -403,31 +492,24 @@ impl<'p> Vm<'p> {
                 self.traceback.clear();
                 return Ok(None);
             }
-            let coroutine = frame.generator.filter(|id| self.is_coroutine(*id));
-            let initial = frame.async_initial;
             self.record_frame();
-            self.pop_frame();
-            if let Some(coroutine) = coroutine {
-                let promise = self.coroutine_promise(coroutine);
-                self.set_coroutine_state(coroutine, GeneratorState::Completed);
-                self.reject_promise(promise, value);
-                self.traceback.clear();
-                let delivery = if initial {
-                    self.session.heap.inc_ref(promise);
-                    Delivery::Value(JsValue::Ref(promise))
-                } else {
-                    Delivery::Nothing
-                };
-                self.session.heap.dec_ref(coroutine);
-                return Ok(Some(delivery));
+            let (owner, completion) = self.pop_frame();
+            let delivery = self.complete_frame(owner, completion, Settled::Rejected(value));
+            if let Some(owner) = owner {
+                self.session.heap.dec_ref(owner);
+            }
+            match delivery? {
+                Delivery::Propagate(reason) => value = reason,
+                other => return Ok(Some(other)),
             }
         }
         Err(Throw::Value(value))
     }
 
-    /// Discards the top frame: its stack region and what it owned (a frame
-    /// of an async function keeps its coroutine alive for the caller to settle).
-    fn pop_frame(&mut self) {
+    /// Discards the top frame's stack region and what it owned, handing back
+    /// its generator (for the caller to release once done with it) and its
+    /// continuation.
+    fn pop_frame(&mut self) -> (Option<HeapId>, Completion) {
         let frame = self.frames.pop().expect("frame");
         self.clear_stack(frame.base);
         frame.new_target.drop_with(&mut self.session.heap);
@@ -438,10 +520,20 @@ impl<'p> Vm<'p> {
             Construct::Base(this) => this.drop_with(&mut self.session.heap),
             Construct::Call | Construct::Derived => {}
         }
-        if let Some(owner) = frame.generator
-            && !self.is_coroutine(owner)
-        {
-            self.session.heap.dec_ref(owner);
+        (frame.generator, frame.completion)
+    }
+
+    /// Releases a continuation that will not run (a feed ending in a resource error).
+    fn discard_completion(&mut self, completion: Completion) {
+        match completion {
+            Completion::Deliver | Completion::AsyncResumed | Completion::Discard => {}
+            Completion::Async(inner) => self.discard_completion(*inner),
+            Completion::Settle(target) => self.drop_target(target),
+            Completion::Thenable { reject } => reject.drop_with(&mut self.session.heap),
+            Completion::Finally { target, settled } => {
+                self.drop_target(target);
+                settled.into_value().drop_with(&mut self.session.heap);
+            }
         }
     }
 
@@ -590,7 +682,24 @@ impl<'p> Vm<'p> {
                 let name = AtomId::from_u16(self.operand_u16());
                 let global = self.session.realm.global;
                 let Some(value) = self.get_own_or_inherited(global, PropertyKey::Atom(name))? else {
-                    return Err(self.reference_error(name));
+                    return self.name_lookup(name, false);
+                };
+                self.stack.push(value);
+            }
+            Opcode::LoadGlobalTypeof => {
+                let name = AtomId::from_u16(self.operand_u16());
+                let global = self.session.realm.global;
+                let Some(value) = self.get_own_or_inherited(global, PropertyKey::Atom(name))? else {
+                    return self.name_lookup(name, true);
+                };
+                self.stack.push(value);
+            }
+            Opcode::LoadGlobalCallable => {
+                let name = AtomId::from_u16(self.operand_u16());
+                let global = self.session.realm.global;
+                let value = match self.get_own_or_inherited(global, PropertyKey::Atom(name))? {
+                    Some(value) => value,
+                    None => self.external_function(name),
                 };
                 self.stack.push(value);
             }
@@ -1310,7 +1419,7 @@ impl<'p> Vm<'p> {
         self.throw_error(ErrorKind::SyntaxError, message)
     }
 
-    fn reference_error(&mut self, name: AtomId) -> Throw {
+    pub(super) fn reference_error(&mut self, name: AtomId) -> Throw {
         let name = self.session.interns.atom(name).to_string_lossy();
         self.throw_error(ErrorKind::ReferenceError, &format!("{name} is not defined"))
     }
@@ -1405,6 +1514,8 @@ enum Step {
         value: JsValue,
         kind: YieldKind,
     },
+    /// The feed must ask the host before continuing.
+    Suspend(HostRequest),
 }
 
 /// What a `Yield` instruction's operand asks for.
@@ -1419,13 +1530,15 @@ enum YieldKind {
 }
 
 /// What a frame leaving the stack hands to the frame below it.
-enum Delivery {
+pub(crate) enum Delivery {
     /// The frame's result: pushed for a caller, or returned at the stop depth.
     Value(JsValue),
     /// A generator frame yielded this at the stop depth.
     Yielded(JsValue),
-    /// An async frame resumed by a job suspended or finished: nothing to deliver.
+    /// The frame's continuation consumed its result: nothing to deliver.
     Nothing,
+    /// A throw the frame did not consume: unwinding continues with this reason.
+    Propagate(JsValue),
 }
 
 /// How a nested run ended: the frame at the stop depth returned, or it was a
@@ -1433,6 +1546,10 @@ enum Delivery {
 pub(crate) enum Outcome {
     Return(JsValue),
     Yield(JsValue),
+    /// The frame at the stop depth left without a value (its continuation consumed it).
+    Done,
+    /// The feed must ask the host; the frames stay as they are.
+    Suspend(HostRequest),
 }
 
 impl ContainsHeap for Vm<'_> {

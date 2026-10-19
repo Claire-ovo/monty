@@ -1,10 +1,11 @@
 //! The JavaScript engine behind the protocol child.
 //!
-//! Feeds run to completion in this phase: host calls, name lookups, futures
-//! and dumps are not reachable from JavaScript yet, so the suspension type
-//! is uninhabited and the resume methods cannot be called.
+//! A feed runs until it completes, fails or suspends on the host: a call of
+//! an undeclared name (`FunctionCall`), a read of one (`NameLookup`) or
+//! promises waiting on host futures (`ResolveFutures`). Dumps are not
+//! supported yet.
 
-use monty_ecma::{JsProgress, JsRepl};
+use monty_ecma::{JsProgress, JsRepl, JsSuspension, JsSuspensionKind};
 use monty_proto::{
     pb,
     worker::{
@@ -20,12 +21,9 @@ use monty_types::{
 #[derive(Default)]
 pub(crate) struct JsEngine;
 
-/// A suspended JavaScript feed, which nothing produces yet.
-pub(crate) enum Never {}
-
 impl Engine for JsEngine {
     type Repl = JsRepl;
-    type Progress = Never;
+    type Progress = JsSuspension;
     type Restored = ();
 
     // TODO(ts-syntax): add `Language::TypeScript` once the engine accepts it.
@@ -70,53 +68,91 @@ impl Engine for JsEngine {
     }
 
     fn feed_start(&mut self, repl: JsRepl, code: &str, inputs: NamedValues, print: PrintWriter<'_>) -> Step<Self> {
-        match repl.feed(code, &inputs, print) {
-            JsProgress::Complete { repl, value } => Ok(Outcome::Complete { repl, value }),
-            JsProgress::Failed { repl, error } => Err(Box::new(Failed { repl, error })),
-        }
+        step(repl.feed(code, &inputs, print))
     }
 
     fn feed_settled(&mut self, _: bool) {}
 
-    fn resume_call(&mut self, progress: Never, _: ExtFunctionResult, _: PrintWriter<'_>) -> Step<Self> {
-        match progress {}
+    fn resume_call(&mut self, progress: JsSuspension, result: ExtFunctionResult, print: PrintWriter<'_>) -> Step<Self> {
+        step(progress.resume_call(result, print))
     }
 
     fn resume_eager(
         &mut self,
-        progress: Never,
-        _: Result<MontyObject, MontyException>,
-        _: PrintWriter<'_>,
+        progress: JsSuspension,
+        result: Result<MontyObject, MontyException>,
+        print: PrintWriter<'_>,
     ) -> Step<Self> {
-        match progress {}
+        // JavaScript never allows an eager await; treat the settled coroutine as a plain answer
+        let result = match result {
+            Ok(value) => ExtFunctionResult::Return(value),
+            Err(exc) => ExtFunctionResult::Error(exc),
+        };
+        step(progress.resume_call(result, print))
     }
 
-    fn resume_name_lookup(&mut self, progress: Never, _: NameLookupResult, _: PrintWriter<'_>) -> Step<Self> {
-        match progress {}
+    fn resume_name_lookup(
+        &mut self,
+        progress: JsSuspension,
+        result: NameLookupResult,
+        print: PrintWriter<'_>,
+    ) -> Step<Self> {
+        step(progress.resume_name_lookup(result, print))
     }
 
-    fn resume_futures(&mut self, progress: Never, _: Vec<(u32, ExtFunctionResult)>, _: PrintWriter<'_>) -> Step<Self> {
-        match progress {}
+    fn resume_futures(
+        &mut self,
+        progress: JsSuspension,
+        results: Vec<(u32, ExtFunctionResult)>,
+        print: PrintWriter<'_>,
+    ) -> Step<Self> {
+        step(progress.resume_futures(results, print))
     }
 
-    fn abort(&mut self, progress: Never, _: MontyException, _: PrintWriter<'_>) -> Step<Self> {
-        match progress {}
+    fn abort(&mut self, progress: JsSuspension, exc: MontyException, print: PrintWriter<'_>) -> Step<Self> {
+        step(progress.abort(&exc, print))
     }
 
-    fn suspension(progress: &mut Never) -> Suspension<'_> {
-        match *progress {}
+    fn suspension(progress: &mut JsSuspension) -> Suspension<'_> {
+        match progress.kind() {
+            JsSuspensionKind::FunctionCall {
+                function_name,
+                args,
+                call_id,
+                position,
+            } => Suspension::FunctionCall {
+                function_name,
+                args,
+                call_id,
+                object_id: None,
+                allow_eager_await: false,
+                position,
+            },
+            JsSuspensionKind::NameLookup { name, position } => Suspension::NameLookup {
+                name,
+                object_id: None,
+                position,
+            },
+            JsSuspensionKind::ResolveFutures {
+                pending_call_ids,
+                position,
+            } => Suspension::ResolveFutures {
+                pending_call_ids,
+                position,
+            },
+        }
     }
 
-    fn into_repl(progress: Never) -> JsRepl {
-        match progress {}
+    fn into_repl(progress: JsSuspension) -> JsRepl {
+        progress.into_repl()
     }
 
     fn repl_tracker(repl: &JsRepl) -> &ResourceTracker {
         repl.tracker()
     }
 
-    fn progress_tracker(progress: &Never) -> &ResourceTracker {
-        match *progress {}
+    fn progress_tracker(progress: &JsSuspension) -> &ResourceTracker {
+        progress.tracker()
     }
 
     fn dump(&self, _: &str, _: SessionRef<'_, Self>) -> Result<Vec<u8>, String> {
@@ -133,5 +169,14 @@ impl Engine for JsEngine {
 
     fn reset(&mut self) -> Result<(), String> {
         Ok(())
+    }
+}
+
+/// Maps the engine's progress onto the child's step.
+fn step(progress: JsProgress) -> Step<JsEngine> {
+    match progress {
+        JsProgress::Complete { repl, value } => Ok(Outcome::Complete { repl, value }),
+        JsProgress::Failed { repl, error } => Err(Box::new(Failed { repl, error })),
+        JsProgress::Suspended(suspension) => Ok(Outcome::Suspended(*suspension)),
     }
 }

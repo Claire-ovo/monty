@@ -38,10 +38,7 @@ impl Vm<'_> {
     /// Imports a feed's named inputs as `globalThis` properties.
     pub fn import_inputs(&mut self, inputs: &NamedValues) -> RunResult<()> {
         let (graph, names) = named_values_parts(inputs);
-        let mut importer = Importer {
-            graph,
-            seen: AHashMap::new(),
-        };
+        let mut importer = Importer::new(graph);
         let global = self.session.realm.global;
         for (name, id) in names {
             let value = importer.value(self, *id)?;
@@ -214,14 +211,21 @@ fn number_node(n: f64) -> MontyNode {
 }
 
 /// Builds sandbox values from an incoming graph.
-struct Importer<'g> {
+pub(crate) struct Importer<'g> {
     graph: &'g MontyGraph,
     /// Containers already built, so a shared node imports once.
     seen: AHashMap<NodeId, HeapId>,
 }
 
-impl Importer<'_> {
-    fn value(&mut self, vm: &mut Vm<'_>, id: NodeId) -> RunResult<JsValue> {
+impl<'g> Importer<'g> {
+    pub(crate) fn new(graph: &'g MontyGraph) -> Self {
+        Self {
+            graph,
+            seen: AHashMap::new(),
+        }
+    }
+
+    pub(crate) fn value(&mut self, vm: &mut Vm<'_>, id: NodeId) -> RunResult<JsValue> {
         if let Some(existing) = self.seen.get(&id) {
             vm.session.heap.inc_ref(*existing);
             return Ok(JsValue::Ref(*existing));

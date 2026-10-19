@@ -27,4 +27,4 @@ mod string;
 mod value;
 mod vm;
 
-pub use repl::{JsProgress, JsRepl, JsStartError};
+pub use repl::{JsProgress, JsRepl, JsStartError, JsSuspension, JsSuspensionKind};

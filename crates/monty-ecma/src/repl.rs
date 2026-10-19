@@ -4,8 +4,8 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use monty_types::{
-    ExcType, MontyException, MontyObject, NamedValues, OsPolicy, PrintWriter, ResourceError, ResourceLimits,
-    ResourceTracker,
+    CallArgs, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, NamedValues, OsPolicy,
+    PrintWriter, ResourceError, ResourceLimits, ResourceTracker, SourceRange,
 };
 use oxc_allocator::Allocator;
 
@@ -13,13 +13,17 @@ use crate::{
     builtins,
     compile::compile,
     error::Throw,
-    heap::{Heap, HeapId, ObjectClass, Settled},
+    heap::{Heap, HeapId, ObjectClass},
     intern::{Interns, StaticAtom},
     parse::parse,
     realm::{ErrorKind, Realm, ScriptScope},
     resolve::Analysis,
     value::JsValue,
-    vm::{Session, Vm},
+    vm::{
+        Session, Vm,
+        feed::FeedEnd,
+        host::{HostRequest, ParkedVm},
+    },
 };
 
 /// Heap entries reserved up front for the intrinsics.
@@ -34,13 +38,123 @@ pub struct JsRepl {
 
 /// What a feed produced.
 pub enum JsProgress {
-    /// The snippet ran to completion with this value.
-    Complete { repl: JsRepl, value: MontyObject },
-    /// The snippet failed; the session survives.
-    Failed { repl: JsRepl, error: MontyException },
+    Complete {
+        repl: JsRepl,
+        value: MontyObject,
+    },
+    Failed {
+        repl: JsRepl,
+        error: MontyException,
+    },
+    /// The feed is waiting on the host; see [`JsSuspension`].
+    Suspended(Box<JsSuspension>),
 }
 
-/// Why a session could not be started.
+/// A feed parked on a host round-trip: the whole interpreter is kept, and
+/// the matching `resume_*` method continues it with the host's answer.
+pub struct JsSuspension {
+    vm: ParkedVm,
+    os_policy: OsPolicy,
+    request: HostRequest,
+}
+
+/// What a suspended feed asks the host for.
+pub enum JsSuspensionKind<'a> {
+    /// A call of an undeclared name.
+    FunctionCall {
+        function_name: &'a str,
+        args: &'a mut CallArgs,
+        call_id: u32,
+        position: &'a SourceRange,
+    },
+    /// A read of an undeclared name.
+    NameLookup { name: &'a str, position: &'a SourceRange },
+    /// Every queue is empty but promises wait on host futures.
+    ResolveFutures {
+        pending_call_ids: &'a [u32],
+        position: &'a SourceRange,
+    },
+}
+
+impl JsSuspension {
+    /// What the feed is waiting for.
+    pub fn kind(&mut self) -> JsSuspensionKind<'_> {
+        match &mut self.request {
+            HostRequest::FunctionCall {
+                name,
+                args,
+                call_id,
+                position,
+            } => JsSuspensionKind::FunctionCall {
+                function_name: name,
+                args,
+                call_id: *call_id,
+                position,
+            },
+            HostRequest::NameLookup { name, position, .. } => JsSuspensionKind::NameLookup { name, position },
+            HostRequest::ResolveFutures {
+                pending_call_ids,
+                position,
+            } => JsSuspensionKind::ResolveFutures {
+                pending_call_ids,
+                position,
+            },
+        }
+    }
+
+    pub fn tracker(&self) -> &ResourceTracker {
+        self.vm.tracker()
+    }
+
+    /// Answers a `FunctionCall`.
+    pub fn resume_call(self, result: ExtFunctionResult, print: PrintWriter<'_>) -> JsProgress {
+        self.resume(print, |vm| vm.apply_call_result(result))
+    }
+
+    /// Answers a `NameLookup`.
+    pub fn resume_name_lookup(self, result: NameLookupResult, print: PrintWriter<'_>) -> JsProgress {
+        let (atom, tolerant) = match &self.request {
+            HostRequest::NameLookup { atom, tolerant, .. } => (*atom, *tolerant),
+            _ => return self.abort(&protocol_misuse("a name lookup answer for another suspension"), print),
+        };
+        self.resume(print, |vm| vm.apply_name_lookup(atom, tolerant, result))
+    }
+
+    /// Delivers settled host futures to a `ResolveFutures` suspension.
+    pub fn resume_futures(self, results: Vec<(u32, ExtFunctionResult)>, print: PrintWriter<'_>) -> JsProgress {
+        self.resume(print, |vm| vm.apply_futures(results))
+    }
+
+    /// Throws `exc` where the feed suspended.
+    pub fn abort(self, exc: &MontyException, print: PrintWriter<'_>) -> JsProgress {
+        self.resume(print, |vm| {
+            let error = vm.exception_value(exc);
+            vm.throw_in_feed(error)
+        })
+    }
+
+    /// Drops the feed, keeping the session for the next one.
+    #[must_use]
+    pub fn into_repl(self) -> JsRepl {
+        JsRepl {
+            session: self.vm.into_session(),
+            os_policy: self.os_policy,
+        }
+    }
+
+    fn resume(self, print: PrintWriter<'_>, apply: impl FnOnce(&mut Vm<'_>) -> Result<(), Throw>) -> JsProgress {
+        let mut vm = self.vm.wake(print);
+        vm.tracker().on_execution_start();
+        let outcome = apply(&mut vm).and_then(|()| vm.continue_feed());
+        settle(vm, self.os_policy, outcome)
+    }
+}
+
+/// The exception for an answer that does not match the suspension.
+fn protocol_misuse(what: &str) -> MontyException {
+    MontyException::new(ExcType::RuntimeError, Some(format!("protocol misuse: {what}")))
+}
+
 #[derive(Debug)]
 pub enum JsStartError {
     /// The intrinsics could not be built within the memory limit.
@@ -70,6 +184,7 @@ impl JsRepl {
             script_name: script_name.to_owned(),
             feed_count: 0,
             random_state: 0x9E37_79B9_7F4A_7C15,
+            next_call_id: 1,
         };
         let mut vm = Vm::new(session, PrintWriter::Disabled);
         builtins::create_realm(&mut vm);
@@ -162,58 +277,40 @@ impl JsRepl {
         let mut vm = Vm::new(self.session, print);
         vm.tracker().on_feed_start();
         vm.tracker().on_execution_start();
-        let outcome = vm
-            .import_inputs(inputs)
-            .and_then(|()| vm.run_module(module))
-            .and_then(|value| finish_feed(&mut vm, value));
-        let result = match outcome {
-            Ok(value) => {
-                let exported = vm.export(&value);
-                value.drop_with(&mut vm.session.heap);
-                match exported {
-                    Ok(exported) => Ok(exported),
-                    Err(throw) => Err(throw_to_exception(&mut vm, throw)),
-                }
-            }
-            Err(throw) => Err(throw_to_exception(&mut vm, throw)),
-        };
-        vm.tracker().on_execution_stop();
-        self.session = vm.into_session();
-        match result {
-            Ok(value) => JsProgress::Complete { repl: self, value },
-            Err(error) => JsProgress::Failed { repl: self, error },
-        }
+        let outcome = vm.import_inputs(inputs).and_then(|()| vm.start_feed(module));
+        settle(vm, self.os_policy, outcome)
     }
 }
 
-/// Converts an uncaught throw into the host's exception, with the traceback
-/// the VM recorded while unwinding.
-/// Drains the job and timer queues after the module body, then settles the
-/// feed's value: an async body's promise is read, and a rejection nobody
-/// handled fails the feed as an uncaught error.
-fn finish_feed(vm: &mut Vm<'_>, value: JsValue) -> Result<JsValue, Throw> {
-    if let Err(err) = vm.run_jobs() {
-        value.drop_with(&mut vm.session.heap);
-        return Err(err);
-    }
-    let value = match value {
-        JsValue::Ref(id) if vm.is_promise(id) && vm.module_is_async() => {
-            let settled = vm.promise_settlement(id);
+/// Turns how a feed left the interpreter into the progress the host sees.
+fn settle(mut vm: Vm<'_>, os_policy: OsPolicy, outcome: Result<FeedEnd, Throw>) -> JsProgress {
+    let result = match outcome {
+        Ok(FeedEnd::Suspended(request)) => {
+            vm.tracker().on_execution_stop();
+            return JsProgress::Suspended(Box::new(JsSuspension {
+                vm: vm.park(),
+                os_policy,
+                request,
+            }));
+        }
+        Ok(FeedEnd::Complete(value)) => {
+            let exported = vm.export(&value);
             value.drop_with(&mut vm.session.heap);
-            match settled {
-                Some(Settled::Fulfilled(value)) => value,
-                Some(Settled::Rejected(reason)) => return Err(Throw::Value(reason)),
-                None => return Err(vm.throw_error(ErrorKind::Error, "unsettled top-level await")),
+            match exported {
+                Ok(exported) => Ok(exported),
+                Err(throw) => Err(throw_to_exception(&mut vm, throw)),
             }
         }
-        other => other,
+        Err(throw) => Err(throw_to_exception(&mut vm, throw)),
     };
-    match vm.take_unhandled_rejection() {
-        Some(reason) => {
-            value.drop_with(&mut vm.session.heap);
-            Err(Throw::Value(reason))
-        }
-        None => Ok(value),
+    vm.tracker().on_execution_stop();
+    let repl = JsRepl {
+        session: vm.into_session(),
+        os_policy,
+    };
+    match result {
+        Ok(value) => JsProgress::Complete { repl, value },
+        Err(error) => JsProgress::Failed { repl, error },
     }
 }
 

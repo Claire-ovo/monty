@@ -5,7 +5,7 @@ use std::{fmt::Write, mem, sync::Arc};
 
 use monty_types::ResourceError;
 
-use super::{Construct, Frame, MAX_REENTRANCY, Step, Vm};
+use super::{Completion, Construct, Frame, MAX_REENTRANCY, Step, Vm};
 use crate::{
     builtins::{NativeFn, dispatch},
     error::{RunResult, Throw},
@@ -37,12 +37,14 @@ impl Invocation {
 }
 
 /// What a function object is made of, copied out of the heap for a call.
-enum Callable {
+pub(super) enum Callable {
     Closure {
         function: Arc<Function>,
         cells: Vec<HeapId>,
     },
     Native(NativeFn),
+    /// A host function; calling it suspends the feed.
+    External(AtomId),
     Bound {
         target: HeapId,
         this: JsValue,
@@ -67,6 +69,11 @@ impl Vm<'_> {
                     self.start_coroutine();
                 }
                 Ok(Step::Continue)
+            }
+            Some(Callable::External(name)) => {
+                this.drop_with(&mut self.session.heap);
+                callee.drop_with(&mut self.session.heap);
+                self.external_call(name, args)
             }
             None => {
                 self.drop_all(this, args);
@@ -122,6 +129,14 @@ impl Vm<'_> {
             Some(Callable::Native(native)) => {
                 callee.drop_with(&mut self.session.heap);
                 self.call_native(native, this, args, false)
+            }
+            Some(Callable::External(name)) => {
+                self.drop_all(this, args);
+                callee.drop_with(&mut self.session.heap);
+                let name = self.session.interns.atom(name).to_string_lossy();
+                Err(self.type_error(&format!(
+                    "Host function '{name}' cannot be called from a callback run by a builtin"
+                )))
             }
             Some(Callable::Bound {
                 target,
@@ -495,7 +510,7 @@ impl Vm<'_> {
     }
 
     /// What `value` is as a function, with owned copies of its parts.
-    fn callable(&self, value: &JsValue) -> Option<Callable> {
+    pub(super) fn callable(&self, value: &JsValue) -> Option<Callable> {
         let JsValue::Ref(id) = value else {
             return None;
         };
@@ -509,6 +524,7 @@ impl Vm<'_> {
                 cells: cells.to_vec(),
             },
             FunctionObject::Native(native) => Callable::Native(*native),
+            FunctionObject::External(name) => Callable::External(*name),
             FunctionObject::Bound { target, this, args } => Callable::Bound {
                 target: *target,
                 this: this.clone_with_heap(&self.session.heap),
@@ -519,7 +535,7 @@ impl Vm<'_> {
 
     /// Pushes a frame for a closure: the callee's captured cells, then the
     /// frame's own setup.
-    fn push_closure_frame(
+    pub(super) fn push_closure_frame(
         &mut self,
         function: Arc<Function>,
         cells: &[HeapId],
@@ -626,7 +642,7 @@ impl Vm<'_> {
             new_target,
             construct,
             generator: None,
-            async_initial: false,
+            completion: Completion::Deliver,
         });
         Ok(())
     }

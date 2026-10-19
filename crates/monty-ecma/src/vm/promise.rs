@@ -5,7 +5,7 @@
 
 use std::mem;
 
-use super::{Vm, generator::ResumeMode};
+use super::{Completion, Vm, generator::ResumeMode};
 use crate::{
     error::{RunResult, Throw},
     heap::{Handler, HeapId, JsHeapData, JsObject, ObjectClass, PromiseData, PromiseState, Reaction, Settled, Target},
@@ -210,30 +210,12 @@ impl Vm<'_> {
         self.jobs.push_back(Job::Callback(callback));
     }
 
-    /// Runs every queued job, then the next due timer, until both queues are
-    /// empty; a throw out of a job ends the run.
-    pub(crate) fn run_jobs(&mut self) -> RunResult<()> {
-        let mut count = 0usize;
-        loop {
-            while let Some(job) = self.jobs.pop_front() {
-                self.run_job(job)?;
-                count += 1;
-                self.tracker().check_memory_time_every(count)?;
-            }
-            let Some(timer) = self.pop_timer() else {
-                return Ok(());
-            };
-            self.fire_timer(timer)?;
-        }
-    }
-
-    fn run_job(&mut self, job: Job) -> RunResult<()> {
+    /// Starts one job: a reaction, a thenable adoption or a callback. Work
+    /// that needs JavaScript gets a frame with the right continuation; the
+    /// rest settles immediately.
+    pub(super) fn schedule_job(&mut self, job: Job) -> RunResult<()> {
         match job {
-            Job::Callback(callback) => {
-                let result = self.call(callback, JsValue::Undefined, Vec::new())?;
-                result.drop_with(&mut self.session.heap);
-                Ok(())
-            }
+            Job::Callback(callback) => self.invoke(callback, JsValue::Undefined, Vec::new(), Completion::Discard),
             Job::Thenable {
                 promise,
                 thenable,
@@ -242,30 +224,19 @@ impl Vm<'_> {
                 let (resolve, reject) = self.resolving_functions(promise);
                 self.session.heap.dec_ref(promise);
                 let reject_again = reject.clone_with_heap(&self.session.heap);
-                match self.call(then, thenable, vec![resolve, reject]) {
-                    Ok(result) => {
-                        result.drop_with(&mut self.session.heap);
-                        reject_again.drop_with(&mut self.session.heap);
-                        Ok(())
-                    }
-                    Err(Throw::Value(reason)) => {
-                        let result = self.call(reject_again, JsValue::Undefined, vec![reason])?;
-                        result.drop_with(&mut self.session.heap);
-                        Ok(())
-                    }
-                    Err(err) => {
-                        reject_again.drop_with(&mut self.session.heap);
-                        Err(err)
-                    }
-                }
+                self.invoke(
+                    then,
+                    thenable,
+                    vec![resolve, reject],
+                    Completion::Thenable { reject: reject_again },
+                )
             }
-            Job::Reaction { reaction, settled } => self.run_reaction(reaction, settled),
+            Job::Reaction { reaction, settled } => self.schedule_reaction(reaction, settled),
         }
     }
 
-    /// Applies the handler for the settlement, then settles the target with
-    /// the outcome.
-    fn run_reaction(&mut self, reaction: Reaction, settled: Settled) -> RunResult<()> {
+    /// Applies a reaction's handler for the settlement.
+    fn schedule_reaction(&mut self, reaction: Reaction, settled: Settled) -> RunResult<()> {
         let Reaction {
             target,
             on_fulfilled,
@@ -276,61 +247,48 @@ impl Vm<'_> {
             Settled::Rejected(_) => (on_rejected, on_fulfilled),
         };
         handler_drop(self, other);
-        let outcome = match handler {
-            Handler::Identity => Ok(Settled::Fulfilled(settled.into_value())),
-            Handler::Thrower => Ok(Settled::Rejected(settled.into_value())),
+        match handler {
+            Handler::Identity => self.settle_target(target, Settled::Fulfilled(settled.into_value())),
+            Handler::Thrower => self.settle_target(target, Settled::Rejected(settled.into_value())),
             Handler::Settle(stored) => {
                 settled.into_value().drop_with(&mut self.session.heap);
-                Ok(stored)
+                self.settle_target(target, stored)
             }
-            Handler::Call(function) => {
-                let value = settled.into_value();
-                match self.call(function, JsValue::Undefined, vec![value]) {
-                    Ok(result) => Ok(Settled::Fulfilled(result)),
-                    Err(Throw::Value(reason)) => Ok(Settled::Rejected(reason)),
-                    Err(err) => Err(err),
-                }
-            }
-            Handler::Finally(function) => match self.call(function, JsValue::Undefined, Vec::new()) {
-                Ok(result) => {
-                    // as the spec's thenFinally/catchFinally: the original settlement passes
-                    // through a promise derived from the callback's result, which the target
-                    // then adopts (the same number of microtask hops as Node)
-                    let waited = self.promise_resolve(result)?;
-                    let relay = self.new_promise();
-                    self.session.heap.inc_ref(relay);
-                    self.promise_then(
-                        waited,
-                        Handler::Settle(settled),
-                        Handler::Thrower,
-                        Target::Promise(relay),
-                    );
-                    self.session.heap.dec_ref(waited);
-                    return self.settle_target(target, Settled::Fulfilled(JsValue::Ref(relay)));
-                }
-                Err(Throw::Value(reason)) => {
-                    settled.into_value().drop_with(&mut self.session.heap);
-                    Ok(Settled::Rejected(reason))
-                }
-                Err(err) => {
-                    settled.into_value().drop_with(&mut self.session.heap);
-                    Err(err)
-                }
-            },
-        };
-        let outcome = match outcome {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                target_drop(self, target);
-                return Err(err);
-            }
-        };
-        self.settle_target(target, outcome)
+            Handler::Call(function) => self.invoke(
+                function,
+                JsValue::Undefined,
+                vec![settled.into_value()],
+                Completion::Settle(target),
+            ),
+            Handler::Finally(function) => self.invoke(
+                function,
+                JsValue::Undefined,
+                Vec::new(),
+                Completion::Finally { target, settled },
+            ),
+        }
     }
 
-    /// Delivers a reaction's outcome: resolves or rejects a promise, or
-    /// resumes an async function. Consumes `target`.
-    fn settle_target(&mut self, target: Target, outcome: Settled) -> RunResult<()> {
+    /// A `finally` callback returned `result`: the original settlement passes
+    /// through to `target` once `result` settles (the spec's
+    /// thenFinally/catchFinally, with the same number of microtask hops as Node).
+    pub(super) fn finish_finally(&mut self, target: Target, settled: Settled, result: JsValue) -> RunResult<()> {
+        let waited = self.promise_resolve(result)?;
+        let relay = self.new_promise();
+        self.session.heap.inc_ref(relay);
+        self.promise_then(
+            waited,
+            Handler::Settle(settled),
+            Handler::Thrower,
+            Target::Promise(relay),
+        );
+        self.session.heap.dec_ref(waited);
+        self.settle_target(target, Settled::Fulfilled(JsValue::Ref(relay)))
+    }
+
+    /// Delivers a settlement: resolves or rejects a promise, or puts an
+    /// awaiting async function's frame back on the stack. Consumes `target`.
+    pub(super) fn settle_target(&mut self, target: Target, outcome: Settled) -> RunResult<()> {
         match target {
             Target::None => {
                 outcome.into_value().drop_with(&mut self.session.heap);
@@ -357,6 +315,32 @@ impl Vm<'_> {
                 result
             }
         }
+    }
+
+    /// Releases a reaction target that will not be settled.
+    pub(super) fn drop_target(&mut self, target: Target) {
+        target_drop(self, target);
+    }
+
+    /// Fires a timer: its callback gets a frame; an interval re-arms first.
+    pub(super) fn schedule_timer(&mut self, timer: Timer) -> RunResult<()> {
+        let callback = timer.callback.clone_with_heap(&self.session.heap);
+        let args: Vec<JsValue> = timer
+            .args
+            .iter()
+            .map(|arg| arg.clone_with_heap(&self.session.heap))
+            .collect();
+        if let Some(interval) = timer.interval {
+            self.timers.push(Timer {
+                due: self.timer_clock + interval,
+                seq: self.timer_seq,
+                ..timer
+            });
+            self.timer_seq += 1;
+        } else {
+            self.drop_all(timer.callback, timer.args);
+        }
+        self.invoke(callback, JsValue::Undefined, args, Completion::Discard)
     }
 
     /// Releases every queued job and timer (a feed that failed mid-way).
@@ -402,12 +386,6 @@ impl Vm<'_> {
             self.session.heap.dec_ref(promise);
         }
         reason
-    }
-
-    /// Whether the running feed's module body is an async function (it has a
-    /// top-level `await`), so its result is a promise to read.
-    pub(crate) fn module_is_async(&self) -> bool {
-        self.module_async
     }
 
     /// A settled promise's outcome (cloned), `None` while pending; reading a
@@ -471,7 +449,7 @@ impl Vm<'_> {
     }
 
     /// The next timer to fire, advancing the virtual clock to it.
-    fn pop_timer(&mut self) -> Option<Timer> {
+    pub(super) fn pop_timer(&mut self) -> Option<Timer> {
         let index = (0..self.timers.len()).min_by(|a, b| {
             let (a, b) = (&self.timers[*a], &self.timers[*b]);
             a.due.total_cmp(&b.due).then(a.seq.cmp(&b.seq))
@@ -479,28 +457,6 @@ impl Vm<'_> {
         let timer = self.timers.swap_remove(index);
         self.timer_clock = self.timer_clock.max(timer.due);
         Some(timer)
-    }
-
-    fn fire_timer(&mut self, timer: Timer) -> RunResult<()> {
-        let callback = timer.callback.clone_with_heap(&self.session.heap);
-        let args: Vec<JsValue> = timer
-            .args
-            .iter()
-            .map(|arg| arg.clone_with_heap(&self.session.heap))
-            .collect();
-        if let Some(interval) = timer.interval {
-            self.timers.push(Timer {
-                due: self.timer_clock + interval,
-                seq: self.timer_seq,
-                ..timer
-            });
-            self.timer_seq += 1;
-        } else {
-            self.drop_all(timer.callback, timer.args);
-        }
-        let result = self.call(callback, JsValue::Undefined, args)?;
-        result.drop_with(&mut self.session.heap);
-        Ok(())
     }
 }
 

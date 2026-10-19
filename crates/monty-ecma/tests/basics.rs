@@ -2,18 +2,39 @@
 //! it printed and returned.
 
 use insta::assert_snapshot;
-use monty_ecma::{JsProgress, JsRepl};
-use monty_types::{MontyObject, NamedValues, PrintWriter, ResourceLimits};
+use monty_ecma::{JsProgress, JsRepl, JsSuspensionKind};
+use monty_types::{
+    ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, NamedValues, PrintWriter, ResourceLimits,
+};
 
 /// Runs `code` in a fresh session: the printed text, then the completion
 /// value or the uncaught error summary.
 fn run(code: &str) -> String {
     let repl = JsRepl::new("main.js", ResourceLimits::default()).expect("session");
     let mut output = String::new();
-    let progress = repl.feed(code, &NamedValues::new(), PrintWriter::collect_string(&mut output));
-    let tail = match progress {
-        JsProgress::Complete { value, .. } => format!("=> {}", value.py_repr()),
-        JsProgress::Failed { error, .. } => format!("!! {}", error.summary()),
+    let mut progress = repl.feed(code, &NamedValues::new(), PrintWriter::collect_string(&mut output));
+    // a host that knows no names: unknown names stay unknown
+    let tail = loop {
+        progress = match progress {
+            JsProgress::Complete { value, .. } => break format!("=> {}", value.py_repr()),
+            JsProgress::Failed { error, .. } => break format!("!! {}", error.summary()),
+            JsProgress::Suspended(mut suspension) => match suspension.kind() {
+                JsSuspensionKind::FunctionCall { function_name, .. } => {
+                    let name = function_name.to_owned();
+                    suspension.resume_call(
+                        ExtFunctionResult::NotFound(name),
+                        PrintWriter::collect_string(&mut output),
+                    )
+                }
+                JsSuspensionKind::NameLookup { .. } => {
+                    suspension.resume_name_lookup(NameLookupResult::Undefined, PrintWriter::collect_string(&mut output))
+                }
+                JsSuspensionKind::ResolveFutures { .. } => {
+                    let exc = MontyException::new(ExcType::Error, Some("no host".to_owned()));
+                    suspension.abort(&exc, PrintWriter::collect_string(&mut output))
+                }
+            },
+        };
     };
     format!("{output}{tail}")
 }
@@ -24,6 +45,7 @@ fn eval(code: &str) -> MontyObject {
     match repl.feed(code, &NamedValues::new(), PrintWriter::Disabled) {
         JsProgress::Complete { value, .. } => value,
         JsProgress::Failed { error, .. } => panic!("unexpected error: {}", error.summary()),
+        JsProgress::Suspended(_) => panic!("unexpected suspension"),
     }
 }
 

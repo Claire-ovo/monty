@@ -147,7 +147,23 @@ range lose precision, `datetime`/`date`/`time`/`timedelta`/`complex`/`Path` beco
 exceptions become `Error` objects, and a shared sub-object is shared again in the sandbox.
 A cycle in an exported value is cut with a `[...]` / `{...}` placeholder.
 
-## Not yet available through the protocol
+## Host functions
 
-Host functions, `NameLookup` for undefined globals, `ResolveFutures`, OS calls (the clock, sleeps, the filesystem),
-dumps and loads all end the turn with an error; type checking (`Configure.type_check`) is refused.
+An undeclared name that is called (`fetchData(1)`) suspends the feed with a `FunctionCall` for the host, exactly as
+the Python worker does; a `Return` answer is the call's value, an `Error` answer is thrown at the call as an `Error`
+of the matching class, `NotFound` throws a `ReferenceError`, and a `Future` answer makes the call return a promise
+that settles when the host resolves it (`ResolveFutures` is raised once nothing else can run).
+An undeclared name that is read (`answer + 1`, `typeof answer`) suspends with a `NameLookup`; a found value is also
+stored on `globalThis`, so the same name is not asked again in that session, and an unknown name is a
+`ReferenceError` (or `"undefined"` under `typeof`).
+Differences from the Python worker:
+
+- A host function called from a callback that a builtin is running (`[1, 2].map((x) => host(x))`,
+    `arr.sort((a, b) => host(a, b))`, a generator driven by `for…of`) throws a `TypeError`
+    (`Host function 'host' cannot be called from a callback run by a builtin`), because the interpreter cannot
+    suspend while the builtin is on the native stack. Promise reactions, `await` continuations and timer callbacks
+    run from the dispatch loop and can suspend. Prefer `await` on host functions that return futures.
+- Host objects (`object_id` on a call or lookup) and eager awaits are not produced.
+
+OS calls (the clock, sleeps, the filesystem), dumps and loads end the turn with an error; type checking
+(`Configure.type_check`) is refused.

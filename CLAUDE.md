@@ -229,8 +229,9 @@ Monty runs JavaScript as a second language behind the same wire protocol and poo
     back into JavaScript).
 - `crates/monty-js-runtime` — the `monty-js` binary: `engine.rs` implements `monty_proto::worker::Engine` over `JsRepl`,
     `subprocess.rs` serves the protocol through the shared `monty_proto::worker::stdio` loop, `run.rs` is a
-    `node`-style standalone runner (`monty-js file.js`, `monty-js -e code`). Suspensions, dumps and type checking are
-    refused until the engine grows them (`TODO(ts-typecheck)`, `TODO(ts-syntax)`).
+    `node`-style standalone runner (`monty-js file.js`, `monty-js -e code`). Host calls suspend as `FunctionCall`,
+    `NameLookup` and `ResolveFutures` (`vm/host.rs`: the interpreter parks without its print sink); OS calls, dumps
+    and type checking are refused until the engine grows them (`TODO(ts-typecheck)`, `TODO(ts-syntax)`).
 - `crates/monty-js-datatest` — the differential harness: every `crates/monty-ecma/test_cases/*.js` runs through
     `monty-ecma` and through `node --input-type=module` (so both sides are strict modules), and stdout plus the
     uncaught `Name: message` must match. Cases follow the Python conventions (one consolidated file per feature,

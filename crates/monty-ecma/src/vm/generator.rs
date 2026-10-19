@@ -10,7 +10,7 @@ use std::{mem, sync::Arc};
 
 use monty_types::ResourceError;
 
-use super::{Construct, Frame, Outcome, Vm};
+use super::{Completion, Construct, Frame, Outcome, Vm};
 use crate::{
     error::{RunResult, Throw},
     heap::{Coroutine, GeneratorState, HeapId, JsHeapData, JsObject, ObjectClass, SavedFrame},
@@ -73,7 +73,7 @@ impl Vm<'_> {
         };
         let depth = self.frames.len();
         let outcome = self.enter_nested(|vm| {
-            vm.restore_frame(id, saved, value, mode)?;
+            vm.restore_frame(id, saved, value, mode, Completion::Deliver)?;
             vm.run(depth)
         });
         match outcome {
@@ -83,6 +83,14 @@ impl Vm<'_> {
                 self.set_generator_state(id, GeneratorState::Completed);
                 Ok(self.iter_result(value, true))
             }
+            Ok(Outcome::Done) => {
+                self.set_generator_state(id, GeneratorState::Completed);
+                Ok(self.iter_result(JsValue::Undefined, true))
+            }
+            Ok(Outcome::Suspend(_)) => {
+                self.set_generator_state(id, GeneratorState::Completed);
+                Err(self.internal_error("a generator frame suspended for the host"))
+            }
             Err(err) => {
                 self.set_generator_state(id, GeneratorState::Completed);
                 Err(err)
@@ -90,9 +98,9 @@ impl Vm<'_> {
         }
     }
 
-    /// Resumes an async function's parked frame with a settlement; it runs
-    /// to its next `await` (which schedules the following resumption) or to
-    /// the end (which settles its promise inside the run loop).
+    /// Puts an async function's parked frame back on the stack with a
+    /// settlement; the dispatch loop runs it to its next `await` or its end,
+    /// where its promise settles (`Completion::AsyncResumed`).
     pub(crate) fn resume_coroutine(&mut self, id: HeapId, mode: ResumeMode, value: JsValue) -> RunResult<()> {
         let Some(ObjectClass::Coroutine(coroutine)) = self.object_mut(id).map(|o| &mut o.class) else {
             value.drop_with(&mut self.session.heap);
@@ -102,22 +110,12 @@ impl Vm<'_> {
             value.drop_with(&mut self.session.heap);
             return Err(self.internal_error("resuming an async function that is not suspended"));
         };
-        let depth = self.frames.len();
-        let outcome = self.enter_nested(|vm| {
-            vm.restore_frame(id, saved, value, mode)?;
-            vm.run(depth)
-        });
-        match outcome {
-            Ok(Outcome::Return(value) | Outcome::Yield(value)) => {
-                value.drop_with(&mut self.session.heap);
-                Ok(())
-            }
-            Err(err) => Err(err),
-        }
+        self.restore_frame(id, saved, value, mode, Completion::AsyncResumed)
     }
 
     /// Marks the top frame as an async function's: its coroutine object (a
-    /// reference the frame owns) holds the promise the call returns.
+    /// reference the frame owns) holds the promise the call returns, which
+    /// the frame's continuation receives in place of a return value.
     pub(crate) fn start_coroutine(&mut self) {
         let promise = self.new_promise();
         let coroutine = self.session.heap.allocate(JsHeapData::Object(JsObject::with_class(
@@ -129,12 +127,8 @@ impl Vm<'_> {
         )));
         let frame = self.frames.last_mut().expect("frame");
         frame.generator = Some(coroutine);
-        frame.async_initial = true;
-    }
-
-    /// Whether `id` is an async function's activation.
-    pub(super) fn is_coroutine(&self, id: HeapId) -> bool {
-        matches!(self.object(id).map(|o| &o.class), Some(ObjectClass::Coroutine(_)))
+        let inner = mem::replace(&mut frame.completion, Completion::Deliver);
+        frame.completion = Completion::Async(Box::new(inner));
     }
 
     /// The promise an async function's call returned.
@@ -188,8 +182,9 @@ impl Vm<'_> {
     /// Parks the top frame in `owner` (a generator or coroutine): its stack
     /// region moves into the heap and the frame's reference to the callee
     /// goes with it. The frame's own reference to `owner` stays for the
-    /// caller to release once it has finished with the object.
-    pub(super) fn suspend_frame(&mut self, owner: HeapId) {
+    /// caller to release once it has finished with the object; its
+    /// continuation is handed back.
+    pub(super) fn suspend_frame(&mut self, owner: HeapId) -> Completion {
         let frame = self.frames.pop().expect("frame");
         let values: Vec<JsValue> = self.stack.drain(frame.base..).collect();
         frame.new_target.drop_with(&mut self.session.heap);
@@ -200,12 +195,20 @@ impl Vm<'_> {
             values,
         };
         self.set_generator_state(owner, GeneratorState::Suspended(saved));
+        frame.completion
     }
 
     /// Puts a parked frame back on the stack to continue at its saved
     /// instruction, with `value` and the resume `mode` pushed for the
     /// `ResumeGenerator` that follows every suspension point.
-    fn restore_frame(&mut self, owner: HeapId, saved: SavedFrame, value: JsValue, mode: ResumeMode) -> RunResult<()> {
+    fn restore_frame(
+        &mut self,
+        owner: HeapId,
+        saved: SavedFrame,
+        value: JsValue,
+        mode: ResumeMode,
+        completion: Completion,
+    ) -> RunResult<()> {
         let SavedFrame {
             function,
             callee,
@@ -237,7 +240,7 @@ impl Vm<'_> {
             new_target: JsValue::Undefined,
             construct: Construct::Call,
             generator: Some(owner),
-            async_initial: false,
+            completion,
         });
         self.stack.push(value);
         self.stack.push(JsValue::Number(f64::from(mode as u8)));

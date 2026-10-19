@@ -3,8 +3,11 @@
 
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
-use monty_proto::{FrameReader, PROTOCOL_VERSION, named_values_to_proto, pb, write_frame};
-use monty_types::{MontyObject, NamedValues};
+use monty_proto::{
+    FrameReader, PROTOCOL_VERSION, WireFunctionCall, ext_result_to_proto, future_results_to_proto,
+    named_values_to_proto, pb, write_frame,
+};
+use monty_types::{ExtFunctionResult, MontyObject, NameLookupResult, NamedValues};
 
 fn configure() -> pb::Configure {
     pb::Configure {
@@ -108,6 +111,41 @@ impl ChildProc {
         let (_, event) = self.feed(code);
         expect_complete(event)
     }
+
+    /// Answers a suspended host call.
+    fn resume_call(&mut self, call_id: u32, result: ExtFunctionResult) -> (Vec<pb::Print>, pb::child_event::Kind) {
+        let (result, values) = ext_result_to_proto(result);
+        self.send(pb::parent_request::Kind::ResumeCall(pb::ResumeCall {
+            call_id,
+            result: Some(result),
+            values,
+        }));
+        self.recv_turn()
+    }
+
+    /// Answers a suspended name lookup.
+    fn resume_name_lookup(&mut self, result: NameLookupResult) -> (Vec<pb::Print>, pb::child_event::Kind) {
+        self.send(pb::parent_request::Kind::ResumeNameLookup(result.into()));
+        self.recv_turn()
+    }
+}
+
+#[track_caller]
+fn expect_function_call(event: pb::child_event::Kind) -> WireFunctionCall {
+    match event {
+        pb::child_event::Kind::FunctionCall(call) => call,
+        other => panic!("expected FunctionCall, got {other:?}"),
+    }
+}
+
+/// The positional arguments of a suspended call.
+fn call_args(call: &WireFunctionCall) -> Vec<MontyObject> {
+    call.clone()
+        .into_call_args()
+        .expect("valid call arguments")
+        .args()
+        .map(|arg| arg.to_owned())
+        .collect()
 }
 
 #[track_caller]
@@ -216,5 +254,111 @@ fn recursion_limit_is_a_catchable_range_error() {
     assert_eq!(
         value,
         MontyObject::string("RangeError: Maximum call stack size exceeded")
+    );
+}
+
+// =============================================================================
+// Host calls
+// =============================================================================
+
+#[test]
+fn host_function_call_round_trip() {
+    let mut child = ChildProc::spawn();
+    child.create_repl();
+    let (_, event) = child.feed("add(1, 2) * 2");
+    let call = expect_function_call(event);
+    assert_eq!(call.function_name, "add");
+    assert_eq!(call.object_id, None);
+    assert_eq!(call_args(&call), vec![MontyObject::int(1), MontyObject::int(2)]);
+    let (_, event) = child.resume_call(call.call_id, ExtFunctionResult::Return(MontyObject::int(3)));
+    assert_eq!(expect_complete(event), MontyObject::int(6));
+}
+
+#[test]
+fn host_function_error_is_catchable() {
+    let mut child = ChildProc::spawn();
+    child.create_repl();
+    let (_, event) =
+        child.feed("let caught; try { boom(); } catch (e) { caught = e.constructor.name + ': ' + e.message } caught");
+    let call = expect_function_call(event);
+    assert_eq!(call.function_name, "boom");
+    let exc = monty_types::MontyException::new(monty_types::ExcType::ValueError, Some("bad".to_owned()));
+    let (_, event) = child.resume_call(call.call_id, ExtFunctionResult::Error(exc));
+    assert_eq!(expect_complete(event), MontyObject::string("Error: bad".to_owned()));
+}
+
+#[test]
+fn host_function_not_found_is_a_reference_error() {
+    let mut child = ChildProc::spawn();
+    child.create_repl();
+    let (_, event) = child.feed("missing()");
+    let call = expect_function_call(event);
+    let (_, event) = child.resume_call(call.call_id, ExtFunctionResult::NotFound("missing".to_owned()));
+    let error = expect_error(event);
+    assert_eq!(error.exc_type, "ReferenceError");
+    assert_eq!(error.message.as_deref(), Some("missing is not defined"));
+    assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2));
+}
+
+#[test]
+fn name_lookup_round_trip_and_caches_the_value() {
+    let mut child = ChildProc::spawn();
+    child.create_repl();
+    let (_, event) = child.feed("answer + 1");
+    let pb::child_event::Kind::NameLookup(lookup) = event else {
+        panic!("expected NameLookup, got {event:?}");
+    };
+    assert_eq!(lookup.name, "answer");
+    let (_, event) = child.resume_name_lookup(NameLookupResult::Value(MontyObject::int(41)));
+    assert_eq!(expect_complete(event), MontyObject::int(42));
+    // the answer is now a global: no second round-trip
+    assert_eq!(child.feed_complete("answer"), MontyObject::int(41));
+}
+
+#[test]
+fn unknown_name_answers() {
+    let mut child = ChildProc::spawn();
+    child.create_repl();
+    let (_, event) = child.feed("typeof thing");
+    assert!(matches!(event, pb::child_event::Kind::NameLookup(_)));
+    let (_, event) = child.resume_name_lookup(NameLookupResult::Undefined);
+    assert_eq!(expect_complete(event), MontyObject::string("undefined".to_owned()));
+    let (_, event) = child.feed("thing");
+    assert!(matches!(event, pb::child_event::Kind::NameLookup(_)));
+    let (_, event) = child.resume_name_lookup(NameLookupResult::Undefined);
+    let error = expect_error(event);
+    assert_eq!(error.exc_type, "ReferenceError");
+    assert_eq!(error.message.as_deref(), Some("thing is not defined"));
+}
+
+#[test]
+fn host_future_settles_a_promise() {
+    let mut child = ChildProc::spawn();
+    child.create_repl();
+    let (_, event) = child.feed("const v = await fetchData('k'); v + 1");
+    let call = expect_function_call(event);
+    assert_eq!(call.function_name, "fetchData");
+    let (_, event) = child.resume_call(call.call_id, ExtFunctionResult::Future(call.call_id));
+    let pb::child_event::Kind::ResolveFutures(resolve) = event else {
+        panic!("expected ResolveFutures, got {event:?}");
+    };
+    assert_eq!(resolve.pending_call_ids.as_slice(), &[call.call_id]);
+    child.send(pb::parent_request::Kind::ResumeFutures(future_results_to_proto(vec![
+        (call.call_id, ExtFunctionResult::Return(MontyObject::int(20))),
+    ])));
+    let (_, event) = child.recv_turn();
+    assert_eq!(expect_complete(event), MontyObject::int(21));
+}
+
+#[test]
+fn host_call_inside_a_builtin_callback_is_an_error() {
+    let mut child = ChildProc::spawn();
+    child.create_repl();
+    let (_, event) = child.feed("[1, 2].map((x) => host(x))");
+    let error = expect_error(event);
+    assert_eq!(error.exc_type, "TypeError");
+    assert_eq!(
+        error.message.as_deref(),
+        Some("Host function 'host' cannot be called from a callback run by a builtin")
     );
 }

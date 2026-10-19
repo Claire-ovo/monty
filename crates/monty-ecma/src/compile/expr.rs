@@ -241,9 +241,19 @@ impl<'c> Compiler<'c> {
         match resolved.place {
             Place::Global if tolerant => self
                 .builder()
-                .emit_u16(Opcode::LoadGlobalOrUndefined, atom_operand(resolved.name)?),
+                .emit_u16(Opcode::LoadGlobalTypeof, atom_operand(resolved.name)?),
             _ => self.emit_load(resolved),
         }
+    }
+
+    /// Whether an identifier names nothing declared in this feed or an
+    /// earlier one: a `globalThis` property, or something the host provides.
+    fn is_unbound_global(&mut self, ident: &IdentifierReference<'c>) -> bool {
+        let declared = ident
+            .reference_id
+            .get()
+            .is_some_and(|id| self.scoping().get_reference(id).symbol_id().is_some());
+        !declared && matches!(self.resolve_unbound(ident.name.as_str()).place, Place::Global)
     }
 
     /// Resolves an identifier used as an assignment target.
@@ -409,6 +419,14 @@ impl<'c> Compiler<'c> {
                 self.emit_optional_link(call.optional, 2)?;
             }
             Expression::Super(_) => return self.compile_super_call(call),
+            Expression::Identifier(ident) if self.is_unbound_global(ident) => {
+                // an undeclared name that is called becomes a host function
+                let resolved = self.resolve_unbound(ident.name.as_str());
+                self.builder()
+                    .emit_u16(Opcode::LoadGlobalCallable, atom_operand(resolved.name)?)?;
+                self.emit_optional_link(call.optional, 1)?;
+                self.builder().emit(Opcode::LoadUndefined)?;
+            }
             callee => {
                 self.compile_expression(callee)?;
                 self.emit_optional_link(call.optional, 1)?;
