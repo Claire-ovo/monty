@@ -43,3 +43,14 @@ for (const attempt of [() => 'x'.repeat(-1), () => 'x'.repeat(Infinity), () => n
     console.log(err.constructor.name, err.message);
   }
 }
+
+// === normalize ===
+const composed = 'é';
+const decomposed = 'é';
+console.log(composed === decomposed, composed.normalize() === decomposed.normalize(), decomposed.normalize('NFC').length, composed.normalize('NFD').length, 'ﬁ'.normalize('NFKC'), 'ﬁ'.normalize('NFKD'), 'ﬁ'.normalize(), 'abc'.normalize('NFKD'));
+console.log([...'한글'.normalize('NFD')].length, '한글'.normalize('NFD').normalize('NFC') === '한글', 'ẛ̣'.normalize('NFKC').length, ''.normalize());
+try {
+  'a'.normalize('nfc');
+} catch (err) {
+  console.log(err.constructor.name + ': ' + err.message);
+}

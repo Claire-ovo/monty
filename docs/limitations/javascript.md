@@ -66,9 +66,9 @@ and every Node module.
 
 Differences within the available builtins:
 
-- `Array.prototype` lacks `copyWithin`, `toSorted`, `toReversed`, `toSpliced`, `with`, `group` and the locale
-    methods; `String.prototype` lacks `normalize`, `localeCompare` with locales (it compares code units), `substr`,
-    `anchor` and the other HTML methods.
+- `Array.prototype` lacks `group` and the locale methods; `String.prototype` lacks `localeCompare` with locales
+    (it compares code units), `substr`, `anchor` and the other HTML methods. `String.prototype.normalize` uses the
+    Unicode 17 tables vendored with the regexp engine rather than the host's ICU.
 - `RegExp` is the ECMAScript engine vendored from QuickJS (`monty-regexp`): all flags (`dgimsuvy`), named groups,
     lookbehind, Unicode property escapes and `v`-mode set operations work, and `String.prototype.match`,
     `matchAll`, `replace`, `replaceAll`, `search` and `split` dispatch through the `Symbol.match`/`matchAll`/

@@ -12,7 +12,11 @@ use crate::{
     intern::WellKnownSymbol,
     string::JsString,
     value::JsValue,
-    vm::{Vm, number::to_usize, property::IteratorStep},
+    vm::{
+        Vm,
+        number::{number_to_string, to_usize},
+        property::IteratorStep,
+    },
 };
 
 pub(super) fn install(vm: &mut Vm<'_>, global: HeapId) {
@@ -49,6 +53,11 @@ pub(super) fn install(vm: &mut Vm<'_>, global: HeapId) {
         NativeFn::ArrayProtoFlatMap,
         NativeFn::ArrayProtoFill,
         NativeFn::ArrayProtoAt,
+        NativeFn::ArrayProtoCopyWithin,
+        NativeFn::ArrayProtoToSorted,
+        NativeFn::ArrayProtoToReversed,
+        NativeFn::ArrayProtoToSpliced,
+        NativeFn::ArrayProtoWith,
         NativeFn::ArrayProtoKeys,
         NativeFn::ArrayProtoEntries,
         NativeFn::ArrayProtoToString,
@@ -605,9 +614,7 @@ pub(super) fn reverse(vm: &mut Vm<'_>, this: &JsValue, _: &[JsValue], _: bool) -
 pub(super) fn sort(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
     let array = this_array(vm, this, "sort")?;
     let comparator = arg(args, 0);
-    if *comparator != JsValue::Undefined {
-        require_callable(vm, comparator)?;
-    }
+    require_comparator(vm, comparator)?;
     let elements: Vec<JsValue> = mem::take(&mut vm.object_mut(array).expect("array").elements);
     let mut holes = 0;
     let mut undefineds = 0;
@@ -643,6 +650,17 @@ pub(super) fn sort(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -
     sorted.extend(iter::repeat_with(|| JsValue::Hole).take(holes));
     vm.object_mut(array).expect("array").elements = sorted;
     Ok(this.clone_with_heap(&vm.session.heap))
+}
+
+/// `sort`'s argument must be callable or absent, with V8's wording.
+fn require_comparator(vm: &mut Vm<'_>, comparator: &JsValue) -> RunResult<()> {
+    if *comparator == JsValue::Undefined || vm.is_callable(comparator) {
+        return Ok(());
+    }
+    let shown = vm.inspect_short(comparator)?;
+    Err(vm.type_error(&format!(
+        "The comparison function must be either a function or undefined: {shown}"
+    )))
 }
 
 /// A stable sort that tolerates a comparator that throws (the items are
@@ -787,6 +805,96 @@ pub(super) fn fill(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -
         old.drop_with(&mut vm.session.heap);
     }
     Ok(this.clone_with_heap(&vm.session.heap))
+}
+
+/// `copyWithin(target, start, end)`: moves a slice within the array in place.
+pub(super) fn copy_within(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let array = this_array(vm, this, "copyWithin")?;
+    let length = len(vm, array);
+    let target = relative_index(integer_arg(vm, args, 0, 0.0)?, length);
+    let start = relative_index(integer_arg(vm, args, 1, 0.0)?, length);
+    let end = relative_index(integer_arg(vm, args, 2, length as f64)?, length);
+    let count = end.saturating_sub(start).min(length - target);
+    let moved: Vec<JsValue> = (start..start + count).map(|i| raw_element(vm, array, i)).collect();
+    for (offset, value) in moved.into_iter().enumerate() {
+        let object = vm.object_mut(array).expect("array");
+        let old = mem::replace(&mut object.elements[target + offset], value);
+        old.drop_with(&mut vm.session.heap);
+    }
+    Ok(this.clone_with_heap(&vm.session.heap))
+}
+
+/// The elements as a fresh vector with holes read as `undefined`, for the
+/// copying methods (`toSorted`, `toReversed`, `toSpliced`, `with`).
+fn copied_elements(vm: &mut Vm<'_>, array: HeapId) -> RunResult<Vec<JsValue>> {
+    let length = len(vm, array);
+    vm.tracker().check_allocation(length * 16)?;
+    Ok((0..length).map(|i| element(vm, array, i)).collect())
+}
+
+pub(super) fn to_sorted(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let array = this_array(vm, this, "toSorted")?;
+    let comparator = arg(args, 0);
+    require_comparator(vm, comparator)?;
+    let items = copied_elements(vm, array)?;
+    let copy = vm.new_array(items)?;
+    let sorted = sort(vm, &copy, args, false);
+    match sorted {
+        Ok(result) => {
+            result.drop_with(&mut vm.session.heap);
+            Ok(copy)
+        }
+        Err(err) => {
+            copy.drop_with(&mut vm.session.heap);
+            Err(err)
+        }
+    }
+}
+
+pub(super) fn to_reversed(vm: &mut Vm<'_>, this: &JsValue, _: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let array = this_array(vm, this, "toReversed")?;
+    let mut items = copied_elements(vm, array)?;
+    items.reverse();
+    vm.new_array(items)
+}
+
+pub(super) fn to_spliced(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let array = this_array(vm, this, "toSpliced")?;
+    let length = len(vm, array);
+    let start = relative_index(integer_arg(vm, args, 0, 0.0)?, length);
+    let skip = match args.len() {
+        0 => 0,
+        1 => length - start,
+        _ => to_usize(integer_arg(vm, args, 1, 0.0)?).min(length - start),
+    };
+    let mut items = copied_elements(vm, array)?;
+    let inserted: Vec<JsValue> = args
+        .iter()
+        .skip(2)
+        .map(|a| a.clone_with_heap(&vm.session.heap))
+        .collect();
+    let removed: Vec<JsValue> = items.splice(start..start + skip, inserted).collect();
+    vm.drop_all(JsValue::Undefined, removed);
+    vm.new_array(items)
+}
+
+/// `with(index, value)`: a copy with one element replaced.
+pub(super) fn with(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let array = this_array(vm, this, "with")?;
+    let length = len(vm, array) as f64;
+    let relative = integer_arg(vm, args, 0, 0.0)?;
+    let index = if relative < 0.0 { length + relative } else { relative };
+    if index < 0.0 || index >= length {
+        let shown = number_to_string(relative);
+        return Err(vm.range_error(&format!("Invalid index : {shown}")));
+    }
+    let mut items = copied_elements(vm, array)?;
+    let old = mem::replace(
+        &mut items[to_usize(index)],
+        arg(args, 1).clone_with_heap(&vm.session.heap),
+    );
+    old.drop_with(&mut vm.session.heap);
+    vm.new_array(items)
 }
 
 pub(super) fn at(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {

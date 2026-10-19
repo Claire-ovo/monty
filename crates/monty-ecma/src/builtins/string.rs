@@ -2,6 +2,8 @@
 
 use std::{cmp::Ordering, slice};
 
+use monty_regexp::unicode::{self, normalize::NormalizationForm};
+
 use super::{
     NativeFn, NativeImpl, arg, install_constructor, install_function, install_symbol_function, integer_arg, key,
     raw_object, regexp,
@@ -48,6 +50,7 @@ pub(super) fn install(vm: &mut Vm<'_>, global: HeapId) {
         NativeFn::StringProtoMatch,
         NativeFn::StringProtoMatchAll,
         NativeFn::StringProtoSearch,
+        NativeFn::StringProtoNormalize,
         NativeFn::StringProtoAt,
         NativeFn::StringProtoConcat,
         NativeFn::StringProtoToString,
@@ -692,6 +695,33 @@ pub(super) fn replace(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool
 
 pub(super) fn replace_all(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
     replace_impl(vm, this, args, true)
+}
+
+/// `normalize(form)` through the vendored Unicode 17 tables; `form` defaults to NFC.
+pub(super) fn normalize(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let string = this_string(vm, this, "normalize")?;
+    let form = match arg(args, 0) {
+        JsValue::Undefined => NormalizationForm::Nfc,
+        other => match vm.coerce_string(other)?.to_string_lossy().as_str() {
+            "NFC" => NormalizationForm::Nfc,
+            "NFD" => NormalizationForm::Nfd,
+            "NFKC" => NormalizationForm::Nfkc,
+            "NFKD" => NormalizationForm::Nfkd,
+            _ => {
+                return Err(vm.range_error("The normalization form should be one of NFC, NFD, NFKC, NFKD."));
+            }
+        },
+    };
+    // a decomposition can grow the string several times over
+    vm.tracker().check_allocation(string.len().saturating_mul(8))?;
+    let normalized = match &string {
+        JsString::Latin1(bytes) => unicode::normalize::normalize(&**bytes, form),
+        JsString::Utf16(units) => unicode::normalize::normalize(&**units, form),
+    };
+    match normalized {
+        Ok(buffer) => string_result(vm, JsString::from_units(&buffer.to_utf16())),
+        Err(_) => Err(vm.range_error("Invalid string length")),
+    }
 }
 
 pub(super) fn at(vm: &mut Vm<'_>, this: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {

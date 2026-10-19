@@ -69,3 +69,15 @@ try {
 } catch (err) {
   console.log(err.constructor.name, err.message);
 }
+
+// === Copying methods and copyWithin ===
+const base = [3, 1, , 2];
+console.log(base.toSorted(), base.toReversed(), base.toSpliced(1, 2, 'a', 'b'), base.toSpliced(1), base.toSpliced(), base.with(0, 'x'), base.with(-1, 'y'), base);
+console.log([3, 1, 2].toSorted((a, b) => b - a), ['b', undefined, 'a'].toSorted(), [1, 2, 3, 4, 5].copyWithin(0, 3), [1, 2, 3, 4, 5].copyWithin(1, 0, 2), [1, 2, 3, 4, 5].copyWithin(-2, -4, -3));
+for (const attempt of [() => [1, 2].with(2, 0), () => [1, 2].with(-3, 0), () => [1].toSorted(5)]) {
+  try {
+    console.log(attempt());
+  } catch (err) {
+    console.log(err.constructor.name + ': ' + err.message);
+  }
+}
