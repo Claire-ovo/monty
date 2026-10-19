@@ -11,6 +11,7 @@
 //! `expr.rs` and `stmt.rs` hold the per-node emission; this file owns the
 //! state, scopes, resolution and function assembly.
 
+mod class;
 mod expr;
 mod pattern;
 mod stmt;
@@ -146,6 +147,7 @@ enum CaptureKey {
     Symbol(SymbolId),
     This(ScopeId),
     Arguments(ScopeId),
+    NewTarget(ScopeId),
 }
 
 /// Where a resolved name lives and how to access it.
@@ -313,6 +315,11 @@ impl<'c> Compiler<'c> {
             }
         }
         let function = self.pop_function();
+        self.publish_function(function)
+    }
+
+    /// Adds a finished function to the feed's table, returning its id.
+    fn publish_function(&mut self, function: Function) -> Result<FunctionId, CompileError> {
         let id = self.function_base as usize + self.functions.len();
         self.functions.push(function);
         u16::try_from(id)
@@ -387,6 +394,10 @@ impl<'c> Compiler<'c> {
         if facts.uses_new_target {
             let slot = self.alloc_slot()?;
             self.func().new_target_slot = Some(slot);
+            if facts.new_target_captured {
+                self.func().entry_cells.push(EntryCell { slot });
+                self.func().capture_slots.insert(CaptureKey::NewTarget(scope), slot);
+            }
         }
         Ok(())
     }
@@ -652,6 +663,31 @@ impl<'c> Compiler<'c> {
     /// in module code, where it is an ordinary (undeclared) global.
     fn resolve_arguments(&mut self) -> Result<Option<Place>, CompileError> {
         self.resolve_implicit(|state| state.arguments_slot, CaptureKey::Arguments)
+    }
+
+    /// Resolves `new.target`; `None` in module code, where it is `undefined`.
+    fn resolve_new_target(&mut self) -> Result<Option<Place>, CompileError> {
+        self.resolve_implicit(|state| state.new_target_slot, CaptureKey::NewTarget)
+    }
+
+    /// Whether the nearest non-arrow function is a derived class constructor,
+    /// whose `this` is in its dead zone until `super()` returns.
+    fn in_derived_constructor(&self) -> bool {
+        self.funcs
+            .iter()
+            .rev()
+            .find(|state| state.kind != FunctionKind::Arrow)
+            .is_some_and(|state| state.kind.is_derived_constructor())
+    }
+
+    /// Whether `super` may appear here: inside a method or constructor (or an
+    /// arrow within one), which has a home object.
+    fn in_method(&self) -> bool {
+        self.funcs
+            .iter()
+            .rev()
+            .find(|state| state.kind != FunctionKind::Arrow)
+            .is_some_and(|state| matches!(state.kind, FunctionKind::Method | FunctionKind::ClassConstructor { .. }))
     }
 
     /// Resolves an implicit per-function binding held in `slot_of` the owning

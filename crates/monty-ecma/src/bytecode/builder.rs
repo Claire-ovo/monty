@@ -355,6 +355,7 @@ impl Opcode {
             | Self::MakeClosure
             | Self::MakeMethod
             | Self::LoadThis
+            | Self::LoadSuperBase
             | Self::PushException => 1,
             Self::StoreLocal
             | Self::StoreCell
@@ -364,6 +365,8 @@ impl Opcode {
             | Self::ArrayPush
             | Self::ArraySpread
             | Self::DefineOwn
+            | Self::DefineMethod
+            | Self::SetFieldInitializer
             | Self::CopyDataProperties
             | Self::SetPrototype
             | Self::JumpIfFalse
@@ -413,7 +416,7 @@ impl Opcode {
             | Self::Jump
             | Self::ArrayPushHole => 0,
             Self::GetPropKeep | Self::GetElemKeep | Self::IteratorNext | Self::IteratorStep | Self::IteratorRest => 1,
-            Self::SetElem | Self::DefineOwnElem | Self::DefineAccessor => -2,
+            Self::SetElem | Self::DefineOwnElem | Self::DefineMethodElem | Self::DefineAccessor => -2,
             // the keep-variants pop on fall-through; the jump path is accounted in `emit_jump`
             Self::JumpIfTrueKeep | Self::JumpIfFalseKeep | Self::JumpIfNotNullishKeep | Self::JumpIfUndefinedKeep => -1,
             Self::JumpIfNullishKeep => 0,
@@ -427,6 +430,7 @@ impl Opcode {
             Self::NewSpread => -1,
             // `argc` arguments become `this`
             Self::SuperCall => 1 - operand,
+            Self::SuperCallSpread => 0,
             Self::MakeClass => -1,
             Self::ReturnUndefined | Self::ThrowError | Self::Rethrow => 0,
         }

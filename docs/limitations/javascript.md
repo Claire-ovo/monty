@@ -27,9 +27,10 @@ The engine is at an early stage, so most entries are features that are not imple
 
 ## Language features not implemented
 
-Each of these is a `SyntaxError` at compile time naming the feature (`classes is not supported`):
+Each of these is a `SyntaxError` at compile time naming the feature (`generators is not supported`):
 
-- `class` declarations and expressions, `super`, `new.target`, private fields (`#x`)
+- Private fields and methods (`#x`), `accessor` properties, decorators
+- `super()` inside an arrow function in a derived constructor
 - A computed key before a rest element in an object pattern (`const { [k]: a, ...rest } = o`)
 - Generators (`function*`, `yield`), async functions, `await`, `for await`
 - Regular expression literals
@@ -37,6 +38,14 @@ Each of these is a `SyntaxError` at compile time naming the feature (`classes is
 - Tagged templates
 - `using` declarations
 - TypeScript and JSX syntax
+
+Within classes:
+
+- A computed field key (`[expr] = value`) is evaluated when each instance is initialized rather than once when
+    the class is defined.
+- `super.x` reads a getter with the home object's prototype as its receiver rather than the current `this`;
+    `super.x = v` is not supported.
+- `Symbol.hasInstance` is not consulted by `instanceof`.
 
 `eval` and `new Function` are not available (`Function()` throws an `EvalError`).
 

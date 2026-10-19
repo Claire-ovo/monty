@@ -93,6 +93,16 @@ impl FunctionKind {
     pub fn is_constructor(self) -> bool {
         matches!(self, Self::Normal | Self::ClassConstructor { .. })
     }
+
+    /// Whether this is a class constructor, which `new` alone may call.
+    pub fn is_class_constructor(self) -> bool {
+        matches!(self, Self::ClassConstructor { .. })
+    }
+
+    /// A derived constructor's `this` exists only once `super()` returns.
+    pub fn is_derived_constructor(self) -> bool {
+        matches!(self, Self::ClassConstructor { derived: true })
+    }
 }
 
 /// A range of a feed's source text, in bytes.

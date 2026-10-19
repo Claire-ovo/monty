@@ -5,7 +5,7 @@ use std::{fmt::Write, mem, sync::Arc};
 
 use monty_types::ResourceError;
 
-use super::{Frame, MAX_REENTRANCY, Step, Vm};
+use super::{Construct, Frame, MAX_REENTRANCY, Step, Vm};
 use crate::{
     builtins::{NativeFn, dispatch},
     error::{RunResult, Throw},
@@ -16,6 +16,25 @@ use crate::{
     string::JsString,
     value::JsValue,
 };
+
+/// How a frame is entered: its receiver, `new.target` and what `new` does
+/// with the return value.
+pub(super) struct Invocation {
+    pub this: JsValue,
+    pub new_target: JsValue,
+    pub construct: Construct,
+}
+
+impl Invocation {
+    /// An ordinary call with `this`.
+    pub fn call(this: JsValue) -> Self {
+        Self {
+            this,
+            new_target: JsValue::Undefined,
+            construct: Construct::Call,
+        }
+    }
+}
 
 /// What a function object is made of, copied out of the heap for a call.
 enum Callable {
@@ -36,8 +55,13 @@ impl Vm<'_> {
     /// continues into it; a native runs now and its result is pushed.
     pub(super) fn call_from_bytecode(&mut self, callee: JsValue, this: JsValue, args: Vec<JsValue>) -> RunResult<Step> {
         match self.callable(&callee) {
+            Some(Callable::Closure { function, .. }) if function.kind.is_class_constructor() => {
+                self.drop_all(this, args);
+                callee.drop_with(&mut self.session.heap);
+                Err(self.class_without_new(&function))
+            }
             Some(Callable::Closure { function, cells }) => {
-                let result = self.push_closure_frame(function, &cells, callee, this, args, None);
+                let result = self.push_closure_frame(function, &cells, callee, args, Invocation::call(this));
                 result.map(|()| Step::Continue)
             }
             None => {
@@ -58,9 +82,8 @@ impl Vm<'_> {
     pub(super) fn construct_from_bytecode(&mut self, callee: JsValue, args: Vec<JsValue>) -> RunResult<Step> {
         match self.callable(&callee) {
             Some(Callable::Closure { function, cells }) if function.kind.is_constructor() => {
-                let this = self.construct_this(&callee)?;
-                let this_copy = this.clone_with_heap(&self.session.heap);
-                self.push_closure_frame(function, &cells, callee, this, args, Some(this_copy))?;
+                let new_target = callee.clone_with_heap(&self.session.heap);
+                self.push_construct_frame(function, &cells, callee, args, new_target)?;
                 Ok(Step::Continue)
             }
             Some(Callable::Native(native)) if native.is_constructor() => {
@@ -108,9 +131,14 @@ impl Vm<'_> {
                 self.session.heap.inc_ref(target);
                 self.call(JsValue::Ref(target), bound_this, all)
             }
+            Some(Callable::Closure { function, .. }) if function.kind.is_class_constructor() => {
+                self.drop_all(this, args);
+                callee.drop_with(&mut self.session.heap);
+                Err(self.class_without_new(&function))
+            }
             Some(Callable::Closure { function, cells }) => self.enter_nested(|vm| {
                 let depth = vm.frames.len();
-                vm.push_closure_frame(function, &cells, callee, this, args, None)?;
+                vm.push_closure_frame(function, &cells, callee, args, Invocation::call(this))?;
                 vm.run(depth)
             }),
         }
@@ -118,19 +146,37 @@ impl Vm<'_> {
 
     /// `new callee(...args)`, consuming both.
     pub fn construct(&mut self, callee: JsValue, args: Vec<JsValue>) -> RunResult<JsValue> {
+        let new_target = callee.clone_with_heap(&self.session.heap);
+        self.construct_with(callee, args, new_target)
+    }
+
+    /// Constructs `callee` for `new_target` (the class `new` named, which
+    /// decides the instance's prototype through a `super()` chain).
+    pub fn construct_with(&mut self, callee: JsValue, args: Vec<JsValue>, new_target: JsValue) -> RunResult<JsValue> {
         match self.callable(&callee) {
-            Some(Callable::Closure { function, cells }) if function.kind.is_constructor() => {
-                let this = self.construct_this(&callee)?;
-                let this_copy = this.clone_with_heap(&self.session.heap);
-                self.enter_nested(|vm| {
-                    let depth = vm.frames.len();
-                    vm.push_closure_frame(function, &cells, callee, this, args, Some(this_copy))?;
-                    vm.run(depth)
-                })
-            }
+            Some(Callable::Closure { function, cells }) if function.kind.is_constructor() => self.enter_nested(|vm| {
+                let depth = vm.frames.len();
+                vm.push_construct_frame(function, &cells, callee, args, new_target)?;
+                vm.run(depth)
+            }),
             Some(Callable::Native(native)) if native.is_constructor() => {
+                let subclassed = new_target != callee;
                 callee.drop_with(&mut self.session.heap);
-                self.call_native(native, JsValue::Undefined, args, true)
+                let result = self.call_native(native, JsValue::Undefined, args, true);
+                if !subclassed {
+                    new_target.drop_with(&mut self.session.heap);
+                    return result;
+                }
+                // `class X extends Error`: the native built the instance; give it the subclass's prototype
+                let result = result?;
+                let prototype = self.get_atom(&new_target, StaticAtom::Prototype.id());
+                new_target.drop_with(&mut self.session.heap);
+                let prototype = prototype?;
+                if let (JsValue::Ref(instance), JsValue::Ref(proto)) = (&result, &prototype) {
+                    self.set_prototype(*instance, Some(*proto));
+                }
+                prototype.drop_with(&mut self.session.heap);
+                Ok(result)
             }
             Some(Callable::Bound {
                 target,
@@ -142,14 +188,266 @@ impl Vm<'_> {
                 let mut all = bound_args;
                 all.extend(args);
                 self.session.heap.inc_ref(target);
-                self.construct(JsValue::Ref(target), all)
+                // a bound function's new.target is the target when it was the constructor
+                let new_target = if let JsValue::Ref(id) = &new_target
+                    && self
+                        .object(*id)
+                        .is_some_and(|o| matches!(o.class, ObjectClass::Function(FunctionObject::Bound { .. })))
+                {
+                    new_target.drop_with(&mut self.session.heap);
+                    self.session.heap.inc_ref(target);
+                    JsValue::Ref(target)
+                } else {
+                    new_target
+                };
+                self.construct_with(JsValue::Ref(target), all, new_target)
             }
             _ => {
                 self.drop_all(JsValue::Undefined, args);
+                new_target.drop_with(&mut self.session.heap);
                 let shown = self.inspect_short(&callee)?;
                 callee.drop_with(&mut self.session.heap);
                 Err(self.type_error(&format!("{shown} is not a constructor")))
             }
+        }
+    }
+
+    /// The `TypeError` for calling a class constructor without `new`.
+    fn class_without_new(&mut self, function: &Function) -> Throw {
+        let name = self.session.interns.atom(function.name).to_string_lossy();
+        self.type_error(&format!("Class constructor {name} cannot be invoked without 'new'"))
+    }
+
+    /// Pushes the frame of a `new` call: a base constructor gets its instance
+    /// up front (and runs its field initializer), a derived one waits for
+    /// `super()`.
+    fn push_construct_frame(
+        &mut self,
+        function: Arc<Function>,
+        cells: &[HeapId],
+        callee: JsValue,
+        args: Vec<JsValue>,
+        new_target: JsValue,
+    ) -> RunResult<()> {
+        if function.kind.is_derived_constructor() {
+            return self.push_closure_frame(
+                function,
+                cells,
+                callee,
+                args,
+                Invocation {
+                    this: JsValue::Hole,
+                    new_target,
+                    construct: Construct::Derived,
+                },
+            );
+        }
+        let this = match self.construct_this(&new_target) {
+            Ok(this) => this,
+            Err(err) => {
+                self.drop_all(callee, args);
+                new_target.drop_with(&mut self.session.heap);
+                return Err(err);
+            }
+        };
+        if let JsValue::Ref(class) = &callee
+            && let Err(err) = self.run_field_initializer(*class, &this)
+        {
+            self.drop_all(callee, args);
+            this.drop_with(&mut self.session.heap);
+            new_target.drop_with(&mut self.session.heap);
+            return Err(err);
+        }
+        let invocation = Invocation {
+            construct: Construct::Base(this.clone_with_heap(&self.session.heap)),
+            this,
+            new_target,
+        };
+        self.push_closure_frame(function, cells, callee, args, invocation)
+    }
+
+    /// Runs a class's instance field initializer on a new instance.
+    fn run_field_initializer(&mut self, class: HeapId, this: &JsValue) -> RunResult<()> {
+        let initializer = match self.object(class).map(|o| &o.class) {
+            Some(ObjectClass::Function(FunctionObject::Closure {
+                fields: Some(fields), ..
+            })) => *fields,
+            _ => return Ok(()),
+        };
+        self.session.heap.inc_ref(initializer);
+        let result = self.call(
+            JsValue::Ref(initializer),
+            this.clone_with_heap(&self.session.heap),
+            Vec::new(),
+        )?;
+        result.drop_with(&mut self.session.heap);
+        Ok(())
+    }
+
+    /// `super(...args)`: constructs the parent class for the running
+    /// constructor's `new.target`, binds the result as `this` and runs this
+    /// class's field initializer.
+    pub(super) fn super_call(&mut self, args: Vec<JsValue>) -> RunResult<JsValue> {
+        let frame = self.frames.last().expect("frame");
+        let Some(class) = frame.callee else {
+            self.drop_all(JsValue::Undefined, args);
+            return Err(self.internal_error("super() outside a class constructor"));
+        };
+        let new_target = frame.new_target.clone_with_heap(&self.session.heap);
+        let parent = self.get_prototype(class);
+        let parent_callable = parent.is_some_and(|parent| {
+            self.object(parent).is_some_and(|o| match &o.class {
+                ObjectClass::Function(FunctionObject::Closure { func, .. }) => {
+                    self.session.interns.function(*func).kind.is_constructor()
+                }
+                ObjectClass::Function(FunctionObject::Native(native)) => native.is_constructor(),
+                ObjectClass::Function(FunctionObject::Bound { .. }) => true,
+                _ => false,
+            })
+        });
+        let Some(parent) = parent.filter(|_| parent_callable) else {
+            self.drop_all(new_target, args);
+            let shown = match parent {
+                Some(parent) => self.inspect_short(&JsValue::Ref(parent))?,
+                None => "null".to_owned(),
+            };
+            let name = self
+                .session
+                .interns
+                .atom(self.frames.last().expect("frame").function.name)
+                .to_string_lossy();
+            let class_name = if name.is_empty() {
+                "anonymous class".to_owned()
+            } else {
+                name
+            };
+            return Err(self.type_error(&format!(
+                "Super constructor {shown} of {class_name} is not a constructor"
+            )));
+        };
+        self.session.heap.inc_ref(parent);
+        let this = self.construct_with(JsValue::Ref(parent), args, new_target)?;
+        let result = this.clone_with_heap(&self.session.heap);
+        self.set_derived_this(this)?;
+        self.run_field_initializer(class, &result)?;
+        Ok(result)
+    }
+
+    /// `super.x`: the prototype of the running method's home object.
+    pub(super) fn super_base(&mut self) -> RunResult<JsValue> {
+        let frame = self.frames.last().expect("frame");
+        let home = frame
+            .callee
+            .and_then(|callee| match self.object(callee).map(|o| &o.class) {
+                Some(ObjectClass::Function(FunctionObject::Closure { home_object, .. })) => *home_object,
+                _ => None,
+            });
+        let Some(home) = home else {
+            return Err(self.syntax_error("'super' keyword unexpected here"));
+        };
+        Ok(match self.get_prototype(home) {
+            Some(proto) => {
+                self.session.heap.inc_ref(proto);
+                JsValue::Ref(proto)
+            }
+            None => JsValue::Null,
+        })
+    }
+
+    /// `MakeClass`: links a constructor to its parent and creates its
+    /// prototype object. `parent` is the hole for a class without `extends`.
+    pub(super) fn make_class(&mut self, constructor: JsValue, parent: JsValue) -> RunResult<JsValue> {
+        let JsValue::Ref(class) = &constructor else {
+            parent.drop_with(&mut self.session.heap);
+            return Err(self.internal_error("MakeClass without a constructor"));
+        };
+        let class = *class;
+        let (proto_parent, constructor_parent) = match &parent {
+            JsValue::Hole => (
+                Some(self.session.realm.object_prototype),
+                self.session.realm.function_prototype,
+            ),
+            JsValue::Null => (None, self.session.realm.function_prototype),
+            JsValue::Ref(id) if self.is_constructor_value(&parent) => {
+                let prototype = self.get_atom(&parent, StaticAtom::Prototype.id())?;
+                let proto_parent = match prototype {
+                    JsValue::Ref(proto) => Some(proto),
+                    JsValue::Null => None,
+                    other => {
+                        let shown = self.inspect_short(&other)?;
+                        other.drop_with(&mut self.session.heap);
+                        parent.drop_with(&mut self.session.heap);
+                        return Err(self.type_error(&format!(
+                            "Class extends value does not have valid prototype property {shown}"
+                        )));
+                    }
+                };
+                (proto_parent, *id)
+            }
+            other => {
+                let shown = self.inspect(other)?;
+                parent.drop_with(&mut self.session.heap);
+                return Err(self.type_error(&format!("Class extends value {shown} is not a constructor or null")));
+            }
+        };
+        let prototype = self.new_object_with_proto(proto_parent);
+        let JsValue::Ref(prototype_id) = &prototype else {
+            unreachable!()
+        };
+        if let Some(proto_parent) = proto_parent {
+            // `get_atom` lent us a reference to the parent's prototype
+            self.session.heap.dec_ref(proto_parent);
+        }
+        self.session.heap.inc_ref(class);
+        self.define_with_flags(
+            *prototype_id,
+            PropertyKey::Atom(StaticAtom::Constructor.id()),
+            JsValue::Ref(class),
+            PropFlags::HIDDEN,
+        );
+        self.define_with_flags(
+            class,
+            PropertyKey::Atom(StaticAtom::Prototype.id()),
+            prototype,
+            PropFlags::NONE,
+        );
+        self.set_prototype(class, Some(constructor_parent));
+        parent.drop_with(&mut self.session.heap);
+        Ok(constructor)
+    }
+
+    /// Whether `new` may be applied to the value.
+    fn is_constructor_value(&self, value: &JsValue) -> bool {
+        let JsValue::Ref(id) = value else {
+            return false;
+        };
+        self.object(*id).is_some_and(|o| match &o.class {
+            ObjectClass::Function(FunctionObject::Closure { func, .. }) => {
+                self.session.interns.function(*func).kind.is_constructor()
+            }
+            ObjectClass::Function(FunctionObject::Native(native)) => native.is_constructor(),
+            ObjectClass::Function(FunctionObject::Bound { .. }) => true,
+            _ => false,
+        })
+    }
+
+    /// `SetFieldInitializer`: records a class's instance field initializer.
+    pub(super) fn set_field_initializer(&mut self, class: HeapId, initializer: JsValue) -> RunResult<()> {
+        let JsValue::Ref(id) = initializer else {
+            initializer.drop_with(&mut self.session.heap);
+            return Err(self.internal_error("field initializer is not a function"));
+        };
+        if let Some(ObjectClass::Function(FunctionObject::Closure { fields, .. })) =
+            self.object_mut(class).map(|o| &mut o.class)
+        {
+            let old = fields.replace(id);
+            if let Some(old) = old {
+                self.session.heap.dec_ref(old);
+            }
+            Ok(())
+        } else {
+            self.session.heap.dec_ref(id);
+            Err(self.internal_error("SetFieldInitializer on a non-class"))
         }
     }
 
@@ -217,11 +515,10 @@ impl Vm<'_> {
         function: Arc<Function>,
         cells: &[HeapId],
         callee: JsValue,
-        this: JsValue,
         args: Vec<JsValue>,
-        construct_this: Option<JsValue>,
+        invocation: Invocation,
     ) -> RunResult<()> {
-        let result = self.push_frame(function, Some((&callee, cells)), this, args, construct_this);
+        let result = self.push_frame(function, Some((&callee, cells)), args, invocation);
         callee.drop_with(&mut self.session.heap);
         result
     }
@@ -233,13 +530,18 @@ impl Vm<'_> {
         &mut self,
         function: Arc<Function>,
         closure: Option<(&JsValue, &[HeapId])>,
-        this: JsValue,
         args: Vec<JsValue>,
-        construct_this: Option<JsValue>,
+        invocation: Invocation,
     ) -> RunResult<()> {
+        let Invocation {
+            this,
+            new_target,
+            construct,
+        } = invocation;
         if let Err(err) = self.tracker().check_recursion_depth(self.frames.len() + 1) {
             self.drop_all(this, args);
-            if let Some(this) = construct_this {
+            new_target.drop_with(&mut self.session.heap);
+            if let Construct::Base(this) = construct {
                 this.drop_with(&mut self.session.heap);
             }
             return Err(match err {
@@ -286,6 +588,9 @@ impl Vm<'_> {
         if let (Some(slot), Some((callee, _))) = (function.self_slot, closure) {
             self.stack[base + usize::from(slot)] = callee.clone_with_heap(&self.session.heap);
         }
+        if let Some(slot) = function.new_target_slot {
+            self.stack[base + usize::from(slot)] = new_target.clone_with_heap(&self.session.heap);
+        }
         if let Some((_, cells)) = closure {
             for (cell, slot) in cells.iter().zip(&function.free_slots) {
                 self.session.heap.inc_ref(*cell);
@@ -298,13 +603,19 @@ impl Vm<'_> {
             let cell = self.session.heap.allocate(JsHeapData::Cell(seed));
             self.stack[index] = JsValue::Ref(cell);
         }
+        let callee = closure.and_then(|(callee, _)| callee.heap_id());
+        if let Some(callee) = callee {
+            self.session.heap.inc_ref(callee);
+        }
         self.frames.push(Frame {
             function,
             ip: 0,
             op_start: 0,
             base,
             operands: base + locals,
-            construct_this,
+            callee,
+            new_target,
+            construct,
         });
         Ok(())
     }
@@ -328,6 +639,7 @@ impl Vm<'_> {
             func: id,
             cells: cells.into_boxed_slice(),
             home_object,
+            fields: None,
         };
         let object = self.new_function_object(callable, function.name, function.param_count);
         if function.kind == FunctionKind::Normal {

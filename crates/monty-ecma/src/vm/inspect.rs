@@ -8,7 +8,7 @@ use std::fmt::Write;
 use super::{Vm, number::number_to_string};
 use crate::{
     error::RunResult,
-    heap::{FunctionObject, HeapId, ObjectClass, PropertyKey, Slot},
+    heap::{FunctionObject, HeapId, JsObject, ObjectClass, PropertyKey, Slot},
     intern::StaticAtom,
     value::JsValue,
 };
@@ -275,20 +275,40 @@ impl Vm<'_> {
         Ok(reduce_to_single_string(ctx, output, &base, braces, depth, !is_array))
     }
 
-    /// The `[Function: name]` form of a function object.
+    /// The `[Function: name]` form of a function object, or `[class X extends Y]`.
     fn function_base(&self, id: HeapId) -> String {
         let Some(object) = self.object(id) else {
             return "[Function]".to_owned();
         };
-        let name = match object.props.get(&PropertyKey::Atom(StaticAtom::Name.id())) {
-            Some(Slot::Data { value, .. }) => self.string_of(value).map(|s| s.to_string_lossy()),
-            _ => None,
-        };
+        let name = self.own_name(object);
+        let is_class = matches!(&object.class, ObjectClass::Function(FunctionObject::Closure { func, .. }) if self.session.interns.function(*func).kind.is_class_constructor());
+        if is_class {
+            let parent = object
+                .proto
+                .filter(|proto| *proto != self.session.realm.function_prototype)
+                .and_then(|proto| self.object(proto))
+                .and_then(|parent| self.own_name(parent))
+                .filter(|name| !name.is_empty());
+            return match (name, parent) {
+                (Some(name), Some(parent)) if !name.is_empty() => format!("[class {name} extends {parent}]"),
+                (Some(name), None) if !name.is_empty() => format!("[class {name}]"),
+                (_, Some(parent)) => format!("[class (anonymous) extends {parent}]"),
+                _ => "[class (anonymous)]".to_owned(),
+            };
+        }
         let bound = matches!(object.class, ObjectClass::Function(FunctionObject::Bound { .. }));
         match name {
             Some(name) if !name.is_empty() => format!("[Function: {name}]"),
             _ if bound => "[Function: bound]".to_owned(),
             _ => "[Function (anonymous)]".to_owned(),
+        }
+    }
+
+    /// A function object's own `name` data property.
+    fn own_name(&self, object: &JsObject) -> Option<String> {
+        match object.props.get(&PropertyKey::Atom(StaticAtom::Name.id())) {
+            Some(Slot::Data { value, .. }) => self.string_of(value).map(|s| s.to_string_lossy()),
+            _ => None,
         }
     }
 

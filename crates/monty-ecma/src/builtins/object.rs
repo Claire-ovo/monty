@@ -38,6 +38,14 @@ pub(super) fn install(vm: &mut Vm<'_>, global: HeapId, prototype: HeapId) {
         NativeFn::ObjectFromEntries,
         NativeFn::ObjectHasOwn,
         NativeFn::ObjectIs,
+        NativeFn::ObjectGetOwnPropertyDescriptor,
+        NativeFn::ObjectGetOwnPropertyDescriptors,
+        NativeFn::ObjectGetOwnPropertySymbols,
+        NativeFn::ObjectDefineProperties,
+        NativeFn::ObjectSeal,
+        NativeFn::ObjectIsSealed,
+        NativeFn::ObjectPreventExtensions,
+        NativeFn::ObjectIsExtensible,
     ] {
         install_function(vm, constructor, native);
     }
@@ -327,6 +335,188 @@ fn truthy_field(vm: &mut Vm<'_>, value: Option<JsValue>) -> Option<bool> {
         v.drop_with(&mut vm.session.heap);
         b
     })
+}
+
+/// `Object.getOwnPropertyDescriptor`: a descriptor object, or `undefined`.
+pub(super) fn get_own_property_descriptor(
+    vm: &mut Vm<'_>,
+    _: &JsValue,
+    args: &[JsValue],
+    _: bool,
+) -> RunResult<JsValue> {
+    let object = object_arg(vm, args, "getOwnPropertyDescriptor")?;
+    let JsValue::Ref(id) = &object else { unreachable!() };
+    let id = *id;
+    let key = vm.coerce_key(arg(args, 1).clone_with_heap(&vm.session.heap))?;
+    let descriptor = describe_property(vm, id, key)?;
+    object.drop_with(&mut vm.session.heap);
+    Ok(descriptor.unwrap_or(JsValue::Undefined))
+}
+
+/// `Object.getOwnPropertyDescriptors`: every own property's descriptor.
+pub(super) fn get_own_property_descriptors(
+    vm: &mut Vm<'_>,
+    _: &JsValue,
+    args: &[JsValue],
+    _: bool,
+) -> RunResult<JsValue> {
+    let object = object_arg(vm, args, "getOwnPropertyDescriptors")?;
+    let JsValue::Ref(id) = &object else { unreachable!() };
+    let id = *id;
+    let result = plain_object(vm);
+    for key in vm.own_keys(id, false) {
+        if let Some(descriptor) = describe_property(vm, id, key)? {
+            vm.define_data(result, key, descriptor);
+        }
+    }
+    object.drop_with(&mut vm.session.heap);
+    Ok(JsValue::Ref(result))
+}
+
+/// The `{ value, writable, enumerable, configurable }` or
+/// `{ get, set, enumerable, configurable }` object of an own property.
+fn describe_property(vm: &mut Vm<'_>, object: HeapId, key: PropertyKey) -> RunResult<Option<JsValue>> {
+    let slot = match vm.object(object).and_then(|o| o.props.get(&key)) {
+        Some(Slot::Data { value, flags }) => Some((Some(value.clone_with_heap(&vm.session.heap)), None, *flags)),
+        Some(Slot::Accessor { getter, setter, flags }) => Some((
+            None,
+            Some((
+                getter.clone_with_heap(&vm.session.heap),
+                setter.clone_with_heap(&vm.session.heap),
+            )),
+            *flags,
+        )),
+        None => None,
+    };
+    let slot = if let Some(slot) = slot {
+        slot
+    } else {
+        // virtual properties: array elements and `length`
+        let Some(target) = vm.object(object) else {
+            return Ok(None);
+        };
+        if !vm.has_own(target, key) {
+            return Ok(None);
+        }
+        let is_length = matches!(key, PropertyKey::Atom(atom) if atom == StaticAtom::Length.id());
+        let value = vm.get(&JsValue::Ref(object), key)?;
+        let flags = if is_length { PropFlags::WRITABLE } else { PropFlags::ALL };
+        (Some(value), None, flags)
+    };
+    let (value, accessors, flags) = slot;
+    let descriptor = plain_object(vm);
+    match (value, accessors) {
+        (Some(value), _) => {
+            define_field(vm, descriptor, "value", value);
+            define_field(vm, descriptor, "writable", JsValue::Bool(flags.writable()));
+        }
+        (None, Some((getter, setter))) => {
+            define_field(vm, descriptor, "get", getter);
+            define_field(vm, descriptor, "set", setter);
+        }
+        (None, None) => unreachable!("a slot is data or accessor"),
+    }
+    define_field(vm, descriptor, "enumerable", JsValue::Bool(flags.enumerable()));
+    define_field(vm, descriptor, "configurable", JsValue::Bool(flags.configurable()));
+    Ok(Some(JsValue::Ref(descriptor)))
+}
+
+/// Defines a named data property on a descriptor object.
+fn define_field(vm: &mut Vm<'_>, descriptor: HeapId, name: &str, value: JsValue) {
+    let key = super::key(vm, name);
+    vm.define_data(descriptor, key, value);
+}
+
+/// `Object.getOwnPropertySymbols`.
+pub(super) fn get_own_property_symbols(vm: &mut Vm<'_>, _: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let object = object_arg(vm, args, "getOwnPropertySymbols")?;
+    let JsValue::Ref(id) = &object else { unreachable!() };
+    let symbols: Vec<JsValue> = vm
+        .own_keys(*id, false)
+        .into_iter()
+        .filter_map(|key| match key {
+            PropertyKey::Symbol(symbol) => Some(JsValue::Symbol(symbol)),
+            _ => None,
+        })
+        .collect();
+    object.drop_with(&mut vm.session.heap);
+    vm.new_array(symbols)
+}
+
+/// `Object.defineProperties`: `defineProperty` for each own enumerable key of the descriptors object.
+pub(super) fn define_properties(
+    vm: &mut Vm<'_>,
+    this: &JsValue,
+    args: &[JsValue],
+    construct: bool,
+) -> RunResult<JsValue> {
+    let target = arg(args, 0);
+    if !target.is_object() {
+        return Err(vm.type_error("Object.defineProperties called on non-object"));
+    }
+    let descriptors = object_arg(vm, &args[1.min(args.len())..], "defineProperties")?;
+    let JsValue::Ref(descriptors_id) = &descriptors else {
+        unreachable!()
+    };
+    for key in vm.own_keys(*descriptors_id, true) {
+        let descriptor = vm.get(&descriptors, key)?;
+        let key_value = vm.key_to_value(key);
+        let outcome = define_property(
+            vm,
+            this,
+            &[target.clone_with_heap(&vm.session.heap), key_value, descriptor],
+            construct,
+        );
+        outcome?.drop_with(&mut vm.session.heap);
+    }
+    descriptors.drop_with(&mut vm.session.heap);
+    Ok(target.clone_with_heap(&vm.session.heap))
+}
+
+/// `Object.seal`: no new properties, none deletable; values stay writable.
+pub(super) fn seal(vm: &mut Vm<'_>, _: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let value = arg(args, 0);
+    if let JsValue::Ref(id) = value
+        && let Some(object) = vm.object_mut(*id)
+    {
+        object.extensible = false;
+        for slot in object.props.values_mut() {
+            match slot {
+                Slot::Data { flags, .. } | Slot::Accessor { flags, .. } => *flags = flags.sealed(),
+            }
+        }
+    }
+    Ok(value.clone_with_heap(&vm.session.heap))
+}
+
+pub(super) fn is_sealed(vm: &mut Vm<'_>, _: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let sealed = match arg(args, 0) {
+        JsValue::Ref(id) => vm.object(*id).is_some_and(|object| {
+            !object.extensible
+                && object.props.values().all(|slot| !slot.flags().configurable())
+                && object.elements.is_empty()
+        }),
+        _ => true,
+    };
+    Ok(JsValue::Bool(sealed))
+}
+
+pub(super) fn prevent_extensions(vm: &mut Vm<'_>, _: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let value = arg(args, 0);
+    if let JsValue::Ref(id) = value
+        && let Some(object) = vm.object_mut(*id)
+    {
+        object.extensible = false;
+    }
+    Ok(value.clone_with_heap(&vm.session.heap))
+}
+
+pub(super) fn is_extensible(vm: &mut Vm<'_>, _: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {
+    let extensible = match arg(args, 0) {
+        JsValue::Ref(id) => vm.object(*id).is_some_and(|object| object.extensible),
+        _ => false,
+    };
+    Ok(JsValue::Bool(extensible))
 }
 
 pub(super) fn get_own_property_names(vm: &mut Vm<'_>, _: &JsValue, args: &[JsValue], _: bool) -> RunResult<JsValue> {

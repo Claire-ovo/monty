@@ -87,6 +87,14 @@ natives! {
     ObjectGetOwnPropertyNames => ("getOwnPropertyNames", 1, false, object::get_own_property_names),
     ObjectFromEntries => ("fromEntries", 1, false, object::from_entries),
     ObjectHasOwn => ("hasOwn", 2, false, object::has_own),
+    ObjectGetOwnPropertyDescriptor => ("getOwnPropertyDescriptor", 2, false, object::get_own_property_descriptor),
+    ObjectGetOwnPropertyDescriptors => ("getOwnPropertyDescriptors", 1, false, object::get_own_property_descriptors),
+    ObjectGetOwnPropertySymbols => ("getOwnPropertySymbols", 1, false, object::get_own_property_symbols),
+    ObjectDefineProperties => ("defineProperties", 2, false, object::define_properties),
+    ObjectSeal => ("seal", 1, false, object::seal),
+    ObjectIsSealed => ("isSealed", 1, false, object::is_sealed),
+    ObjectPreventExtensions => ("preventExtensions", 1, false, object::prevent_extensions),
+    ObjectIsExtensible => ("isExtensible", 1, false, object::is_extensible),
     ObjectIs => ("is", 2, false, object::is),
     ObjectProtoHasOwnProperty => ("hasOwnProperty", 1, false, object::proto_has_own_property),
     ObjectProtoToString => ("toString", 0, false, object::proto_to_string),
@@ -327,7 +335,7 @@ pub(crate) fn install_value(vm: &mut Vm<'_>, target: HeapId, name: &str, value: 
 pub(crate) fn install_getter(vm: &mut Vm<'_>, target: HeapId, name: &str, native: NativeFn) {
     let atom = vm.session.interns.intern_str(name);
     let function = vm.new_function_object(FunctionObject::Native(native), atom, 0);
-    vm.define_accessor(target, PropertyKey::Atom(atom), JsValue::Ref(function), false);
+    vm.define_accessor(target, PropertyKey::Atom(atom), JsValue::Ref(function), false, false);
 }
 
 /// Creates a constructor on the global object linked to its prototype:

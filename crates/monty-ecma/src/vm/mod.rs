@@ -16,6 +16,7 @@ pub(crate) mod property;
 
 use std::{mem, string::ToString, sync::Arc};
 
+use call::Invocation;
 use monty_heap::ContainsHeap;
 use monty_types::{MontyException, PrintWriter, ResourceError, ResourceTracker, StackFrame};
 
@@ -23,7 +24,7 @@ use crate::{
     bytecode::{Code, Opcode},
     error::{RunResult, Throw, stack_frame},
     function::Function,
-    heap::{Heap, HeapId, JsHeapData, JsObject, PropertyKey},
+    heap::{Heap, HeapId, JsHeapData, JsObject, PropFlags, PropertyKey},
     intern::{AtomId, FunctionId, Interns, StaticAtom},
     realm::{ErrorKind, Realm, ScriptScope},
     string::JsString,
@@ -76,9 +77,24 @@ struct Frame {
     base: usize,
     /// Stack index where the operand stack starts (`base + locals`).
     operands: usize,
-    /// `new` call: the object under construction, returned unless the body
-    /// returns an object of its own.
-    construct_this: Option<JsValue>,
+    /// The function object running (an owned reference), for `super`.
+    callee: Option<HeapId>,
+    /// `new.target`: the constructor `new` was applied to, else `undefined`.
+    new_target: JsValue,
+    /// How a `new` call's result is decided when the body returns.
+    construct: Construct,
+}
+
+/// What a frame does with its return value under `new`.
+enum Construct {
+    /// An ordinary call: the returned value.
+    Call,
+    /// `new` on a function or base class: the object created up front,
+    /// unless the body returns an object of its own.
+    Base(JsValue),
+    /// `new` on a derived class: `this` as `super()` initialized it, unless
+    /// the body returns an object; a primitive return or no `super()` throws.
+    Derived,
 }
 
 impl<'p> Vm<'p> {
@@ -115,7 +131,7 @@ impl<'p> Vm<'p> {
     /// Runs a module body to completion, returning its completion value.
     pub fn run_module(&mut self, module: Arc<Function>) -> RunResult<JsValue> {
         self.traceback.clear();
-        self.push_frame(module, None, JsValue::Undefined, Vec::new(), None)?;
+        self.push_frame(module, None, Vec::new(), Invocation::call(JsValue::Undefined))?;
         self.run(0)
     }
 
@@ -136,36 +152,115 @@ impl<'p> Vm<'p> {
             match self.step() {
                 Ok(Step::Continue) => {}
                 Ok(Step::Return(value)) => {
+                    let value = match self.finish_return(value) {
+                        Ok(value) => value,
+                        Err(throw) => {
+                            self.handle_throw(throw, stop_depth)?;
+                            continue;
+                        }
+                    };
                     let frame = self.frames.pop().expect("returning from a frame");
                     self.clear_stack(frame.base);
-                    let value = match frame.construct_this {
-                        Some(this) if !value.is_object() => {
-                            value.drop_with(&mut self.session.heap);
-                            this
-                        }
-                        Some(this) => {
-                            this.drop_with(&mut self.session.heap);
-                            value
-                        }
-                        None => value,
-                    };
+                    frame.new_target.drop_with(&mut self.session.heap);
+                    if let Some(callee) = frame.callee {
+                        self.session.heap.dec_ref(callee);
+                    }
                     if self.frames.len() == stop_depth {
                         return Ok(value);
                     }
                     self.stack.push(value);
                 }
-                Err(Throw::Value(value)) => self.unwind(value, stop_depth)?,
-                Err(Throw::Resource(err)) => {
-                    // a resource error ends the feed: record where it happened
-                    while self.frames.len() > stop_depth {
-                        self.record_frame();
-                        let frame = self.frames.pop().expect("frame");
-                        self.clear_stack(frame.base);
-                    }
-                    return Err(Throw::Resource(err));
-                }
+                Err(throw) => self.handle_throw(throw, stop_depth)?,
             }
         }
+    }
+
+    /// Routes a throw: a value goes to the nearest handler, a resource error
+    /// ends the feed after recording where it happened.
+    fn handle_throw(&mut self, throw: Throw, stop_depth: usize) -> RunResult<()> {
+        match throw {
+            Throw::Value(value) => self.unwind(value, stop_depth),
+            Throw::Resource(err) => {
+                while self.frames.len() > stop_depth {
+                    self.record_frame();
+                    self.pop_frame();
+                }
+                Err(Throw::Resource(err))
+            }
+        }
+    }
+
+    /// The value a returning frame hands back, by how it was called (see
+    /// [`Construct`]); runs before the frame is popped so a derived
+    /// constructor's `this` slot can still be read.
+    fn finish_return(&mut self, value: JsValue) -> RunResult<JsValue> {
+        let frame = self.frames.last_mut().expect("returning from a frame");
+        match mem::replace(&mut frame.construct, Construct::Call) {
+            Construct::Call => Ok(value),
+            Construct::Base(this) if !value.is_object() => {
+                value.drop_with(&mut self.session.heap);
+                Ok(this)
+            }
+            Construct::Base(this) => {
+                this.drop_with(&mut self.session.heap);
+                Ok(value)
+            }
+            Construct::Derived if value.is_object() => Ok(value),
+            Construct::Derived => {
+                let undefined = value == JsValue::Undefined;
+                value.drop_with(&mut self.session.heap);
+                if !undefined {
+                    return Err(self.type_error("Derived constructors may only return object or undefined"));
+                }
+                let this = self.derived_this();
+                if this == JsValue::Hole {
+                    let name = self.session.interns.intern_str("this");
+                    return Err(self.tdz_error(name));
+                }
+                Ok(this)
+            }
+        }
+    }
+
+    /// A derived constructor's `this`: the receiver slot's value, through its
+    /// cell when arrows capture it.
+    fn derived_this(&self) -> JsValue {
+        let frame = self.frames.last().expect("frame");
+        let Some(slot) = frame.function.this_slot else {
+            return JsValue::Hole;
+        };
+        if frame.function.entry_cells.iter().any(|cell| cell.slot == slot) {
+            self.cell_value(slot)
+        } else {
+            self.local(slot).clone_with_heap(&self.session.heap)
+        }
+    }
+
+    /// Writes a derived constructor's `this` once `super()` has created it.
+    fn set_derived_this(&mut self, this: JsValue) -> RunResult<()> {
+        let function = Arc::clone(&self.frames.last().expect("frame").function);
+        let Some(slot) = function.this_slot else {
+            this.drop_with(&mut self.session.heap);
+            return Err(self.internal_error("super() outside a constructor"));
+        };
+        if self.derived_this() != JsValue::Hole {
+            this.drop_with(&mut self.session.heap);
+            return Err(self.throw_error(ErrorKind::ReferenceError, "Super constructor may only be called once"));
+        }
+        if function.entry_cells.iter().any(|cell| cell.slot == slot) {
+            let JsValue::Ref(cell) = self.local(slot) else {
+                return Err(self.internal_error("this slot without a cell"));
+            };
+            let cell = *cell;
+            if let JsHeapData::Cell(contents) = self.session.heap.get_mut(cell) {
+                let old = mem::replace(contents, this);
+                old.drop_with(&mut self.session.heap);
+            }
+        } else {
+            let old = mem::replace(self.local_mut(slot), this);
+            old.drop_with(&mut self.session.heap);
+        }
+        Ok(())
     }
 
     /// Delivers a thrown value to the nearest handler above `stop_depth`, or
@@ -186,10 +281,23 @@ impl<'p> Vm<'p> {
                 return Ok(());
             }
             self.record_frame();
-            let frame = self.frames.pop().expect("frame");
-            self.clear_stack(frame.base);
+            self.pop_frame();
         }
         Err(Throw::Value(value))
+    }
+
+    /// Discards the top frame: its stack region and what it owned.
+    fn pop_frame(&mut self) {
+        let frame = self.frames.pop().expect("frame");
+        self.clear_stack(frame.base);
+        frame.new_target.drop_with(&mut self.session.heap);
+        if let Some(callee) = frame.callee {
+            self.session.heap.dec_ref(callee);
+        }
+        match frame.construct {
+            Construct::Base(this) => this.drop_with(&mut self.session.heap),
+            Construct::Call | Construct::Derived => {}
+        }
     }
 
     /// Appends the top frame's position to the traceback being built.
@@ -623,7 +731,7 @@ impl<'p> Vm<'p> {
                 self.define_data(object, key, value);
             }
             Opcode::DefineAccessor => {
-                let which = self.operand_u8();
+                let flags = self.operand_u8();
                 let function = self.pop();
                 let key = self.pop();
                 let JsValue::Ref(object) = self.peek(0) else {
@@ -637,7 +745,44 @@ impl<'p> Vm<'p> {
                         return Err(err);
                     }
                 };
-                self.define_accessor(object, key, function, which == 1);
+                self.define_accessor(object, key, function, flags & 1 != 0, flags & 2 == 0);
+            }
+            Opcode::DefineMethod => {
+                let name = AtomId::from_u16(self.operand_u16());
+                let function = self.pop();
+                let JsValue::Ref(object) = self.peek(0) else {
+                    return Err(self.internal_error("DefineMethod on a non-object"));
+                };
+                let object = *object;
+                self.define_with_flags(object, PropertyKey::Atom(name), function, PropFlags::HIDDEN);
+            }
+            Opcode::DefineMethodElem => {
+                let function = self.pop();
+                let key = self.pop();
+                let JsValue::Ref(object) = self.peek(0) else {
+                    return Err(self.internal_error("DefineMethodElem on a non-object"));
+                };
+                let object = *object;
+                let key = match self.coerce_key(key) {
+                    Ok(key) => key,
+                    Err(err) => {
+                        function.drop_with(&mut self.session.heap);
+                        return Err(err);
+                    }
+                };
+                self.define_with_flags(object, key, function, PropFlags::HIDDEN);
+            }
+            Opcode::SetFieldInitializer => {
+                let initializer = self.pop();
+                let JsValue::Ref(class) = self.peek(0) else {
+                    return Err(self.internal_error("SetFieldInitializer on a non-class"));
+                };
+                let class = *class;
+                self.set_field_initializer(class, initializer)?;
+            }
+            Opcode::LoadSuperBase => {
+                let base = self.super_base()?;
+                self.stack.push(base);
             }
             Opcode::CopyDataProperties => {
                 let source = self.pop();
@@ -726,8 +871,10 @@ impl<'p> Vm<'p> {
                 self.stack.push(result);
             }
             Opcode::MakeClass => {
-                let _ = self.operand_u8();
-                return Err(self.internal_error("classes are not compiled yet"));
+                let constructor = self.pop();
+                let parent = self.pop();
+                let class = self.make_class(constructor, parent)?;
+                self.stack.push(class);
             }
             Opcode::Call => {
                 let count = usize::from(self.operand_u8());
@@ -763,8 +910,17 @@ impl<'p> Vm<'p> {
             }
             Opcode::ReturnUndefined => return Ok(Step::Return(JsValue::Undefined)),
             Opcode::SuperCall => {
-                let _ = self.operand_u8();
-                return Err(self.internal_error("super calls are not compiled yet"));
+                let count = usize::from(self.operand_u8());
+                let start = self.stack.len() - count;
+                let args: Vec<JsValue> = self.stack.drain(start..).collect();
+                let this = self.super_call(args)?;
+                self.stack.push(this);
+            }
+            Opcode::SuperCallSpread => {
+                let array = self.pop();
+                let args = self.array_to_vec(array)?;
+                let this = self.super_call(args)?;
+                self.stack.push(this);
             }
             Opcode::Throw => {
                 let value = self.pop();
@@ -979,10 +1135,13 @@ impl<'p> Vm<'p> {
 
     fn tdz_error(&mut self, name: AtomId) -> Throw {
         let name = self.session.interns.atom(name).to_string_lossy();
-        self.throw_error(
-            ErrorKind::ReferenceError,
-            &format!("Cannot access '{name}' before initialization"),
-        )
+        let message = if name == "this" {
+            "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"
+                .to_owned()
+        } else {
+            format!("Cannot access '{name}' before initialization")
+        };
+        self.throw_error(ErrorKind::ReferenceError, &message)
     }
 
     /// A VM invariant failed: surfaces as a generic `Error` so the feed ends

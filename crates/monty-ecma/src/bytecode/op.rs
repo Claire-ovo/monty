@@ -152,12 +152,21 @@ pub(crate) enum Opcode {
     DefineOwn = 88,
     /// `obj key value` → `obj`.
     DefineOwnElem = 89,
-    /// Define a getter or setter: `obj key fn` → `obj`. Operand: u8 (0 getter, 1 setter).
+    /// Define a getter or setter: `obj key fn` → `obj`. Operand: u8 flags
+    /// (bit 0: setter, bit 1: non-enumerable, as class accessors are).
     DefineAccessor = 90,
     /// Copy own enumerable properties: `obj source` → `obj` (`{...x}`).
     CopyDataProperties = 91,
     /// Define `__proto__: v` in a literal: `obj proto` → `obj`.
     SetPrototype = 92,
+    /// Define a non-enumerable method (class bodies): `obj fn` → `obj`. Operand: u16 name atom.
+    DefineMethod = 93,
+    /// `obj key fn` → `obj`.
+    DefineMethodElem = 94,
+    /// Record a class's instance field initializer: `class fn` → `class`.
+    SetFieldInitializer = 95,
+    /// Push `Object.getPrototypeOf(home object)` for `super.x`.
+    LoadSuperBase = 96,
 
     // === Objects, arrays, functions ===
     /// Push a new empty object with `Object.prototype`.
@@ -179,7 +188,8 @@ pub(crate) enum Opcode {
     LoadThis = 107,
     /// Build a template string from the top u8 values with `ToString`. Operand: u8 count.
     TemplateConcat = 108,
-    /// Build a class: `parent_or_hole ctor_fn` → `class`. Operand: u8 flags (1 = has parent).
+    /// Build a class: `parent ctor_fn` → `class`, where `parent` is the hole
+    /// for a class without `extends`.
     MakeClass = 109,
 
     // === Calls ===
@@ -195,8 +205,10 @@ pub(crate) enum Opcode {
     Return = 114,
     /// Return `undefined`.
     ReturnUndefined = 115,
-    /// `this` of a `super(...)` call in a derived constructor: `args…` → `this`.
+    /// `this` of a `super(...)` call in a derived constructor: `args…` → `this`. Operand: u8 argument count.
     SuperCall = 116,
+    /// `super(...args)`: `args_array` → `this`.
+    SuperCallSpread = 117,
 
     // === Exceptions ===
     /// Throw the top value.
@@ -300,6 +312,11 @@ impl Opcode {
             | Self::DefineOwnElem
             | Self::CopyDataProperties
             | Self::SetPrototype
+            | Self::DefineMethodElem
+            | Self::SetFieldInitializer
+            | Self::LoadSuperBase
+            | Self::MakeClass
+            | Self::SuperCallSpread
             | Self::NewObject
             | Self::ArrayPush
             | Self::ArrayPushHole
@@ -319,7 +336,7 @@ impl Opcode {
             | Self::ToPropertyKey
             | Self::Nop => OperandShape::None,
             Self::LoadInt | Self::IncDec => OperandShape::I8,
-            Self::DefineAccessor | Self::TemplateConcat | Self::MakeClass | Self::Call | Self::New => OperandShape::U8,
+            Self::DefineAccessor | Self::TemplateConcat | Self::Call | Self::New => OperandShape::U8,
             Self::SuperCall => OperandShape::U8,
             Self::LoadConst
             | Self::LoadLocal
@@ -339,6 +356,7 @@ impl Opcode {
             | Self::SetProp
             | Self::DeleteProp
             | Self::DefineOwn
+            | Self::DefineMethod
             | Self::NewArray
             | Self::MakeClosure
             | Self::MakeMethod

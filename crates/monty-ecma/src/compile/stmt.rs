@@ -175,7 +175,11 @@ impl<'c> Compiler<'c> {
                     }
                 }
             }
-            Statement::ClassDeclaration(class) => Err(CompileError::unsupported("classes", Self::span_of(&**class))),
+            Statement::ClassDeclaration(class) => {
+                // `compile_class` binds the name itself, before the static elements run
+                self.compile_class(class, None)?;
+                self.builder().emit(Opcode::Pop)
+            }
             Statement::WithStatement(statement) => Err(CompileError::syntax(
                 "'with' statements are not allowed in strict mode",
                 Self::span_of(&**statement),

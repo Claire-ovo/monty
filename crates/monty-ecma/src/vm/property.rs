@@ -369,7 +369,14 @@ impl Vm<'_> {
     }
 
     /// Defines a getter or setter, merging with an existing accessor pair.
-    pub fn define_accessor(&mut self, object: HeapId, key: PropertyKey, function: JsValue, is_setter: bool) {
+    pub fn define_accessor(
+        &mut self,
+        object: HeapId,
+        key: PropertyKey,
+        function: JsValue,
+        is_setter: bool,
+        enumerable: bool,
+    ) {
         let existing = self
             .object_mut(object)
             .and_then(|target| target.props.shift_remove(&key));
@@ -387,15 +394,13 @@ impl Vm<'_> {
             mem::replace(&mut getter, function)
         };
         replaced.drop_with(&mut self.session.heap);
+        let flags = if enumerable {
+            PropFlags::ALL.read_only()
+        } else {
+            PropFlags::HIDDEN.read_only()
+        };
         if let Some(target) = self.object_mut(object) {
-            target.props.insert(
-                key,
-                Slot::Accessor {
-                    getter,
-                    setter,
-                    flags: PropFlags::ALL.read_only(),
-                },
-            );
+            target.props.insert(key, Slot::Accessor { getter, setter, flags });
         }
     }
 

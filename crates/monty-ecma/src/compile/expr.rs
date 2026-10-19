@@ -53,11 +53,14 @@ impl<'c> Compiler<'c> {
             }
             Expression::TemplateLiteral(template) => self.compile_template(template),
             Expression::Identifier(ident) => self.compile_identifier(ident),
-            Expression::ThisExpression(_) => match self.resolve_this()? {
+            Expression::ThisExpression(_) => self.emit_this(),
+            Expression::NewTarget(_) => match self.resolve_new_target()? {
                 None => self.builder().emit(Opcode::LoadUndefined),
                 Some(Place::Local(slot)) => self.builder().emit_u16(Opcode::LoadLocal, slot),
                 Some(Place::Cell(slot)) => self.builder().emit_u16(Opcode::LoadCell, slot),
-                Some(Place::Script(_) | Place::Global) => Err(CompileError::internal("this resolved to a global")),
+                Some(Place::Script(_) | Place::Global) => {
+                    Err(CompileError::internal("new.target resolved to a global"))
+                }
             },
             Expression::ArrayExpression(array) => {
                 let plain = !array.elements.iter().any(|element| {
@@ -157,7 +160,7 @@ impl<'c> Compiler<'c> {
                     Member::Computed => self.builder().emit(Opcode::GetElem),
                 }
             }
-            Expression::ClassExpression(class) => Err(CompileError::unsupported("classes", Self::span_of(&**class))),
+            Expression::ClassExpression(class) => self.compile_class(class, name),
             Expression::AwaitExpression(_) => Err(CompileError::unsupported("async functions", Self::span_of(expr))),
             Expression::YieldExpression(_) => Err(CompileError::unsupported("generators", Self::span_of(expr))),
             Expression::RegExpLiteral(_) => Err(CompileError::unsupported("regular expressions", Self::span_of(expr))),
@@ -165,8 +168,10 @@ impl<'c> Compiler<'c> {
             Expression::TaggedTemplateExpression(_) => {
                 Err(CompileError::unsupported("tagged templates", Self::span_of(expr)))
             }
-            Expression::Super(_) => Err(CompileError::unsupported("super", Self::span_of(expr))),
-            Expression::NewTarget(_) => Err(CompileError::unsupported("new.target", Self::span_of(expr))),
+            Expression::Super(_) => Err(CompileError::syntax(
+                "'super' keyword unexpected here",
+                Self::span_of(expr),
+            )),
             Expression::ImportExpression(_) => Err(CompileError::unsupported("dynamic import", Self::span_of(expr))),
             Expression::ImportMeta(_) => Err(CompileError::unsupported("import.meta", Self::span_of(expr))),
             Expression::PrivateInExpression(_) => Err(CompileError::unsupported("private fields", Self::span_of(expr))),
@@ -182,6 +187,23 @@ impl<'c> Compiler<'c> {
             | Expression::V8IntrinsicExpression(_) => {
                 Err(CompileError::unsupported("TypeScript syntax", Self::span_of(expr)))
             }
+        }
+    }
+
+    /// Reads `this`: `undefined` in module code, the receiver slot otherwise,
+    /// checked for the dead zone in a derived constructor.
+    pub(super) fn emit_this(&mut self) -> Result<(), CompileError> {
+        let derived = self.in_derived_constructor();
+        let this_atom = atom_operand(self.intern_str("this"))?;
+        match self.resolve_this()? {
+            None => self.builder().emit(Opcode::LoadUndefined),
+            Some(Place::Local(slot)) if derived => {
+                self.builder().emit_u16_u16(Opcode::LoadLocalChecked, slot, this_atom)
+            }
+            Some(Place::Cell(slot)) if derived => self.builder().emit_u16_u16(Opcode::LoadCellChecked, slot, this_atom),
+            Some(Place::Local(slot)) => self.builder().emit_u16(Opcode::LoadLocal, slot),
+            Some(Place::Cell(slot)) => self.builder().emit_u16(Opcode::LoadCell, slot),
+            Some(Place::Script(_) | Place::Global) => Err(CompileError::internal("this resolved to a global")),
         }
     }
 
@@ -239,6 +261,17 @@ impl<'c> Compiler<'c> {
         function: &'c Function<'c>,
         name: AtomId,
     ) -> Result<FunctionId, CompileError> {
+        self.compile_function_as(function, name, FunctionKind::Normal)
+    }
+
+    /// Compiles a function with an explicit kind: a method, getter, setter or
+    /// class constructor.
+    pub(super) fn compile_function_as(
+        &mut self,
+        function: &'c Function<'c>,
+        name: AtomId,
+        kind: FunctionKind,
+    ) -> Result<FunctionId, CompileError> {
         if function.r#async || function.generator {
             let feature = if function.generator {
                 "generators"
@@ -257,7 +290,7 @@ impl<'c> Compiler<'c> {
             _ => None,
         };
         self.compile_function(FunctionSpec {
-            kind: FunctionKind::Normal,
+            kind,
             scope,
             name,
             span: function.span,
@@ -297,14 +330,14 @@ impl<'c> Compiler<'c> {
     pub(super) fn compile_member_target(&mut self, member: &'c MemberExpression<'c>) -> Result<Member, CompileError> {
         match member {
             MemberExpression::StaticMemberExpression(member) => {
-                self.compile_expression(&member.object)?;
+                self.compile_member_object(&member.object)?;
                 self.emit_optional_link(member.optional, 1)?;
                 self.locate(member.span);
                 let atom = self.intern_str(member.property.name.as_str());
                 Ok(Member::Static(atom_operand(atom)?))
             }
             MemberExpression::ComputedMemberExpression(member) => {
-                self.compile_expression(&member.object)?;
+                self.compile_member_object(&member.object)?;
                 self.emit_optional_link(member.optional, 1)?;
                 self.compile_expression(&member.expression)?;
                 self.locate(member.span);
@@ -316,6 +349,21 @@ impl<'c> Compiler<'c> {
         }
     }
 
+    /// The object of a member expression; `super.x` reads from the home
+    /// object's prototype.
+    fn compile_member_object(&mut self, object: &'c Expression<'c>) -> Result<(), CompileError> {
+        if let Expression::Super(_) = object {
+            if !self.in_method() {
+                return Err(CompileError::syntax(
+                    "'super' keyword unexpected here",
+                    Self::span_of(object),
+                ));
+            }
+            return self.builder().emit(Opcode::LoadSuperBase);
+        }
+        self.compile_expression(object)
+    }
+
     /// `callee this args… Call n`, with the receiver of a method call.
     fn compile_call(&mut self, call: &'c CallExpression<'c>) -> Result<(), CompileError> {
         match &call.callee {
@@ -323,15 +371,27 @@ impl<'c> Compiler<'c> {
             | Expression::ComputedMemberExpression(_)
             | Expression::PrivateFieldExpression(_) => {
                 let member = call.callee.to_member_expression();
+                let on_super = matches!(member.object(), Expression::Super(_));
                 match self.compile_member_target(member)? {
+                    Member::Static(atom) if on_super => self.builder().emit_u16(Opcode::GetProp, atom)?,
                     Member::Static(atom) => self.builder().emit_u16(Opcode::GetPropKeep, atom)?,
+                    Member::Computed if on_super => self.builder().emit(Opcode::GetElem)?,
                     Member::Computed => self.builder().emit(Opcode::GetElemKeep)?,
                 }
-                // `obj fn` → `fn obj`
-                self.builder().emit(Opcode::Swap)?;
+                if on_super {
+                    // `super.m(...)` runs with the current `this`
+                    self.emit_this()?;
+                } else if matches!(member, MemberExpression::ComputedMemberExpression(_)) {
+                    // `obj key fn` → `fn obj key` → `fn obj`
+                    self.builder().emit(Opcode::Rot3)?;
+                    self.builder().emit(Opcode::Pop)?;
+                } else {
+                    // `obj fn` → `fn obj`
+                    self.builder().emit(Opcode::Swap)?;
+                }
                 self.emit_optional_link(call.optional, 2)?;
             }
-            Expression::Super(_) => return Err(CompileError::unsupported("super", Self::span_of(call))),
+            Expression::Super(_) => return self.compile_super_call(call),
             callee => {
                 self.compile_expression(callee)?;
                 self.emit_optional_link(call.optional, 1)?;
@@ -348,6 +408,35 @@ impl<'c> Compiler<'c> {
             let count = self.compile_arguments(&call.arguments)?;
             self.builder().set_callee(callee);
             self.builder().emit_u8(Opcode::Call, count)
+        }
+    }
+
+    /// `super(...)` in a derived constructor: constructs the parent and
+    /// initializes `this`.
+    fn compile_super_call(&mut self, call: &'c CallExpression<'c>) -> Result<(), CompileError> {
+        let direct = self
+            .funcs
+            .last()
+            .is_some_and(|state| state.kind.is_derived_constructor());
+        if !self.in_derived_constructor() {
+            return Err(CompileError::syntax(
+                "'super' keyword unexpected here",
+                Self::span_of(call),
+            ));
+        }
+        if !direct {
+            return Err(CompileError::unsupported(
+                "super() inside an arrow function",
+                Self::span_of(call),
+            ));
+        }
+        self.locate(call.span);
+        if has_spread(&call.arguments) {
+            self.compile_spread_arguments(&call.arguments)?;
+            self.builder().emit(Opcode::SuperCallSpread)
+        } else {
+            let count = self.compile_arguments(&call.arguments)?;
+            self.builder().emit_u8(Opcode::SuperCall, count)
         }
     }
 
@@ -759,7 +848,7 @@ impl<'c> Compiler<'c> {
                         PropertyKind::Init if property.method => {
                             let function = method_function(&property.value)?;
                             let name = key.name_hint();
-                            let id = self.compile_function_node(function, name)?;
+                            let id = self.compile_function_as(function, name, FunctionKind::Method)?;
                             self.emit_method(id)?;
                             match key {
                                 LiteralKey::Static(atom) => self.builder().emit_u16(Opcode::DefineOwn, atom)?,
@@ -795,7 +884,7 @@ impl<'c> Compiler<'c> {
                         PropertyKind::Get | PropertyKind::Set => {
                             let function = method_function(&property.value)?;
                             let name = key.name_hint();
-                            let id = self.compile_function_node(function, name)?;
+                            let id = self.compile_function_as(function, name, FunctionKind::Method)?;
                             self.emit_method(id)?;
                             match key {
                                 LiteralKey::Static(atom) => self.emit_atom(AtomId::from_u16(atom))?,
@@ -814,7 +903,7 @@ impl<'c> Compiler<'c> {
     }
 
     /// `MakeMethod` on the object at the top of the stack.
-    fn emit_method(&mut self, id: FunctionId) -> Result<(), CompileError> {
+    pub(super) fn emit_method(&mut self, id: FunctionId) -> Result<(), CompileError> {
         let operand = id.as_u16().ok_or(CompileError::TooManyConstants)?;
         self.builder().emit_u16(Opcode::MakeMethod, operand)
     }

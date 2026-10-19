@@ -9,7 +9,7 @@
 use std::cell::Cell;
 
 use ahash::{AHashMap, AHashSet};
-use oxc_ast::ast::{IdentifierReference, NewTarget, Program, ThisExpression};
+use oxc_ast::ast::{IdentifierReference, NewTarget, Program, PropertyDefinition, ThisExpression};
 use oxc_ast_visit::{Visit, walk};
 use oxc_semantic::Scoping;
 use oxc_syntax::{
@@ -40,19 +40,23 @@ pub(crate) struct FunctionFacts {
     pub arguments_captured: bool,
     /// `new.target` is read in the body (or an arrow inside it).
     pub uses_new_target: bool,
+    /// An arrow inside the body reads `new.target`, so the slot must be a cell.
+    pub new_target_captured: bool,
 }
 
 impl Analysis {
     /// Derives the facts for an annotated program.
     pub fn new(program: &Program<'_>, scoping: Scoping) -> Self {
-        let captured = captured_symbols(&scoping);
         let mut visitor = FactsVisitor {
             scoping: &scoping,
             functions: AHashMap::new(),
             scopes: Vec::new(),
+            field_class: Vec::new(),
+            captured: captured_symbols(&scoping),
         };
         visitor.visit_program(program);
         let functions = visitor.functions;
+        let captured = visitor.captured;
         Self {
             scoping,
             captured,
@@ -70,7 +74,8 @@ impl Analysis {
         self.functions.get(&scope).copied().unwrap_or_default()
     }
 
-    /// The nearest enclosing scope (`scope` included) that is a function or the module.
+    /// The nearest enclosing scope (`scope` included) that is a function, a
+    /// class static block or the module.
     pub fn function_scope(&self, scope: ScopeId) -> ScopeId {
         function_scope(&self.scoping, scope, true)
     }
@@ -89,13 +94,15 @@ fn captured_symbols(scoping: &Scoping) -> AHashSet<SymbolId> {
         .collect()
 }
 
-/// Walks up from `scope` to the nearest function or module scope. With
-/// `arrows` false, arrow functions are skipped: they have no `this` of their own.
+/// Walks up from `scope` to the nearest function, class static block or
+/// module scope. With `arrows` false, arrow functions are skipped: they have
+/// no `this` of their own.
 fn function_scope(scoping: &Scoping, scope: ScopeId, arrows: bool) -> ScopeId {
     let mut current = scope;
     loop {
         let flags = scoping.scope_flags(current);
-        let is_boundary = flags.is_top() || (flags.is_function() && (arrows || !flags.is_arrow()));
+        let is_boundary =
+            flags.is_top() || flags.is_class_static_block() || (flags.is_function() && (arrows || !flags.is_arrow()));
         if is_boundary {
             return current;
         }
@@ -103,12 +110,19 @@ fn function_scope(scoping: &Scoping, scope: ScopeId, arrows: bool) -> ScopeId {
     }
 }
 
-/// Records `this` / `arguments` / `new.target` use against the owning function.
+/// Records `this` / `arguments` / `new.target` use against the owning
+/// function, and the extra captures class field initializers need.
 struct FactsVisitor<'s> {
     scoping: &'s Scoping,
     functions: AHashMap<ScopeId, FunctionFacts>,
     /// Scopes entered so far, innermost last.
     scopes: Vec<ScopeId>,
+    /// The class whose field initializer is being visited, innermost last.
+    /// Initializers compile to a synthetic method keyed by the class scope,
+    /// so `this` inside them belongs to that key and outer bindings they
+    /// read are captured.
+    field_class: Vec<ScopeId>,
+    captured: AHashSet<SymbolId>,
 }
 
 impl FactsVisitor<'_> {
@@ -116,9 +130,23 @@ impl FactsVisitor<'_> {
     /// arrow sits between it and the position.
     fn owner(&self) -> Option<(ScopeId, bool)> {
         let current = *self.scopes.last()?;
-        let owner = function_scope(self.scoping, current, false);
-        let through_arrow = function_scope(self.scoping, current, true) != owner;
-        Some((owner, through_arrow))
+        let mut owner = function_scope(self.scoping, current, false);
+        let innermost = function_scope(self.scoping, current, true);
+        if let Some(class) = self.field_class.last()
+            && !self.inside(owner, *class)
+        {
+            // a field initializer: `this` is the instance (or the class), reached
+            // through an arrow only when that arrow sits inside the initializer
+            let through_arrow = self.scoping.scope_flags(innermost).is_arrow() && self.inside(innermost, *class);
+            owner = *class;
+            return Some((owner, through_arrow));
+        }
+        Some((owner, innermost != owner))
+    }
+
+    /// Whether `scope` is `ancestor` or nested inside it.
+    fn inside(&self, scope: ScopeId, ancestor: ScopeId) -> bool {
+        scope == ancestor || self.scoping.scope_is_descendant_of(scope, ancestor)
     }
 
     fn facts(&mut self, scope: ScopeId) -> &mut FunctionFacts {
@@ -146,18 +174,36 @@ impl<'a> Visit<'a> for FactsVisitor<'_> {
     }
 
     fn visit_new_target(&mut self, it: &NewTarget) {
-        if let Some((owner, _)) = self.owner() {
-            self.facts(owner).uses_new_target = true;
+        if let Some((owner, through_arrow)) = self.owner() {
+            let facts = self.facts(owner);
+            facts.uses_new_target = true;
+            facts.new_target_captured |= through_arrow;
         }
         walk::walk_new_target(self, it);
     }
 
+    fn visit_property_definition(&mut self, it: &PropertyDefinition<'a>) {
+        // the class scope is the innermost scope entered when the body is visited
+        if let Some(class) = self.scopes.last().copied() {
+            self.field_class.push(class);
+            walk::walk_property_definition(self, it);
+            self.field_class.pop();
+        }
+    }
+
     fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
-        // `arguments` is never a declared symbol unless shadowed, in which case oxc resolves it
-        let unresolved = it
+        let symbol = it
             .reference_id
             .get()
-            .is_none_or(|id| self.scoping.get_reference(id).symbol_id().is_none());
+            .and_then(|id| self.scoping.get_reference(id).symbol_id());
+        // a field initializer runs as its own function: outer bindings it reads live in cells
+        if let (Some(symbol), Some(class)) = (symbol, self.field_class.last().copied()) {
+            let home = function_scope(self.scoping, self.scoping.symbol_scope_id(symbol), true);
+            if !self.inside(home, class) {
+                self.captured.insert(symbol);
+            }
+        }
+        let unresolved = symbol.is_none();
         if unresolved
             && it.name.as_str() == "arguments"
             && let Some((owner, through_arrow)) = self.owner()

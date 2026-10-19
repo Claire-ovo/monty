@@ -308,6 +308,9 @@ pub(crate) enum FunctionObject {
         cells: Box<[HeapId]>,
         /// The object a method was defined on, for `super` property access.
         home_object: Option<HeapId>,
+        /// A class constructor's instance field initializer (an owned
+        /// reference), run on every new instance.
+        fields: Option<HeapId>,
     },
     /// A builtin implemented in Rust.
     Native(NativeFn),
@@ -322,12 +325,20 @@ pub(crate) enum FunctionObject {
 impl FunctionObject {
     fn for_each_child(&self, mut on_child: impl FnMut(HeapId)) {
         match self {
-            Self::Closure { cells, home_object, .. } => {
+            Self::Closure {
+                cells,
+                home_object,
+                fields,
+                ..
+            } => {
                 for cell in cells {
                     on_child(*cell);
                 }
                 if let Some(home) = home_object {
                     on_child(*home);
+                }
+                if let Some(fields) = fields {
+                    on_child(*fields);
                 }
             }
             Self::Native(_) => {}
@@ -347,15 +358,21 @@ impl FunctionObject {
 
     fn dec_ref_ids(&mut self, stack: &mut Vec<HeapId>) {
         match self {
-            Self::Closure { cells, home_object, .. } => {
+            Self::Closure {
+                cells,
+                home_object,
+                fields,
+                ..
+            } => {
                 stack.extend(cells.iter().copied());
                 stack.extend(home_object.take());
+                stack.extend(fields.take());
             }
             Self::Native(_) => {}
             Self::Bound { target, this, args } => {
                 stack.push(*target);
                 stack.extend(mem::replace(this, JsValue::Undefined).heap_id());
-                stack.extend(args.iter().filter_map(super::value::JsValue::heap_id));
+                stack.extend(args.iter().filter_map(JsValue::heap_id));
             }
         }
     }
