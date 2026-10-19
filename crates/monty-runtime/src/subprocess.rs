@@ -17,7 +17,7 @@ use std::{io, panic, process::ExitCode, thread};
 
 use monty_proto::{
     FrameError, FrameReader, pb,
-    worker::{Child, EventSink, HandleOutcome, fatal_error_event, protocol_violation},
+    worker::{EventSink, HandleOutcome, fatal_error_event, protocol_violation, python::PythonChild},
     write_frame,
 };
 use monty_types::memory_limit_with_headroom;
@@ -50,7 +50,7 @@ pub(crate) fn run() -> ExitCode {
 fn serve() -> ExitCode {
     install_panic_hook();
     let mut reader = FrameReader::new(io::stdin().lock());
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     let mut sink = StdoutSink;
 
     loop {
@@ -110,7 +110,7 @@ fn serve() -> ExitCode {
 /// limits capped by the destination policy, and `Reset` ends the session. It lives in the shell rather than
 /// in the shared state machine because each entry point declares its own
 /// allocator: the wasm worker does the same thing in its own turn loop.
-fn apply_memory_limit(child: &Child) {
+fn apply_memory_limit(child: &PythonChild) {
     let budget = child.session_budget();
     let hard_memory_limit = memory_limit_with_headroom(budget.max_memory, budget.type_check);
     monty_alloc::set_hard_limit(hard_memory_limit).expect("monty-runtime must install LimitedAllocator globally");
@@ -131,7 +131,7 @@ impl EventSink for StdoutSink {
 /// Emits a best-effort `FatalError` event, duplicated to stderr. Used only for
 /// unrecoverable conditions detected by the shell — the child exits right
 /// after.
-fn fatal(child: &Child, sink: &mut impl EventSink, message: &str) {
+fn fatal(child: &PythonChild, sink: &mut impl EventSink, message: &str) {
     eprintln!("monty subprocess fatal error: {message}");
     let _ = sink.send(&child.fatal_event(message));
 }

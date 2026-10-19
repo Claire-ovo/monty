@@ -11,7 +11,7 @@ use std::{cell::RefCell, collections::hash_map::RandomState, io, time::Instant};
 use monty_proto::{
     BudgetVec, DEFAULT_MAX_DECODE_BYTES, FrameError, MAX_FRAME_LEN, PROTOCOL_VERSION, WireArena, exceeds_max_frame_len,
     os_call_from_proto, pb,
-    worker::{Child, EventSink, HandleOutcome, protocol_violation},
+    worker::{EventSink, HandleOutcome, protocol_violation, python::PythonChild},
 };
 use monty_types::{
     CallArgs, ExcType, MONTY_VERSION, MontyException, MontyUuid, OsFunctionCall, memory_limit_with_headroom,
@@ -37,7 +37,7 @@ use bindings::exports::pydantic::monty::worker::{
 
 thread_local! {
     /// The session worker, retained for the lifetime of this component instance.
-    static CHILD: RefCell<Child> = RefCell::new(new_child());
+    static CHILD: RefCell<PythonChild> = RefCell::new(new_child());
 }
 
 /// Builds the worker after warming the WASI adapter, so the adapter's buffers
@@ -46,10 +46,10 @@ thread_local! {
 /// The preview1 adapter allocates through the component's allocator on the
 /// first clock read and the first `random_get`, both of which the interpreter
 /// would otherwise make during its first feed, after the allocator is armed.
-fn new_child() -> Child {
+fn new_child() -> PythonChild {
     let _ = Instant::now();
     let _ = RandomState::new();
-    Child::default()
+    PythonChild::default()
 }
 
 /// Counts component allocations against the session's `max_memory` limit.
@@ -88,7 +88,7 @@ impl Guest for Component {
 }
 
 /// Handles one semantic request while preserving the protocol child's limits.
-fn dispatch(child: &mut Child, request: Request) -> DispatchResult {
+fn dispatch(child: &mut PythonChild, request: Request) -> DispatchResult {
     let request = match request_from_component(request) {
         Ok(request) => request,
         Err(error) => {

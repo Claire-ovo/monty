@@ -8,7 +8,7 @@
 use monty::{Dump, MIN_SUPPORTED_DUMP_VERSION, MontyRepl, ReplProgress, SessionRef, dump};
 use monty_proto::{
     FrameReader, PROTOCOL_VERSION, WireArena, WireFunctionCall, named_values_to_proto, pb,
-    worker::{Child, HandleOutcome, dispatch_frame},
+    worker::{HandleOutcome, dispatch_frame, python::PythonChild},
     write_frame,
 };
 use monty_types::{
@@ -17,7 +17,7 @@ use monty_types::{
 };
 
 /// Starts a feed with `f` already bound, leaving the worker at its first external call.
-fn start_external_call(child: &mut Child, code: &str) -> WireFunctionCall {
+fn start_external_call(child: &mut PythonChild, code: &str) -> WireFunctionCall {
     create_repl(child);
     let inputs = NamedValues::from(vec![("f".to_owned(), MontyObject::function("f".to_owned(), None))]);
     let (inputs, values) = named_values_to_proto(inputs);
@@ -61,7 +61,7 @@ fn arena(value: MontyObject) -> WireArena {
 /// Each eager reply advances directly to the next call or completion.
 #[test]
 fn allow_eager_await_uses_one_reply_per_call() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     let mut call = start_external_call(&mut child, "a = await f()\nb = await f()\na + b");
     for n in [10, 20] {
         assert!(call.allow_eager_await);
@@ -89,7 +89,7 @@ fn allow_eager_await_uses_one_reply_per_call() {
 /// Invalid eager replies leave the suspension available for a valid retry.
 #[test]
 fn allow_eager_await_rejects_malformed_replies() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     let call = start_external_call(&mut child, "await f()");
     assert!(call.allow_eager_await);
     let value = pb::ext_function_result::Kind::ReturnValue(0);
@@ -132,7 +132,7 @@ fn allow_eager_await_rejects_malformed_replies() {
 /// Older hosts can ignore the hint; calls without the hint reject the new reply sequence.
 #[test]
 fn allow_eager_await_preserves_legacy_replies() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     let call = start_external_call(&mut child, "await f()");
     let request = frame_request(pb::parent_request::Kind::ResumeCall(pb::ResumeCall {
         call_id: call.call_id,
@@ -151,7 +151,7 @@ fn allow_eager_await_preserves_legacy_replies() {
     let (bytes, _) = dispatch_frame(&mut child, &request);
     assert_eq!(expect_complete(split_turn(&bytes).1), MontyObject::int(42));
 
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     let call = start_external_call(&mut child, "f()");
     assert!(!call.allow_eager_await);
     let request = frame_request(pb::parent_request::Kind::ResumeFutures(resume_futures(
@@ -208,12 +208,12 @@ fn split_turn(bytes: &[u8]) -> (Vec<pb::Print>, pb::child_event::Kind) {
     (prints, last)
 }
 
-fn create_repl(child: &mut Child) {
+fn create_repl(child: &mut PythonChild) {
     create_repl_with_flush_interval(child, None);
 }
 
 /// `create_repl`, naming the print flush interval the session runs with.
-fn create_repl_with_flush_interval(child: &mut Child, print_flush_interval_ms: Option<u32>) {
+fn create_repl_with_flush_interval(child: &mut PythonChild, print_flush_interval_ms: Option<u32>) {
     let request = frame_request(pb::parent_request::Kind::Configure(pb::Configure {
         script_name: "main.py".to_owned(),
         limits: None,
@@ -233,12 +233,12 @@ fn create_repl_with_flush_interval(child: &mut Child, print_flush_interval_ms: O
     );
 }
 
-fn feed(child: &mut Child, code: &str) -> (Vec<pb::Print>, pb::child_event::Kind) {
+fn feed(child: &mut PythonChild, code: &str) -> (Vec<pb::Print>, pb::child_event::Kind) {
     feed_with_cwd(child, code, "/")
 }
 
 /// [`feed`] with the wire `cwd`, where `""` keeps the session's working directory.
-fn feed_with_cwd(child: &mut Child, code: &str, cwd: &str) -> (Vec<pb::Print>, pb::child_event::Kind) {
+fn feed_with_cwd(child: &mut PythonChild, code: &str, cwd: &str) -> (Vec<pb::Print>, pb::child_event::Kind) {
     let request = frame_request(pb::parent_request::Kind::Feed(pb::Feed {
         code: code.to_owned(),
         inputs: vec![].into(),
@@ -277,7 +277,7 @@ fn expect_complete(event: pb::child_event::Kind) -> MontyObject {
 
 #[test]
 fn feed_round_trips_a_value() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl(&mut child);
 
     let (_, event) = feed(&mut child, "1 + 2");
@@ -286,7 +286,7 @@ fn feed_round_trips_a_value() {
 
 #[test]
 fn session_state_persists_across_feeds() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl(&mut child);
 
     let (_, first) = feed(&mut child, "x = 21");
@@ -298,7 +298,7 @@ fn session_state_persists_across_feeds() {
 
 #[test]
 fn print_output_is_streamed_before_the_terminator() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl(&mut child);
 
     let (prints, event) = feed(&mut child, "print('hello'); print('world')");
@@ -316,7 +316,7 @@ fn print_output_is_streamed_before_the_terminator() {
 /// debounce applies to mixed output as much as to plain stdout.
 #[test]
 fn alternating_streams_batch_into_one_event() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     // an interval no test will wait out leaves the flush to `drain`, so this
     // asserts how output is segmented rather than how the timer fires
     create_repl_with_flush_interval(&mut child, Some(60_000));
@@ -340,7 +340,7 @@ fn alternating_streams_batch_into_one_event() {
 /// wrote it, so a host that asked for line buffering gets one event per line.
 #[test]
 fn line_buffering_gives_each_line_its_own_event() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl_with_flush_interval(&mut child, Some(0));
 
     let (prints, event) = feed(&mut child, "import sys\nprint('a')\nprint('b', file=sys.stderr)");
@@ -359,7 +359,7 @@ fn line_buffering_gives_each_line_its_own_event() {
 /// trailing partial line waits for the drain at the end of the turn.
 #[test]
 fn line_buffering_keeps_a_line_spanning_the_streams_together() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl_with_flush_interval(&mut child, Some(0));
 
     let (prints, event) = feed(
@@ -378,7 +378,7 @@ fn line_buffering_keeps_a_line_spanning_the_streams_together() {
 
 #[test]
 fn inputs_are_injected() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl(&mut child);
 
     let (inputs, values) = named_values_to_proto(NamedValues::from(vec![("n".to_owned(), MontyObject::int(41))]));
@@ -397,7 +397,7 @@ fn inputs_are_injected() {
 
 #[test]
 fn malformed_request_frame_is_recoverable() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     // a length prefix claiming bytes that aren't there: structurally broken
     // framing, not a decode error
     let (bytes, outcome) = dispatch_frame(&mut child, &[0xff, 0xff, 0xff, 0x7f]);
@@ -410,7 +410,7 @@ fn malformed_request_frame_is_recoverable() {
 
 #[test]
 fn shutdown_request_reports_shutdown() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl(&mut child);
 
     let request = frame_request(pb::parent_request::Kind::Shutdown(pb::Shutdown {}));
@@ -431,7 +431,7 @@ fn load_rejects_old_dump_version() {
     let mut state = dump("main.py", None, &[], SessionRef::Idle(&repl)).expect("dumping an idle repl succeeds");
     state[6..8].copy_from_slice(&(MIN_SUPPORTED_DUMP_VERSION - 1).to_le_bytes());
 
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl(&mut child);
     let request = frame_request(pb::parent_request::Kind::Load(pb::Load { state: state.into() }));
     let (bytes, outcome) = dispatch_frame(&mut child, &request);
@@ -466,7 +466,7 @@ fn load_re_announces_deep_suspension_args() {
     );
     let state = dump("main.py", None, &[], SessionRef::Suspended(&progress)).expect("suspended dump");
 
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl(&mut child);
     let request = frame_request(pb::parent_request::Kind::Load(pb::Load { state: state.into() }));
     let (bytes, outcome) = dispatch_frame(&mut child, &request);
@@ -505,7 +505,7 @@ fn restore_caps_idle_and_suspended_resource_limits() {
             progress => SessionRef::Suspended(progress),
         };
         let state = dump("saved.py", None, &[], session).unwrap();
-        let mut child = Child::default();
+        let mut child = PythonChild::default();
         let configure = frame_request(pb::parent_request::Kind::Configure(pb::Configure {
             protocol_version: PROTOCOL_VERSION,
             monty_version: MONTY_VERSION.to_owned(),
@@ -550,7 +550,7 @@ fn decode_full_events(bytes: &[u8]) -> Vec<pb::ChildEvent> {
 /// `AbortFeed` raises the supplied error uncatchably and leaves the session usable.
 #[test]
 fn abort_feed_ends_a_suspended_feed_uncatchably() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl(&mut child);
     let (_, event) = feed(
         &mut child,
@@ -587,7 +587,7 @@ fn abort_feed_ends_a_suspended_feed_uncatchably() {
 /// `AbortFeed` is only meaningful while a feed is suspended.
 #[test]
 fn abort_feed_without_a_suspension_is_a_protocol_violation() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl(&mut child);
     let request = frame_request(pb::parent_request::Kind::AbortFeed(pb::AbortFeed {
         exception: Some(pb::RaisedException {
@@ -617,7 +617,7 @@ fn abort_feed_without_a_suspension_is_a_protocol_violation() {
 /// event, so a parent restoring a dump learns the budget it must enforce.
 #[test]
 fn turn_events_carry_the_suspension_budget() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     let request = frame_request(pb::parent_request::Kind::Configure(pb::Configure {
         script_name: "main.py".to_owned(),
         limits: Some(pb::ResourceLimits {
@@ -647,7 +647,7 @@ fn turn_events_carry_the_suspension_budget() {
 // Host modules: `import` and `import_stubs`
 // ---------------------------------------------------------------------------
 
-fn configure(child: &mut Child, type_check: bool) {
+fn configure(child: &mut PythonChild, type_check: bool) {
     let request = frame_request(pb::parent_request::Kind::Configure(pb::Configure {
         script_name: "main.py".to_owned(),
         type_check,
@@ -700,7 +700,7 @@ fn expect_import(event: pb::child_event::Kind) -> String {
 }
 
 fn answer_stubs(
-    child: &mut Child,
+    child: &mut PythonChild,
     result: pb::ext_function_result::Kind,
     values: Option<WireArena>,
 ) -> pb::child_event::Kind {
@@ -713,7 +713,7 @@ fn answer_stubs(
     split_turn(&bytes).1
 }
 
-fn answer_stubs_with(child: &mut Child, stubs: &[(&str, Option<&str>)]) -> pb::child_event::Kind {
+fn answer_stubs_with(child: &mut PythonChild, stubs: &[(&str, Option<&str>)]) -> pb::child_event::Kind {
     let answer = MontyObject::dict(stubs.iter().map(|(module, source)| {
         (
             MontyObject::string(*module),
@@ -731,7 +731,7 @@ fn answer_stubs_with(child: &mut Child, stubs: &[(&str, Option<&str>)]) -> pb::c
 /// The request names the first import; dotted answer keys define package stubs.
 #[test]
 fn a_type_checked_feed_asks_for_module_stubs_once() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, true);
     let (_, event) = feed(
         &mut child,
@@ -762,7 +762,7 @@ fn a_module_without_a_stub_is_asked_for_once() {
         Some(pb::ext_function_result::Kind::NotFound("import_stubs".to_owned())),
         Some(pb::ext_function_result::Kind::NotHandled(pb::Unit {})),
     ] {
-        let mut child = Child::default();
+        let mut child = PythonChild::default();
         configure(&mut child, true);
         let (_, event) = feed(&mut child, "import tools, other");
         assert_eq!(
@@ -789,7 +789,7 @@ fn a_module_without_a_stub_is_asked_for_once() {
 /// Built-in and checker-provided modules need no host stubs; unchecked feeds request none.
 #[test]
 fn only_host_modules_of_a_type_checked_feed_are_asked_for() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, true);
     let (_, event) = feed(&mut child, "import json, abc\nimport tools");
     assert_eq!(
@@ -799,7 +799,7 @@ fn only_host_modules_of_a_type_checked_feed_are_asked_for() {
     let event = answer_stubs_with(&mut child, &[("tools", Some(""))]);
     assert_eq!(expect_import(event), "abc");
 
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, true);
     let request = frame_request(pb::parent_request::Kind::Feed(pb::Feed {
         code: "import tools".to_owned(),
@@ -811,7 +811,7 @@ fn only_host_modules_of_a_type_checked_feed_are_asked_for() {
     let (bytes, _) = dispatch_frame(&mut child, &request);
     assert_eq!(expect_import(split_turn(&bytes).1), "tools");
 
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, false);
     let (_, event) = feed(&mut child, "import tools");
     assert_eq!(expect_import(event), "tools");
@@ -821,7 +821,7 @@ fn only_host_modules_of_a_type_checked_feed_are_asked_for() {
 /// before the stubs ask, even when the resumed check then rejects the feed.
 #[test]
 fn a_directory_switch_survives_a_typing_rejection_after_the_stubs_ask() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, true);
     let (_, event) = feed_with_cwd(&mut child, "import tools\ntools.add('x', 2)", "/work");
     assert_eq!(
@@ -837,7 +837,7 @@ fn a_directory_switch_survives_a_typing_rejection_after_the_stubs_ask() {
 /// Malformed answers leave the request pending; exception answers end it before execution.
 #[test]
 fn a_bad_stubs_answer_is_refused_and_an_exception_ends_the_feed() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, true);
     let (_, event) = feed(&mut child, "import tools");
     assert_eq!(
@@ -864,7 +864,7 @@ fn a_bad_stubs_answer_is_refused_and_an_exception_ends_the_feed() {
     // a dump cannot carry the held feed
     let request = frame_request(pb::parent_request::Kind::Dump(pb::Dump {}));
     let (bytes, _) = dispatch_frame(&mut child, &request);
-    insta::assert_snapshot!(expect_error_message(split_turn(&bytes).1), @"cannot dump while a feed awaits its module stubs");
+    insta::assert_snapshot!(expect_error_message(split_turn(&bytes).1), @"cannot dump while a feed awaits the host before it starts");
     let boom = MontyException::new(ExcType::ImportError, Some("boom".to_owned()));
     let event = answer_stubs(&mut child, pb::ext_function_result::Kind::Error((&boom).into()), None);
     insta::assert_snapshot!(expect_error_message(event), @"boom");
@@ -878,7 +878,7 @@ fn a_bad_stubs_answer_is_refused_and_an_exception_ends_the_feed() {
 
 #[test]
 fn abort_during_the_stubs_ask_ends_the_feed() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, true);
     let (_, event) = feed(&mut child, "import tools");
     assert_eq!(
@@ -898,7 +898,7 @@ fn abort_during_the_stubs_ask_ends_the_feed() {
 /// Restoring a suspended import re-announces it and accepts a module value.
 #[test]
 fn load_restores_a_suspended_import() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl(&mut child);
     let (_, event) = feed(&mut child, "import tools\ntools.x");
     assert_eq!(expect_import(event), "tools");
@@ -908,7 +908,7 @@ fn load_restores_a_suspended_import() {
         panic!("expected DumpResult");
     };
 
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     create_repl(&mut child);
     let request = frame_request(pb::parent_request::Kind::Load(pb::Load { state: result.state }));
     let (bytes, _) = dispatch_frame(&mut child, &request);
@@ -939,7 +939,7 @@ fn load_restores_a_suspended_import() {
 /// Dumps preserve both received stubs and modules answered without stubs.
 #[test]
 fn load_restores_the_received_module_stubs() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, true);
     let (_, event) = feed(&mut child, "import tools, other");
     assert_eq!(
@@ -954,7 +954,7 @@ fn load_restores_the_received_module_stubs() {
         panic!("expected DumpResult");
     };
 
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, true);
     let request = frame_request(pb::parent_request::Kind::Load(pb::Load { state: result.state }));
     let (bytes, _) = dispatch_frame(&mut child, &request);
@@ -968,7 +968,7 @@ fn load_restores_the_received_module_stubs() {
 /// Deduplication bounds the prelude across repeated feeds while preserving import order.
 #[test]
 fn a_repeated_import_is_carried_once() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, true);
     for code in ["import math", "import math\nimport json", "import math"] {
         let (_, event) = feed(&mut child, code);
@@ -989,7 +989,7 @@ fn a_repeated_import_is_carried_once() {
 /// The latest import binding determines the type seen by later feeds.
 #[test]
 fn a_repeated_import_rebinds_its_name() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, true);
     for code in ["import math as m", "import json as m", "import math as m"] {
         let (_, event) = feed(&mut child, code);
@@ -1003,7 +1003,7 @@ fn a_repeated_import_rebinds_its_name() {
 
 #[test]
 fn a_committed_import_carries_into_the_next_feed() {
-    let mut child = Child::default();
+    let mut child = PythonChild::default();
     configure(&mut child, true);
     let (_, event) = feed(&mut child, "import math as m");
     assert!(matches!(event, pb::child_event::Kind::Complete(_)), "{event:?}");

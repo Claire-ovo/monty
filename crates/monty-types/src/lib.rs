@@ -10,6 +10,7 @@ mod file_mode;
 pub mod format;
 mod graph;
 mod io;
+mod language;
 mod object;
 mod os;
 mod os_policy;
@@ -33,6 +34,7 @@ pub use crate::{
         COLLECT_STREAMS_ENTRY_OVERHEAD, CollectedStreams, DEFAULT_MAX_PRINT_COLLECT_BYTES, PrintStream, PrintWriter,
         PrintWriterCallback, check_print_collect_limit,
     },
+    language::Language,
     object::{
         CallArgs, ConversionError, InvalidInputError, MAX_TIMEZONE_OFFSET_SECONDS, MIN_TIMEZONE_OFFSET_SECONDS,
         MontyComplex, MontyDate, MontyDateTime, MontyFileHandle, MontyObject, MontyTime, MontyTimeDelta, MontyTimeZone,

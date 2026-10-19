@@ -50,7 +50,10 @@ python = ["dep:pyo3", "dep:strum"]
 # the interpreter. Off by default so host-side consumers (monty-pool, the
 # bindings) never link the interpreter itself.
 # `tzdb-bundled` so every worker resolves zone names; native binaries add `tzdb` for the OS copy.
-worker = ["dep:monty", "dep:monty-type-checking", "monty-types/tzdb-bundled"]
+worker = ["monty-types/tzdb-bundled"]
+# Enables `worker::python`: the Python interpreter as the child's `Engine`. The
+# JavaScript runtime enables `worker` alone and brings its own engine.
+worker-python = ["worker", "dep:monty", "dep:monty-type-checking"]
 
 [[bin]]
 name = "generate-proto"
@@ -61,7 +64,7 @@ required-features = ["generate"]
 # exists with the `worker` feature; run with `cargo test --features worker`.
 [[test]]
 name = "dispatch"
-required-features = ["worker"]
+required-features = ["worker-python"]
 
 [dev-dependencies]
 allocation-counter = "0.8"

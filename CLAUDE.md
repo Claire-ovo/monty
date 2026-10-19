@@ -30,11 +30,12 @@ are re-exported inline where they appear in `monty`'s public API (e.g.
 Code needing `MontyObject`, `MontyException`, `OsFunctionCall`, etc. must
 depend on `monty-types` directly.
 
-Host-side crates (`monty-fs`, `monty-pool`, `monty-proto` without its `worker`
+Host-side crates (`monty-fs`, `monty-pool`, `monty-proto` without its `worker-python`
 feature, `monty-python`, `monty-js`) MUST depend on `monty-types`, NOT `monty` —
 this keeps the interpreter out of their binaries. Only the worker side
-(`monty-runtime`, `monty-wasm-runtime`, `monty-proto` with `worker`) links the
-interpreter. Don't add a `monty` dependency to a host-side crate; if it needs a
+(`monty-runtime`, `monty-wasm-runtime`, `monty-proto` with `worker-python`) links the
+interpreter; `monty-proto`'s plain `worker` feature is the language-neutral child
+state machine and still depends only on `monty-types`. Don't add a `monty` dependency to a host-side crate; if it needs a
 type, that type belongs in `monty-types`.
 
 Interpreter-coupled methods on these types live in `monty` as `pub(crate)`
@@ -174,9 +175,16 @@ subprocesses:
     New allocation forms must extend the adapter and its tests; codegen rejects
     unsupported maps, groups, generated boxes, `Bytes` fields and repeated enums
     (prost's enum accessors require infallible `push`).
-    `monty-proto` depends only on `monty-types` by default; its `worker` feature
-    (enabled by `monty-runtime`/`monty-wasm-runtime`) pulls in the full `monty`
-    interpreter for the child-side `worker` state machine.
+    `monty-proto` depends only on `monty-types` by default. Its `worker` feature adds the
+    child-side state machine `worker::Child<E: Engine>`, generic over the language runtime:
+    `Engine` (`worker/engine.rs`) creates, feeds, suspends, resumes, dumps and restores a
+    session and reports a suspension as a `Suspension` view, while the child owns dispatch,
+    state transitions, call-id validation, event framing, budget stamping and print pacing.
+    `worker-python` (enabled by `monty-runtime`/`monty-wasm-runtime`) pulls in the full
+    `monty` interpreter for `worker::python::PythonEngine`, which also owns the Python-only
+    type-check flow (`ty`, `import_stubs`) through the engine's `pre_feed` hook; the
+    JavaScript runtime enables `worker` alone and brings its own engine. `monty_types::Language`
+    names the runtimes and, later, the per-feed language (`TODO(feed-language)`).
 - `monty subprocess` (in `crates/monty-runtime/src/subprocess.rs`) — the child:
     reads framed requests on stdin, writes framed events on stdout, serving one
     REPL session per checkout. Strict alternation: one request in, zero or more

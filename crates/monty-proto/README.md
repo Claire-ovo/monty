@@ -105,9 +105,11 @@ and keeps the session.
 ## Worker state machine
 
 The `worker` cargo feature (off by default) adds the `worker` module: the
-transport-agnostic child state machine, shared by the native `monty subprocess`
-worker and the wasm worker. It links the `monty` interpreter, so only
-worker-side crates enable it.
+transport-agnostic child state machine `Child<E: Engine>`, shared by the native
+`monty subprocess` worker and the wasm worker. It is generic over the language
+runtime (`Engine`), so it depends only on `monty-types`; the `worker-python`
+feature adds `worker::python::PythonEngine`, which links the `monty`
+interpreter, so only worker-side crates enable it.
 
 An external `FunctionCall` with `allow_eager_await = true` permits the parent to await a coroutine before replying.
 The parent sends its value or exception in `ResumeFutures`, with exactly one result matching the call ID.
