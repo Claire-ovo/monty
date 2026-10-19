@@ -2,7 +2,7 @@
 //! own stack: deeply nested source, structures walked by builtins, and
 //! builtins calling each other.
 
-use std::thread;
+use std::{fmt::Write, thread};
 
 use monty_ecma::{JsProgress, JsRepl};
 use monty_types::{NamedValues, PrintWriter, ResourceLimits};
@@ -56,17 +56,22 @@ fn deeply_nested_source_is_a_syntax_error() {
 fn ordinary_breadth_is_not_nesting() {
     let items = (0..3000).map(|i| i.to_string()).collect::<Vec<_>>().join(", ");
     assert_eq!(outcome(&format!("[{items}].length")), None);
-    let statements = (0..1000).map(|i| format!("let v{i} = {i};")).collect::<String>();
+    let statements = (0..1000).fold(String::new(), |mut out, i| {
+        let _ = write!(out, "let v{i} = {i};");
+        out
+    });
     assert_eq!(outcome(&statements), None);
-    let functions = (0..500)
-        .map(|i| format!("function f{i}() {{ return {i}; }}\n"))
-        .collect::<String>();
+    let functions = (0..500).fold(String::new(), |mut out, i| {
+        let _ = writeln!(out, "function f{i}() {{ return {i}; }}");
+        out
+    });
     assert_eq!(outcome(&format!("{functions}f499()")), None);
     let chain = (0..60).map(|i| i.to_string()).collect::<Vec<_>>().join(" + ");
     assert_eq!(outcome(&format!("const total = {chain};\ntotal")), None);
-    let branches = (0..40)
-        .map(|i| format!("else if (x === {i}) {{ y = {i}; }} "))
-        .collect::<String>();
+    let branches = (0..40).fold(String::new(), |mut out, i| {
+        let _ = write!(out, "else if (x === {i}) {{ y = {i}; }} ");
+        out
+    });
     assert_eq!(
         outcome(&format!(
             "let x = 5, y = 0; if (x < 0) {{ y = -1; }} {branches}else {{ y = 99; }}\ny"
