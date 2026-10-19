@@ -10,6 +10,7 @@
 mod array;
 mod collections;
 mod console;
+pub(crate) mod date;
 mod error;
 mod function;
 mod generator;
@@ -264,6 +265,55 @@ natives! {
     WeakSetProtoHas => ("has", 1, false, collections::weak_set_has),
     WeakSetProtoDelete => ("delete", 1, false, collections::weak_set_delete),
     ObjectGroupBy => ("groupBy", 2, false, collections::object_group_by),
+    // Date
+    Date => ("Date", 7, true, date::constructor),
+    DateNow => ("now", 0, false, date::now_static),
+    DateParse => ("parse", 1, false, date::parse_static),
+    DateUtc => ("UTC", 7, false, date::utc),
+    DateProtoGetTime => ("getTime", 0, false, date::get_time),
+    DateProtoValueOf => ("valueOf", 0, false, date::value_of),
+    DateProtoGetTimezoneOffset => ("getTimezoneOffset", 0, false, date::get_timezone_offset),
+    DateProtoGetFullYear => ("getFullYear", 0, false, date::get_full_year),
+    DateProtoGetMonth => ("getMonth", 0, false, date::get_month),
+    DateProtoGetDate => ("getDate", 0, false, date::get_date),
+    DateProtoGetDay => ("getDay", 0, false, date::get_day),
+    DateProtoGetHours => ("getHours", 0, false, date::get_hours),
+    DateProtoGetMinutes => ("getMinutes", 0, false, date::get_minutes),
+    DateProtoGetSeconds => ("getSeconds", 0, false, date::get_seconds),
+    DateProtoGetMilliseconds => ("getMilliseconds", 0, false, date::get_milliseconds),
+    DateProtoGetUtcFullYear => ("getUTCFullYear", 0, false, date::get_utc_full_year),
+    DateProtoGetUtcMonth => ("getUTCMonth", 0, false, date::get_utc_month),
+    DateProtoGetUtcDate => ("getUTCDate", 0, false, date::get_utc_date),
+    DateProtoGetUtcDay => ("getUTCDay", 0, false, date::get_utc_day),
+    DateProtoGetUtcHours => ("getUTCHours", 0, false, date::get_utc_hours),
+    DateProtoGetUtcMinutes => ("getUTCMinutes", 0, false, date::get_utc_minutes),
+    DateProtoGetUtcSeconds => ("getUTCSeconds", 0, false, date::get_utc_seconds),
+    DateProtoGetUtcMilliseconds => ("getUTCMilliseconds", 0, false, date::get_utc_milliseconds),
+    DateProtoSetTime => ("setTime", 1, false, date::set_time),
+    DateProtoSetMilliseconds => ("setMilliseconds", 1, false, date::set_milliseconds),
+    DateProtoSetSeconds => ("setSeconds", 2, false, date::set_seconds),
+    DateProtoSetMinutes => ("setMinutes", 3, false, date::set_minutes),
+    DateProtoSetHours => ("setHours", 4, false, date::set_hours),
+    DateProtoSetDate => ("setDate", 1, false, date::set_date),
+    DateProtoSetMonth => ("setMonth", 2, false, date::set_month),
+    DateProtoSetFullYear => ("setFullYear", 3, false, date::set_full_year),
+    DateProtoSetUtcMilliseconds => ("setUTCMilliseconds", 1, false, date::set_utc_milliseconds),
+    DateProtoSetUtcSeconds => ("setUTCSeconds", 2, false, date::set_utc_seconds),
+    DateProtoSetUtcMinutes => ("setUTCMinutes", 3, false, date::set_utc_minutes),
+    DateProtoSetUtcHours => ("setUTCHours", 4, false, date::set_utc_hours),
+    DateProtoSetUtcDate => ("setUTCDate", 1, false, date::set_utc_date),
+    DateProtoSetUtcMonth => ("setUTCMonth", 2, false, date::set_utc_month),
+    DateProtoSetUtcFullYear => ("setUTCFullYear", 3, false, date::set_utc_full_year),
+    DateProtoToIsoString => ("toISOString", 0, false, date::to_iso_string),
+    DateProtoToJson => ("toJSON", 1, false, date::to_json),
+    DateProtoToString => ("toString", 0, false, date::to_string),
+    DateProtoToDateString => ("toDateString", 0, false, date::to_date_string),
+    DateProtoToTimeString => ("toTimeString", 0, false, date::to_time_string),
+    DateProtoToUtcString => ("toUTCString", 0, false, date::to_utc_string),
+    DateProtoToLocaleString => ("toLocaleString", 0, false, date::to_locale_string),
+    DateProtoToLocaleDateString => ("toLocaleDateString", 0, false, date::to_locale_date_string),
+    DateProtoToLocaleTimeString => ("toLocaleTimeString", 0, false, date::to_locale_time_string),
+    DateProtoToPrimitive => ("[Symbol.toPrimitive]", 1, false, date::to_primitive),
     // Promise, timers and microtasks
     Promise => ("Promise", 1, true, promise::constructor),
     PromiseResolve => ("resolve", 1, false, promise::resolve),
@@ -373,6 +423,7 @@ pub(crate) fn create_realm(vm: &mut Vm<'_>) {
     regexp::install(vm, global);
     generator::install(vm, global);
     promise::install(vm, global);
+    date::install(vm, global);
     math::install(vm, global);
     json::install(vm, global);
     console::install(vm, global);

@@ -299,6 +299,8 @@ pub(crate) enum ObjectClass {
     /// An async function's activation (never user-visible): its parked frame
     /// and the promise (an owned reference) its return settles.
     Coroutine(Box<Coroutine>),
+    /// A `Date`: milliseconds since the epoch, `NaN` when invalid.
+    Date(f64),
 }
 
 /// A promise's settlement state and whether a rejection has a handler.

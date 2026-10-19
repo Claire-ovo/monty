@@ -71,6 +71,10 @@ pub(crate) fn run(cli: &Cli) -> ExitCode {
                 JsSuspensionKind::NameLookup { .. } => {
                     suspension.resume_name_lookup(NameLookupResult::Undefined, PrintWriter::Stdout)
                 }
+                JsSuspensionKind::OsCall { .. } => {
+                    let exc = MontyException::new(ExcType::Error, Some("no host services OS calls".to_owned()));
+                    suspension.abort(&exc, PrintWriter::Stdout)
+                }
                 JsSuspensionKind::ResolveFutures { .. } => {
                     let exc = MontyException::new(
                         ExcType::Error,

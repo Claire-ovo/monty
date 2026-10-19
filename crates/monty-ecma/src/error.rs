@@ -7,7 +7,7 @@
 
 use monty_types::{CodeLoc, ExcType, MontyException, ResourceError, StackFrame};
 
-use crate::value::JsValue;
+use crate::{value::JsValue, vm::host::HostRequest};
 
 /// Why a snippet could not be compiled.
 #[derive(Debug)]
@@ -73,6 +73,11 @@ pub(crate) enum Throw {
     Value(JsValue),
     /// A resource limit: terminal for the feed, uncatchable by `try`.
     Resource(ResourceError),
+    /// A builtin needs the host (the clock under `DateTimeSource::CallHost`):
+    /// the dispatch loop suspends the feed and pushes the answer as the
+    /// builtin's result. Anything but a builtin called straight from the loop
+    /// turns it into a `TypeError`, since nothing else can suspend.
+    Suspend(Box<HostRequest>),
 }
 
 impl From<ResourceError> for Throw {

@@ -4,8 +4,8 @@
 use std::{error::Error, fmt, sync::Arc};
 
 use monty_types::{
-    CallArgs, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, NamedValues, OsPolicy,
-    PrintWriter, ResourceError, ResourceLimits, ResourceTracker, SourceRange,
+    CallArgs, ExcType, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, NamedValues, OsFunctionCall,
+    OsPolicy, PrintWriter, ResourceError, ResourceLimits, ResourceTracker, SourceRange,
 };
 use oxc_allocator::Allocator;
 
@@ -33,7 +33,6 @@ const INITIAL_HEAP_CAPACITY: usize = 256;
 /// `globalThis` and the heap persist between them.
 pub struct JsRepl {
     session: Session,
-    os_policy: OsPolicy,
 }
 
 /// What a feed produced.
@@ -54,7 +53,6 @@ pub enum JsProgress {
 /// the matching `resume_*` method continues it with the host's answer.
 pub struct JsSuspension {
     vm: ParkedVm,
-    os_policy: OsPolicy,
     request: HostRequest,
 }
 
@@ -72,6 +70,12 @@ pub enum JsSuspensionKind<'a> {
     /// Every queue is empty but promises wait on host futures.
     ResolveFutures {
         pending_call_ids: &'a [u32],
+        position: &'a SourceRange,
+    },
+    /// An OS operation for the host (the clock under `DateTimeSource::CallHost`).
+    OsCall {
+        call: &'a mut OsFunctionCall,
+        call_id: u32,
         position: &'a SourceRange,
     },
 }
@@ -99,6 +103,16 @@ impl JsSuspension {
                 pending_call_ids,
                 position,
             },
+            HostRequest::OsCall {
+                call,
+                call_id,
+                position,
+                ..
+            } => JsSuspensionKind::OsCall {
+                call,
+                call_id: *call_id,
+                position,
+            },
         }
     }
 
@@ -106,9 +120,16 @@ impl JsSuspension {
         self.vm.tracker()
     }
 
-    /// Answers a `FunctionCall`.
+    /// Answers a `FunctionCall` or an `OsCall`.
     pub fn resume_call(self, result: ExtFunctionResult, print: PrintWriter<'_>) -> JsProgress {
-        self.resume(print, |vm| vm.apply_call_result(result))
+        let os_answer = match &self.request {
+            HostRequest::OsCall { answer, .. } => Some(*answer),
+            _ => None,
+        };
+        self.resume(print, |vm| match os_answer {
+            Some(answer) => vm.apply_os_result(result, answer),
+            None => vm.apply_call_result(result),
+        })
     }
 
     /// Answers a `NameLookup`.
@@ -138,7 +159,6 @@ impl JsSuspension {
     pub fn into_repl(self) -> JsRepl {
         JsRepl {
             session: self.vm.into_session(),
-            os_policy: self.os_policy,
         }
     }
 
@@ -146,7 +166,7 @@ impl JsSuspension {
         let mut vm = self.vm.wake(print);
         vm.tracker().on_execution_start();
         let outcome = apply(&mut vm).and_then(|()| vm.continue_feed());
-        settle(vm, self.os_policy, outcome)
+        settle(vm, outcome)
     }
 }
 
@@ -183,8 +203,9 @@ impl JsRepl {
             script: ScriptScope::default(),
             script_name: script_name.to_owned(),
             feed_count: 0,
-            random_state: 0x9E37_79B9_7F4A_7C15,
+            random_state: 0,
             next_call_id: 1,
+            os_policy: OsPolicy::default(),
         };
         let mut vm = Vm::new(session, PrintWriter::Disabled);
         builtins::create_realm(&mut vm);
@@ -194,17 +215,14 @@ impl JsRepl {
             .tracker
             .check_allocation(0)
             .map_err(|err| JsStartError::Memory(err.to_string()))?;
-        Ok(Self {
-            session,
-            os_policy: OsPolicy::default(),
-        })
+        Ok(Self { session })
     }
 
     /// Replaces the clock, sleep and random policies.
     // TODO(os-policy): `Date`, `Math.random` and timers read these once they exist.
     #[must_use]
     pub fn with_os_policy(mut self, os_policy: OsPolicy) -> Self {
-        self.os_policy = os_policy;
+        self.session.os_policy = os_policy;
         self
     }
 
@@ -278,20 +296,16 @@ impl JsRepl {
         vm.tracker().on_feed_start();
         vm.tracker().on_execution_start();
         let outcome = vm.import_inputs(inputs).and_then(|()| vm.start_feed(module));
-        settle(vm, self.os_policy, outcome)
+        settle(vm, outcome)
     }
 }
 
 /// Turns how a feed left the interpreter into the progress the host sees.
-fn settle(mut vm: Vm<'_>, os_policy: OsPolicy, outcome: Result<FeedEnd, Throw>) -> JsProgress {
+fn settle(mut vm: Vm<'_>, outcome: Result<FeedEnd, Throw>) -> JsProgress {
     let result = match outcome {
         Ok(FeedEnd::Suspended(request)) => {
             vm.tracker().on_execution_stop();
-            return JsProgress::Suspended(Box::new(JsSuspension {
-                vm: vm.park(),
-                os_policy,
-                request,
-            }));
+            return JsProgress::Suspended(Box::new(JsSuspension { vm: vm.park(), request }));
         }
         Ok(FeedEnd::Complete(value)) => {
             let exported = vm.export(&value);
@@ -306,7 +320,6 @@ fn settle(mut vm: Vm<'_>, os_policy: OsPolicy, outcome: Result<FeedEnd, Throw>) 
     vm.tracker().on_execution_stop();
     let repl = JsRepl {
         session: vm.into_session(),
-        os_policy,
     };
     match result {
         Ok(value) => JsProgress::Complete { repl, value },
@@ -325,6 +338,11 @@ fn throw_to_exception(vm: &mut Vm<'_>, throw: Throw) -> MontyException {
             };
             MontyException::with_traceback(exc_type, Some(err.to_string()), traceback)
         }
+        Throw::Suspend(_) => MontyException::with_traceback(
+            ExcType::RuntimeError,
+            Some("internal error: a suspension escaped the feed".to_owned()),
+            traceback,
+        ),
         Throw::Value(value) => {
             let (exc_type, message) = match &value {
                 JsValue::Ref(id) if matches!(vm.object(*id).map(|o| &o.class), Some(ObjectClass::Error)) => {

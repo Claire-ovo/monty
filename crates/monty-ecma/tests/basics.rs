@@ -29,6 +29,10 @@ fn run(code: &str) -> String {
                 JsSuspensionKind::NameLookup { .. } => {
                     suspension.resume_name_lookup(NameLookupResult::Undefined, PrintWriter::collect_string(&mut output))
                 }
+                JsSuspensionKind::OsCall { .. } => {
+                    let exc = MontyException::new(ExcType::Error, Some("no host services OS calls".to_owned()));
+                    suspension.abort(&exc, PrintWriter::collect_string(&mut output))
+                }
                 JsSuspensionKind::ResolveFutures { .. } => {
                     let exc = MontyException::new(ExcType::Error, Some("no host".to_owned()));
                     suspension.abort(&exc, PrintWriter::collect_string(&mut output))

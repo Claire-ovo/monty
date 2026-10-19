@@ -601,6 +601,7 @@ pub(super) fn proto_to_string(vm: &mut Vm<'_>, this: &JsValue, _: &[JsValue], _:
                     Some(ObjectClass::BoxedNumber(_)) => "Number".to_owned(),
                     Some(ObjectClass::BoxedString(_)) => "String".to_owned(),
                     Some(ObjectClass::RegExp(_)) => "RegExp".to_owned(),
+                    Some(ObjectClass::Date(_)) => "Date".to_owned(),
                     _ => "Object".to_owned(),
                 },
             }

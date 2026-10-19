@@ -1,6 +1,11 @@
 //! `Math`.
 
-use std::f64::consts;
+use std::{
+    f64::consts,
+    hash::{DefaultHasher, Hash, Hasher},
+};
+
+use monty_types::{RandomSeed, RandomStart};
 
 use super::{NativeFn, arg, install_function, install_value, plain_object};
 use crate::{
@@ -151,7 +156,15 @@ pub(super) fn max(vm: &mut Vm<'_>, _: &JsValue, args: &[JsValue], _: bool) -> Ru
 
 /// `Math.random`: a session-local xorshift generator.
 // TODO(os-policy): seed from `OsPolicy::random_start` as Python's `random` does.
+/// `Math.random()`: xorshift64 over a state seeded from the session's
+/// `OsPolicy` on the first draw (OS entropy, or the configured seed).
 pub(super) fn random(vm: &mut Vm<'_>, _: &JsValue, _: &[JsValue], _: bool) -> RunResult<JsValue> {
+    if vm.session.random_state == 0 {
+        vm.session.random_state = match initial_random_state(&vm.session.os_policy.random_start) {
+            Ok(state) => state,
+            Err(message) => return Err(vm.internal_error(&message)),
+        };
+    }
     let state = &mut vm.session.random_state;
     let mut x = *state;
     x ^= x << 13;
@@ -161,4 +174,28 @@ pub(super) fn random(vm: &mut Vm<'_>, _: &JsValue, _: &[JsValue], _: bool) -> Ru
     #[expect(clippy::cast_precision_loss, reason = "53 random bits become the mantissa")]
     let value = (x >> 11) as f64 / (1u64 << 53) as f64;
     Ok(JsValue::Number(value))
+}
+
+/// The generator's first state: a fixed seed hashes to it; `System` and
+/// `CallHost` read the sandbox's own OS entropy (there is no host round
+/// trip for entropy). Never zero, which xorshift cannot leave.
+fn initial_random_state(start: &RandomStart) -> Result<u64, String> {
+    let state = match start {
+        RandomStart::System | RandomStart::CallHost => {
+            let mut bytes = [0u8; 8];
+            getrandom::fill(&mut bytes).map_err(|err| format!("OS entropy unavailable: {err}"))?;
+            u64::from_le_bytes(bytes)
+        }
+        RandomStart::Seed(seed) => {
+            let mut hasher = DefaultHasher::new();
+            match seed {
+                RandomSeed::Int(value) => value.to_string().hash(&mut hasher),
+                RandomSeed::Float(value) => value.to_bits().hash(&mut hasher),
+                RandomSeed::Str(text) => text.hash(&mut hasher),
+                RandomSeed::Bytes(bytes) => bytes.hash(&mut hasher),
+            }
+            hasher.finish()
+        }
+    };
+    Ok(if state == 0 { 0x9E37_79B9_7F4A_7C15 } else { state })
 }

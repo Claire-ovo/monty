@@ -27,6 +27,8 @@ oxc_span = { workspace = true }
 oxc_str = { workspace = true }
 oxc_syntax = { workspace = true }
 ahash = { workspace = true }
+chrono = { workspace = true }
+getrandom = "0.3"
 indexmap = { workspace = true, features = ["serde"] }
 serde = { workspace = true }
 serde_bytes = { workspace = true }

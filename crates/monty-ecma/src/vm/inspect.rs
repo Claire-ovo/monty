@@ -7,7 +7,7 @@ use std::fmt::Write;
 
 use super::{Vm, number::number_to_string};
 use crate::{
-    builtins::regexp,
+    builtins::{date, regexp},
     error::RunResult,
     heap::{FunctionObject, HeapId, IterKind, JsObject, ObjectClass, PromiseState, PropertyKey, Slot},
     intern::{StaticAtom, WellKnownSymbol},
@@ -184,11 +184,12 @@ impl Vm<'_> {
                 (self.ordinary_prefix(id), ["{", "}"], false, false)
             }
             ObjectClass::Promise(_) => (self.ordinary_prefix(id), ["{", "}"], false, false),
+            ObjectClass::Date(t) => (date::inspect_value(*t), ["{", "}"], false, false),
             ObjectClass::Ordinary => (self.ordinary_prefix(id), ["{", "}"], false, false),
         };
-        // a regexp without extra properties prints whole at any depth, like a primitive
+        // a regexp or date without extra properties prints whole at any depth, like a primitive
         let bare_regexp = self.object(id).is_some_and(|object| {
-            matches!(object.class, ObjectClass::RegExp(_))
+            matches!(object.class, ObjectClass::RegExp(_) | ObjectClass::Date(_))
                 && !object.props.values().any(|slot| slot.flags().enumerable())
         });
         if bare_regexp {

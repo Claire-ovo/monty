@@ -138,7 +138,8 @@ impl Vm<'_> {
                 self.invoke(JsValue::Ref(target), bound_this, all, completion)
             }
             _ => {
-                let outcome = match self.call(callee, this, args) {
+                let result = self.call(callee, this, args);
+                let outcome = match self.native_value(result) {
                     Ok(value) => Settled::Fulfilled(value),
                     Err(Throw::Value(reason)) => Settled::Rejected(reason),
                     Err(err) => {

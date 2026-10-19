@@ -21,7 +21,7 @@ pub(crate) mod property;
 use std::{collections::VecDeque, mem, string::ToString, sync::Arc};
 
 use monty_heap::ContainsHeap;
-use monty_types::{MontyException, PrintWriter, ResourceError, ResourceTracker, StackFrame};
+use monty_types::{MontyException, OsPolicy, PrintWriter, ResourceError, ResourceTracker, StackFrame};
 
 use self::{
     generator::ResumeMode,
@@ -60,6 +60,8 @@ pub(crate) struct Session {
     pub random_state: u64,
     /// The id the next host call announces itself with.
     pub next_call_id: u32,
+    /// Where the clock, the zone and the entropy come from.
+    pub os_policy: OsPolicy,
 }
 
 /// The interpreter for one feed: the session plus the run-time stacks.
@@ -220,6 +222,8 @@ impl<'p> Vm<'p> {
                 Ok(Step::InitialYield) => self.create_generator().map(Delivery::Value),
                 Ok(Step::Yield { value, kind }) => self.yield_frame(value, kind),
                 Ok(Step::Suspend(request)) => return Ok(Outcome::Suspend(request)),
+                // a builtin called from this loop asked for the host; its result arrives on resume
+                Err(Throw::Suspend(request)) => return Ok(Outcome::Suspend(*request)),
                 Err(throw) => Err(throw),
             };
             let delivery = match delivery {
@@ -387,6 +391,7 @@ impl<'p> Vm<'p> {
     fn handle_throw(&mut self, throw: Throw, stop_depth: usize) -> RunResult<Option<Delivery>> {
         match throw {
             Throw::Value(value) => self.unwind(value, stop_depth),
+            Throw::Suspend(_) => Err(self.internal_error("a suspension reached the throw handler")),
             Throw::Resource(err) => {
                 while self.frames.len() > stop_depth {
                     self.record_frame();

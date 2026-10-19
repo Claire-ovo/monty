@@ -9,11 +9,12 @@
 
 use ahash::AHashMap;
 use monty_types::{
-    MontyObject, NamedValues,
+    MontyDateTime, MontyObject, NamedValues,
     unstable::{MontyGraph, MontyNode, NodeId, named_values_parts, object_from_graph},
 };
 
 use crate::{
+    builtins::date,
     error::RunResult,
     heap::{HeapId, ObjectClass, PropertyKey},
     intern::StaticAtom,
@@ -95,6 +96,7 @@ impl Exporter {
             ObjectClass::BoxedString(s) => Kind::BoxedString(s.clone()),
             ObjectClass::Map(_) => Kind::Map,
             ObjectClass::Set(_) => Kind::Set,
+            ObjectClass::Date(t) => Kind::Date(*t),
             _ => Kind::Other,
         });
         let node = match class_kind {
@@ -178,6 +180,10 @@ impl Exporter {
             }
             Some(Kind::Primitive(primitive)) => return self.push(vm, &primitive),
             Some(Kind::BoxedString(string)) => MontyNode::String(string.to_string_lossy()),
+            Some(Kind::Date(t)) => match date::time_to_host(t) {
+                Some(datetime) => MontyNode::DateTime(datetime),
+                None => MontyNode::Repr(date::inspect_value(t)),
+            },
             Some(Kind::Other) | None => MontyNode::Repr(vm.inspect_short(&JsValue::Ref(id))?),
         };
         let node_id = self.graph.push(node);
@@ -196,6 +202,8 @@ enum Kind {
     Set,
     Primitive(JsValue),
     BoxedString(JsString),
+    /// A `Date`, exported as a UTC datetime.
+    Date(f64),
     Other,
 }
 
@@ -275,6 +283,21 @@ impl<'g> Importer<'g> {
             MontyNode::Exception { exc_type, arg } => {
                 let kind = exc_type_to_kind(*exc_type);
                 vm.new_error(kind, arg.as_deref().unwrap_or_default())
+            }
+            MontyNode::DateTime(datetime) => date::new_date(vm, date::time_from_host(datetime)),
+            MontyNode::Date(day) => {
+                let midnight = MontyDateTime {
+                    year: day.year,
+                    month: day.month,
+                    day: day.day,
+                    hour: 0,
+                    minute: 0,
+                    second: 0,
+                    microsecond: 0,
+                    offset_seconds: Some(0),
+                    timezone_name: None,
+                };
+                date::new_date(vm, date::time_from_host(&midnight))
             }
             MontyNode::Cycle(_) => JsValue::Null,
             other => {

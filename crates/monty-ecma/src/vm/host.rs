@@ -11,8 +11,8 @@
 use std::collections::VecDeque;
 
 use monty_types::{
-    CallArgs, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, PrintWriter, ResourceTracker,
-    SourceRange, StackFrame, unstable::graph_parts,
+    CallArgs, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, OsFunctionCall, PrintWriter,
+    ResourceTracker, SourceRange, StackFrame, unstable::graph_parts,
 };
 
 use super::{
@@ -20,6 +20,7 @@ use super::{
     promise::{Job, Timer},
 };
 use crate::{
+    builtins::date,
     error::{RunResult, Throw},
     heap::{FunctionObject, HeapId, PropertyKey},
     intern::AtomId,
@@ -30,6 +31,7 @@ use crate::{
 };
 
 /// What a suspended feed is waiting for.
+#[derive(Debug)]
 pub(crate) enum HostRequest {
     /// `name(...args)` on an undeclared name.
     FunctionCall {
@@ -51,6 +53,26 @@ pub(crate) enum HostRequest {
         pending_call_ids: Vec<u32>,
         position: SourceRange,
     },
+    /// An OS operation the policy routes to the host (the clock).
+    OsCall {
+        call: OsFunctionCall,
+        call_id: u32,
+        position: SourceRange,
+        /// What the suspended builtin makes of the answer.
+        answer: OsAnswer,
+    },
+}
+
+/// How a host clock answer (seconds since the epoch) becomes the suspended
+/// builtin's result.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum OsAnswer {
+    /// `Date.now()`: milliseconds.
+    ClockMillis,
+    /// `new Date()`: a `Date` object.
+    NewDate,
+    /// `Date()`: the date's string.
+    DateString,
 }
 
 /// The interpreter without its print sink, as a suspended feed keeps it
@@ -174,9 +196,12 @@ impl Vm<'_> {
     /// Calling a host function: exports the arguments and suspends, unless a
     /// builtin's callback is on the Rust stack, which cannot suspend.
     pub(super) fn external_call(&mut self, name: AtomId, args: Vec<JsValue>) -> RunResult<Step> {
-        if let Err(err) = self.check_can_suspend(name) {
+        if self.reentrancy > 0 {
             self.drop_all(JsValue::Undefined, args);
-            return Err(err);
+            let text = self.session.interns.atom(name).to_string_lossy();
+            return Err(self.type_error(&format!(
+                "Host function '{text}' cannot be called from a callback run by a builtin"
+            )));
         }
         let mut call_args = CallArgs::new();
         let mut exported = Ok(());
@@ -216,6 +241,34 @@ impl Vm<'_> {
         }))
     }
 
+    /// A builtin's request for an OS operation: the throw that suspends the
+    /// feed when the builtin was called from the dispatch loop.
+    pub(crate) fn os_call(&mut self, call: OsFunctionCall, answer: OsAnswer) -> Throw {
+        let call_id = self.session.next_call_id;
+        self.session.next_call_id += 1;
+        Throw::Suspend(Box::new(HostRequest::OsCall {
+            call,
+            call_id,
+            position: self.current_position(),
+            answer,
+        }))
+    }
+
+    /// The `TypeError` for a request made where nothing can suspend.
+    pub(crate) fn suspend_blocked(&mut self, request: &HostRequest) -> Throw {
+        let message = match request {
+            HostRequest::FunctionCall { name, .. } => {
+                format!("Host function '{name}' cannot be called from a callback run by a builtin")
+            }
+            HostRequest::OsCall { .. } => "The host clock cannot be read from a callback run by a builtin".to_owned(),
+            HostRequest::NameLookup { name, .. } => {
+                format!("'{name}' cannot be looked up on the host from a callback run by a builtin")
+            }
+            HostRequest::ResolveFutures { .. } => "cannot wait for host futures here".to_owned(),
+        };
+        self.type_error(&message)
+    }
+
     /// The request a feed whose queues ran dry raises for its host futures.
     pub(super) fn resolve_futures_request(&self) -> HostRequest {
         HostRequest::ResolveFutures {
@@ -226,16 +279,6 @@ impl Vm<'_> {
                 end: 0,
             },
         }
-    }
-
-    fn check_can_suspend(&mut self, name: AtomId) -> RunResult<()> {
-        if self.reentrancy == 0 {
-            return Ok(());
-        }
-        let name = self.session.interns.atom(name).to_string_lossy();
-        Err(self.type_error(&format!(
-            "Host function '{name}' cannot be called from a callback run by a builtin"
-        )))
     }
 
     /// Where the running instruction is, for the host's error reporting.
@@ -276,6 +319,33 @@ impl Vm<'_> {
             }
             ExtFunctionResult::NotFound(name) => {
                 let error = self.new_error(ErrorKind::ReferenceError, &format!("{name} is not defined"));
+                self.throw_in_feed(error)
+            }
+        }
+    }
+
+    /// Delivers the host's answer to an OS call: the clock's seconds become
+    /// the value the suspended builtin would have produced.
+    pub(crate) fn apply_os_result(&mut self, result: ExtFunctionResult, answer: OsAnswer) -> RunResult<()> {
+        match result {
+            ExtFunctionResult::Return(value) => {
+                let value = self.import_value(&value)?;
+                let seconds = self.coerce_number(&value);
+                value.drop_with(&mut self.session.heap);
+                let produced = date::from_host_seconds(self, seconds?, answer)?;
+                self.stack.push(produced);
+                Ok(())
+            }
+            ExtFunctionResult::Future(_) => {
+                let error = self.new_error(ErrorKind::TypeError, "the host clock cannot be answered with a future");
+                self.throw_in_feed(error)
+            }
+            ExtFunctionResult::Error(exc) => {
+                let error = self.exception_value(&exc);
+                self.throw_in_feed(error)
+            }
+            ExtFunctionResult::NotFound(what) => {
+                let error = self.new_error(ErrorKind::Error, &format!("the host does not provide {what}"));
                 self.throw_in_feed(error)
             }
         }

@@ -140,6 +140,16 @@ impl Engine for JsEngine {
                 pending_call_ids,
                 position,
             },
+            JsSuspensionKind::OsCall {
+                call,
+                call_id,
+                position,
+            } => Suspension::OsCall {
+                call,
+                call_id,
+                allow_eager_await: false,
+                position,
+            },
         }
     }
 

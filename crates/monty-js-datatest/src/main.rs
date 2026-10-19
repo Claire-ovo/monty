@@ -109,6 +109,10 @@ fn run_monty(path: &Path, code: &str) -> Outcome {
                 }
                 JsSuspensionKind::NameLookup { .. } => suspension
                     .resume_name_lookup(NameLookupResult::Undefined, PrintWriter::collect_streams(&mut streams)),
+                JsSuspensionKind::OsCall { .. } => {
+                    let exc = MontyException::new(ExcType::Error, Some("no host services OS calls".to_owned()));
+                    suspension.abort(&exc, PrintWriter::collect_streams(&mut streams))
+                }
                 JsSuspensionKind::ResolveFutures { .. } => {
                     let exc = MontyException::new(ExcType::Error, Some("no host to resolve futures".to_owned()));
                     suspension.abort(&exc, PrintWriter::collect_streams(&mut streams))
@@ -133,6 +137,7 @@ fn run_node(code: &str) -> Result<Outcome, Box<dyn Error>> {
         .args(["--no-warnings", "--input-type=module", "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .env("TZ", "UTC")
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|err| format!("cannot run node (is it installed?): {err}"))?;

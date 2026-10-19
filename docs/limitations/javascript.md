@@ -70,9 +70,9 @@ Available: `globalThis`, `undefined`, `NaN`, `Infinity`, `parseInt`, `parseFloat
 (`log`, `info`, `debug` to stdout; `error`, `warn` to stderr), `Object`, `Function.prototype` (`call`, `apply`,
 `bind`, `toString`), `Array`, `String`, `Number`, `Boolean`, `Symbol` (with the well-known symbols), `Map`, `Set`,
 `WeakMap`, `WeakSet`, `RegExp`, `Promise`, `queueMicrotask`, `setTimeout`/`setInterval`/`setImmediate` and their
-`clear*` counterparts, `Math`, `JSON` and the `Error` family.
+`clear*` counterparts, `Date`, `Math`, `JSON` and the `Error` family.
 
-Not available: `WeakRef`, `FinalizationRegistry`, `Date`, `Proxy`, `Reflect`,
+Not available: `WeakRef`, `FinalizationRegistry`, `Proxy`, `Reflect`,
 `ArrayBuffer` and the typed arrays, `TextEncoder`/`TextDecoder`, `structuredClone`, `encodeURIComponent` and its
 relatives, `Intl`, `Atomics`, `globalThis.process` and every Node module.
 
@@ -108,8 +108,17 @@ Differences within the available builtins:
     source text.
 - `Symbol.toPrimitive` is consulted, but `Symbol.toStringTag`, `Symbol.hasInstance`, `Symbol.species`,
     `Symbol.isConcatSpreadable` and `Symbol.unscopables` have no effect.
-- `Math.random()` draws from a session-local generator with a fixed seed, so a session's sequence is reproducible
-    and identical across sessions.
+- `Math.random()` is a session-local xorshift generator seeded on the first draw from `OsPolicy.random_start`: OS
+    entropy for `System`, and for `CallHost` too (the sandbox does not ask the host for entropy); a `Seed` gives a
+    reproducible sequence that is not CPython's or V8's.
+- `Date` reads its clock from `OsPolicy.datetime` (`System`, a `Fixed` instant, or `CallHost`, which suspends with
+    an `OsCall` the host answers as `time.time()`, so `Date.now()` and `new Date()` under `CallHost` work only when
+    called from the dispatch loop, not from a builtin's callback) and its local zone from `OsPolicy.timezone`
+    (UTC by default). `Date.parse` and the string constructor accept the ISO format and the `toString` /
+    `toUTCString` shapes only, not V8's legacy forms (`new Date('5')`, `'2020/01/02'`); `toLocaleString`,
+    `toLocaleDateString` and `toLocaleTimeString` take no arguments and use fixed en-US shapes (`10/19/2026`,
+    `10:16:11 PM`); `toString` names the zone from the policy (`Coordinated Universal Time` for UTC, the zone's
+    abbreviation otherwise, where V8 prints ICU's long name); `getYear`, `setYear` and `toGMTString` are absent.
 - `Number.prototype.toString(radix)` prints at most 52 fractional digits for a non-integer; V8 prints the shortest
     representation that round-trips.
 - `Function.prototype.toString` returns the function's source text for compiled functions and
@@ -129,21 +138,23 @@ Differences within the available builtins:
 The sandbox exchanges values with the host as the same graph the Python worker uses, so the mapping is lossy in
 both directions:
 
-| JavaScript                                | Host value (`MontyObject`)                                         |
-| ----------------------------------------- | ------------------------------------------------------------------ |
-| `undefined`, `null`                       | `None`                                                             |
-| integral number in the safe range, `-0`   | `int` (`-0` becomes `0`)                                           |
-| other numbers                             | `float`                                                            |
-| string                                    | `str` (a lone surrogate becomes U+FFFD)                            |
-| array, `arguments`                        | `list`                                                             |
-| plain object                              | `dict` with `str` keys, own enumerable properties, insertion order |
-| `Error`                                   | exception of the nearest builtin class with its `message`          |
-| boxed primitive                           | the primitive                                                      |
-| function, symbol, iterator, anything else | `repr` string                                                      |
+| JavaScript                                | Host value (`MontyObject`)                                          |
+| ----------------------------------------- | ------------------------------------------------------------------- |
+| `undefined`, `null`                       | `None`                                                              |
+| integral number in the safe range, `-0`   | `int` (`-0` becomes `0`)                                            |
+| other numbers                             | `float`                                                             |
+| string                                    | `str` (a lone surrogate becomes U+FFFD)                             |
+| array, `arguments`                        | `list`                                                              |
+| plain object                              | `dict` with `str` keys, own enumerable properties, insertion order  |
+| `Error`                                   | exception of the nearest builtin class with its `message`           |
+| boxed primitive                           | the primitive                                                       |
+| `Date`                                    | an aware `datetime` in UTC (`Invalid Date` becomes a `repr` string) |
+| function, symbol, iterator, anything else | `repr` string                                                       |
 
 Inputs convert the other way: `list`, `tuple`, `set`, `frozenset` and named tuples become arrays, `dict` becomes a
 plain object (keys converted with `ToPropertyKey`), `bytes` becomes an array of numbers, `int`s beyond the double
-range lose precision, `datetime`/`date`/`time`/`timedelta`/`complex`/`Path` become their string representation,
+range lose precision, `datetime` and `date` become `Date` objects (a naive `datetime` is read as UTC), `time`/`timedelta`/`complex`/`Path`
+become their string representation,
 exceptions become `Error` objects, and a shared sub-object is shared again in the sandbox.
 A cycle in an exported value is cut with a `[...]` / `{...}` placeholder.
 

@@ -75,13 +75,18 @@ impl Vm<'_> {
                 callee.drop_with(&mut self.session.heap);
                 self.external_call(name, args)
             }
+            Some(Callable::Native(native)) => {
+                callee.drop_with(&mut self.session.heap);
+                let result = self.call_native(native, this, args, false);
+                self.native_step(result)
+            }
             None => {
                 self.drop_all(this, args);
                 callee.drop_with(&mut self.session.heap);
                 let text = self.callee_text();
                 Err(self.type_error(&format!("{text} is not a function")))
             }
-            Some(_) => {
+            Some(Callable::Bound { .. }) => {
                 let result = self.call(callee, this, args)?;
                 self.stack.push(result);
                 Ok(Step::Continue)
@@ -98,9 +103,8 @@ impl Vm<'_> {
                 Ok(Step::Continue)
             }
             Some(Callable::Native(native)) if native.is_constructor() => {
-                let result = self.construct(callee, args)?;
-                self.stack.push(result);
-                Ok(Step::Continue)
+                let result = self.construct(callee, args);
+                self.native_step(result)
             }
             Some(Callable::Bound { .. }) => {
                 let result = self.construct(callee, args)?;
@@ -128,7 +132,8 @@ impl Vm<'_> {
             }
             Some(Callable::Native(native)) => {
                 callee.drop_with(&mut self.session.heap);
-                self.call_native(native, this, args, false)
+                let result = self.call_native(native, this, args, false);
+                self.native_value(result)
             }
             Some(Callable::External(name)) => {
                 self.drop_all(this, args);
@@ -191,6 +196,7 @@ impl Vm<'_> {
                     new_target.drop_with(&mut self.session.heap);
                     return result;
                 }
+                let result = self.native_value(result);
                 // `class X extends Error`: the native built the instance; give it the subclass's prototype
                 let result = result?;
                 let prototype = self.get_atom(&new_target, StaticAtom::Prototype.id());
@@ -754,9 +760,31 @@ impl Vm<'_> {
         args: Vec<JsValue>,
         construct: bool,
     ) -> RunResult<JsValue> {
-        let result = self.enter_nested(|vm| dispatch(vm, native, &this, &args, construct));
+        let result = dispatch(self, native, &this, &args, construct);
         self.drop_all(this, args);
         result
+    }
+
+    /// A builtin's result as seen from bytecode: a suspension is let through
+    /// when the dispatch loop itself made the call, else it is an error.
+    fn native_step(&mut self, result: RunResult<JsValue>) -> RunResult<Step> {
+        match result {
+            Ok(value) => {
+                self.stack.push(value);
+                Ok(Step::Continue)
+            }
+            Err(Throw::Suspend(request)) if self.reentrancy == 0 => Ok(Step::Suspend(*request)),
+            Err(Throw::Suspend(request)) => Err(self.suspend_blocked(&request)),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// A builtin's result from a Rust caller, where no suspension is possible.
+    pub(super) fn native_value(&mut self, result: RunResult<JsValue>) -> RunResult<JsValue> {
+        match result {
+            Err(Throw::Suspend(request)) => Err(self.suspend_blocked(&request)),
+            other => other,
+        }
     }
 
     /// Releases a receiver and arguments that will not be used.
