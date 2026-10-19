@@ -11,8 +11,7 @@
 #[cfg(any(
     heap_reader_compile_fail_test_heap_mutation_while_reading,
     heap_reader_compile_fail_test_dec_ref_while_reading,
-    heap_reader_compile_fail_test_mutation_in_map_closure,
-    heap_reader_compile_fail_test_smuggle_and_swap_reader
+    heap_reader_compile_fail_test_mutation_in_map_closure
 ))]
 use monty_heap::ContainsHeap as _;
 
