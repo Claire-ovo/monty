@@ -1,0 +1,31 @@
+[build-system]
+requires = ["maturin>=1.14.1,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "pydantic-monty-js-runtime"
+description = "The monty-js CLI binary — the JavaScript sandbox worker spawned by pydantic-monty"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Rust",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Unix",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Environment :: MacOS X",
+]
+dynamic = ["license", "version"]
+
+[project.urls]
+Homepage = "https://github.com/pydantic/monty"
+Source = "https://github.com/pydantic/monty"
+
+# Same pattern as `pydantic-monty-runtime`: `bindings = "bin"` places the
+# compiled `monty-js` binary in the wheel's scripts directory, where
+# pydantic-monty's `find_monty_binary` resolves it for `language='javascript'`.
+[tool.maturin]
+bindings = "bin"
+strip = true

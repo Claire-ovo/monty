@@ -1,10 +1,13 @@
-"""Locates the `monty` CLI binary that worker pools run as subprocesses.
+"""Locates the worker binary that pools run as subprocesses: `monty` for
+Python sessions, `monty-js` for JavaScript ones.
 
-The binary ships in the `pydantic-monty-runtime` wheel (a maturin `bin`-bindings
-package, the same pattern `uv` and `ruff` use), which installs it into the
-environment's scripts directory. Installing `pydantic-monty` pulls that in; the
-`pydantic-monty-client` distribution alone does not, so the other resolution
-steps below matter when only the bindings are installed.
+Each binary ships in its own wheel (`pydantic-monty-runtime` and
+`pydantic-monty-js-runtime`, maturin `bin`-bindings packages, the same pattern
+`uv` and `ruff` use), which installs it into the environment's scripts
+directory. Installing `pydantic-monty` pulls the Python worker in, and the
+`js` extra the JavaScript one; the `pydantic-monty-client` distribution alone
+does not, so the other resolution steps below matter when only the bindings
+are installed.
 
 The compiled `_monty` module imports this file during its own init, while
 `pydantic_monty/__init__.py` is still executing, so it must import nothing
@@ -19,45 +22,52 @@ import sys
 import sysconfig
 from pathlib import Path
 
-_BIN_NAME = 'monty.exe' if sys.platform == 'win32' else 'monty'
-
 __all__ = ('find_monty_binary',)
 
+_EXE = '.exe' if sys.platform == 'win32' else ''
 
-def find_monty_binary(explicit: str | Path | None = None) -> str:
-    """Resolves the `monty` binary path used to spawn pool workers.
+# per language: the binary's name, the environment variable naming it, and the wheel that ships it
+_RUNTIMES = {
+    'python': ('monty', 'MONTY_BIN', 'pydantic-monty'),
+    'javascript': ('monty-js', 'MONTY_JS_BIN', 'pydantic-monty[js]'),
+}
+
+
+def find_monty_binary(explicit: str | Path | None = None, language: str = 'python') -> str:
+    """Resolves the worker binary path used to spawn pool workers.
 
     Resolution order:
 
     1. the explicit `binary_path` argument, when given
-    2. the `MONTY_BIN` environment variable
-    3. the environment's scripts directory (where the `pydantic-monty-runtime`
-       wheel installs the binary)
-    4. a `monty` executable on `PATH`
+    2. the `MONTY_BIN` (or `MONTY_JS_BIN`) environment variable
+    3. the environment's scripts directory (where the runtime wheel installs
+       the binary)
+    4. a `monty` (or `monty-js`) executable on `PATH`
     5. a cargo-built binary in the monty workspace, when running from an
        editable/development install of this package
     """
     if explicit is not None:
         return str(explicit)
 
-    if env := os.environ.get('MONTY_BIN'):
+    name, env_var, package = _RUNTIMES[language]
+    if env := os.environ.get(env_var):
         return env
 
     for scripts_dir in _script_dirs():
-        candidate = scripts_dir / _BIN_NAME
+        candidate = scripts_dir / f'{name}{_EXE}'
         if candidate.is_file():
             return str(candidate)
 
-    if found := shutil.which('monty'):
+    if found := shutil.which(name):
         return found
 
-    if dev := _development_binary():
+    if dev := _development_binary(f'{name}{_EXE}'):
         return str(dev)
 
     raise FileNotFoundError(
-        'could not locate the `monty` binary required to run sandboxed code; '
-        'install it with `pip install pydantic-monty` (or `make dev-py` in the monty repo), '
-        'pass binary_path=..., or set the MONTY_BIN environment variable'
+        f'could not locate the `{name}` binary required to run sandboxed code; '
+        f'install it with `pip install "{package}"` (or `make dev-py` in the monty repo), '
+        f'pass binary_path=..., or set the {env_var} environment variable'
     )
 
 
@@ -72,17 +82,17 @@ def _script_dirs() -> list[Path]:
     return dirs
 
 
-def _development_binary() -> Path | None:
-    """A cargo-built `monty` next to an editable install inside the monty repo.
+def _development_binary(file_name: str) -> Path | None:
+    """A cargo-built worker next to an editable install inside the monty repo.
 
     With `maturin develop`, this file lives at
     `<repo>/crates/monty-python/python/pydantic_monty/_binary.py`, so a
-    cargo-built binary is at `<repo>/target/{debug,release}/monty`. Prefer the
-    most recently built one so `cargo build` and `cargo build --release`
-    both behave as expected.
+    cargo-built binary is at `<repo>/target/{debug,release}/<file_name>`.
+    Prefer the most recently built one so `cargo build` and
+    `cargo build --release` both behave as expected.
     """
     repo = Path(__file__).resolve().parents[4]
     if not (repo / 'Cargo.toml').is_file():
         return None
-    candidates = [path for profile in ('debug', 'release') if (path := repo / 'target' / profile / _BIN_NAME).is_file()]
+    candidates = [path for profile in ('debug', 'release') if (path := repo / 'target' / profile / file_name).is_file()]
     return max(candidates, key=lambda path: path.stat().st_mtime, default=None)

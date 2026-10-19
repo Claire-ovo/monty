@@ -234,6 +234,11 @@ Monty runs JavaScript as a second language behind the same wire protocol and poo
     `DateTimeSource::CallHost` as an `OsCall`, and idle or suspended sessions dump through `dump.rs` (CBOR behind a
     `MONTYJS` header with its own `DUMP_VERSION`); other OS calls and type checking are refused until the engine
     grows them (`TODO(ts-typecheck)`, `TODO(ts-syntax)`).
+- Bindings: `Monty(language='javascript')` / `AsyncMonty(language='javascript')` in Python and
+    `Monty.create({ language: 'javascript' })` in the JS client select the `monty-js` binary (`MONTY_JS_BIN`, the
+    `pydantic-monty-js-runtime` wheel from `crates/monty-js-runtime/pyproject.toml` behind the `pydantic-monty[js]`
+    extra, or the npm platform package, which ships both binaries); sessions default to `main.js`. The WASM worker
+    runs Python only. `docs/javascript-sandbox.md` is the user-facing page.
 - `crates/monty-js-datatest` — the differential harness: every `crates/monty-ecma/test_cases/*.js` runs through
     `monty-ecma` and through `node --input-type=module` (so both sides are strict modules), and stdout plus the
     uncaught `Name: message` must match. Cases follow the Python conventions (one consolidated file per feature,

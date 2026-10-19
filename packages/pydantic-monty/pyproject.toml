@@ -42,6 +42,10 @@ dependencies = [
 
 [project.optional-dependencies]
 opentelemetry = ["pydantic-monty-client[opentelemetry]"]
+# the JavaScript worker: `pip install "pydantic-monty[js]"` enables `Monty(language='javascript')`
+js = [
+    "pydantic-monty-js-runtime==1.2.0",
+]
 
 [project.scripts]
 # the `monty` binary comes from `pydantic-monty-runtime`, so without this the
@@ -64,3 +68,4 @@ bypass-selection = true
 # fetched from PyPI
 pydantic-monty-client = { workspace = true }
 pydantic-monty-runtime = { workspace = true }
+pydantic-monty-js-runtime = { workspace = true }

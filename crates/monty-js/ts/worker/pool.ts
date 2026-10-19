@@ -45,6 +45,8 @@ interface Waiter {
 
 /** A worker-backed pool; checked-out sessions remain usable after pool shutdown. */
 export class WorkerPool {
+  /** The WASM worker runs the Python interpreter only. */
+  readonly language = 'python' as const
   private readonly idle: WorkerSlot[] = []
   private readonly waiters: Waiter[] = []
   private readonly retiring = new Set<Promise<void>>()

@@ -6,7 +6,7 @@
 
 import { availableParallelism } from 'node:os'
 import { NativePool } from '../native-addon.js'
-import { findMontyBinary } from './binary.js'
+import { findMontyBinary, type Language } from './binary.js'
 import {
   type AssertMessageAnnotations,
   type OsPolicy,
@@ -21,7 +21,13 @@ import { captureTelemetryContext } from './telemetry.js'
 
 /** Options for [`Monty`]. */
 export interface MontyOptions {
-  /** Path to the `monty` binary; resolved automatically when omitted. */
+  /**
+   * The language the workers run: `'python'` (the `monty` binary, the
+   * default) or `'javascript'` (the `monty-js` binary). Sessions of a
+   * JavaScript pool feed JavaScript and default to `main.js` as their script name.
+   */
+  language?: Language
+  /** Path to the worker binary; resolved automatically (for the language) when omitted. */
   binaryPath?: string
   /** Workers spawned up front by `create()` (default 1). */
   minProcesses?: number
@@ -168,15 +174,20 @@ export class Monty {
   private readonly native: NativePool
   private closed = false
 
-  private constructor(native: NativePool) {
+  /** The language this pool's workers run. */
+  readonly language: Language
+
+  private constructor(native: NativePool, language: Language) {
     this.native = native
+    this.language = language
   }
 
   /** Creates the pool and prewarms `minProcesses` workers. */
   static async create(options: MontyOptions = {}): Promise<Monty> {
     validateMaxCheckouts(options.maxCheckoutsPerWorker)
+    const language = options.language ?? 'python'
     const native = new NativePool({
-      binaryPath: findMontyBinary(options.binaryPath),
+      binaryPath: findMontyBinary(options.binaryPath, language),
       minProcesses: options.minProcesses ?? 1,
       maxProcesses: options.maxProcesses ?? availableParallelism(),
       ...(options.checkoutTimeout !== undefined ? { checkoutTimeoutMs: options.checkoutTimeout * 1000 } : {}),
@@ -187,7 +198,7 @@ export class Monty {
       ...(options.maxCheckoutsPerWorker !== undefined ? { maxCheckoutsPerWorker: options.maxCheckoutsPerWorker } : {}),
     })
     await native.start()
-    return new Monty(native)
+    return new Monty(native, language)
   }
 
   /**
@@ -203,7 +214,7 @@ export class Monty {
     const osPolicy = encodeOsPolicy(options.osPolicy ?? {})
     const modules = new HostModules(options.externalModules)
     const native = this.native.checkout({
-      scriptName: options.scriptName ?? 'main.py',
+      scriptName: options.scriptName ?? (this.language === 'javascript' ? 'main.js' : 'main.py'),
       ...(options.limits !== undefined ? { limits: options.limits } : {}),
       typeCheck: options.typeCheck ?? false,
       ...(options.typeCheckStubs !== undefined ? { typeCheckStubs: options.typeCheckStubs } : {}),

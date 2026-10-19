@@ -36,6 +36,7 @@ nav:
       - Filesystem Access: 'filesystem.md'
       - Snapshots: 'snapshots.md'
       - Type Checking: 'type-checking.md'
+      - JavaScript Sandbox: 'javascript-sandbox.md'
   - Reference:
       - Comparison to Alternatives: 'alternatives.md'
       - Examples: 'examples.md'

@@ -32,8 +32,9 @@ install: .cargo install-py install-js ## Install the package, dependencies, and 
 dev-py: dev-py-runtime dev-py-bindings ## Install python packages for development
 
 .PHONY: dev-py-runtime
-dev-py-runtime: install-py ## Install the debug worker for Python development
+dev-py-runtime: install-py ## Install the debug workers (`monty` and `monty-js`) for Python development
 	uv run maturin develop --uv -m crates/monty-runtime/Cargo.toml
+	uv run maturin develop --uv -m crates/monty-js-runtime/Cargo.toml
 
 .PHONY: dev-py-bindings
 dev-py-bindings: install-py ## Install debug Python bindings without rebuilding the worker
@@ -59,9 +60,9 @@ lint-js: install-js ## Lint JS code with oxlint and type-check the tests
 	cd crates/monty-js && npm run lint
 
 .PHONY: test-js
-test-js: build-js ## Test the JS package (builds the monty binary the workers run)
-	cargo build -p monty-runtime
-	cd crates/monty-js && MONTY_BIN="$${CARGO_TARGET_DIR:-../../target}/debug/monty$(EXE_EXT)" npm test
+test-js: build-js ## Test the JS package (builds the monty and monty-js binaries the workers run)
+	cargo build -p monty-runtime -p monty-js-runtime
+	cd crates/monty-js && MONTY_BIN="$${CARGO_TARGET_DIR:-../../target}/debug/monty$(EXE_EXT)" MONTY_JS_BIN="$${CARGO_TARGET_DIR:-../../target}/debug/monty-js$(EXE_EXT)" npm test
 
 .PHONY: build-wasm
 build-wasm: install-js ## Build the WASI 0.2 worker component (requires the wasm32-wasip1 target)

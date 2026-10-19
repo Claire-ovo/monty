@@ -16,6 +16,7 @@ members = [
     "monty-workspace",
     "pydantic-monty",
     "pydantic-monty-client",
+    "pydantic-monty-js-runtime",
     "pydantic-monty-runtime",
 ]
 
@@ -2161,6 +2162,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+js = [
+    { name = "pydantic-monty-js-runtime" },
+]
 opentelemetry = [
     { name = "pydantic-monty-client", extra = ["opentelemetry"] },
 ]
@@ -2169,9 +2173,10 @@ opentelemetry = [
 requires-dist = [
     { name = "pydantic-monty-client", editable = "crates/monty-python" },
     { name = "pydantic-monty-client", extras = ["opentelemetry"], marker = "extra == 'opentelemetry'", editable = "crates/monty-python" },
+    { name = "pydantic-monty-js-runtime", marker = "extra == 'js'", editable = "crates/monty-js-runtime" },
     { name = "pydantic-monty-runtime", editable = "crates/monty-runtime" },
 ]
-provides-extras = ["opentelemetry"]
+provides-extras = ["opentelemetry", "js"]
 
 [[package]]
 name = "pydantic-monty-client"
@@ -2215,6 +2220,10 @@ dev = [
     { name = "pytest-examples", specifier = ">=0.0.14" },
     { name = "pytest-pretty", specifier = ">=1.3.0" },
 ]
+
+[[package]]
+name = "pydantic-monty-js-runtime"
+source = { editable = "crates/monty-js-runtime" }
 
 [[package]]
 name = "pydantic-monty-runtime"

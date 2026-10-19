@@ -26,10 +26,13 @@ for (const triple of NATIVE_TRIPLES) {
     process.exit(1)
   }
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-  const binary = triple.startsWith('win32') ? 'monty.exe' : 'monty'
-  if (!manifest.files.includes(binary)) {
-    manifest.files.push(binary)
+  const suffix = triple.startsWith('win32') ? '.exe' : ''
+  for (const binary of [`monty${suffix}`, `monty-js${suffix}`]) {
+    if (!manifest.files.includes(binary)) {
+      manifest.files.push(binary)
+    }
   }
+  const binary = `monty${suffix} and monty-js${suffix}`
   // keep the binary unpacked under yarn PnP so it can be spawned
   manifest.preferUnplugged = true
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`)

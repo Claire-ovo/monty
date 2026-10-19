@@ -10,6 +10,7 @@ from . import (
     AsyncSnapshot,
     ExternalResult,
     ExternalSettledResult,
+    Language,
     OsHandler,
     OSPolicy,
     PrintCallback,
@@ -594,6 +595,7 @@ class Monty:
     def __new__(
         cls,
         *,
+        language: Language = 'python',
         binary_path: str | Path | None = None,
         min_processes: int = 1,
         max_processes: int | None = None,
@@ -607,10 +609,15 @@ class Monty:
         Configure a worker pool; the workers are spawned by `with`.
 
         Arguments:
-            binary_path: Path to the `monty` CLI binary. When omitted it is
-                resolved from the `MONTY_BIN` environment variable, the
-                environment's scripts directory (where the `pydantic-monty-runtime`
-                dependency installs it), or `PATH`.
+            language: The language the workers run: `'python'` (the `monty`
+                binary) or `'javascript'` (the `monty-js` binary, installed by
+                the `pydantic-monty[js]` extra). Sessions of a JavaScript pool
+                feed JavaScript and report `main.js` as their default script name.
+            binary_path: Path to the worker binary. When omitted it is
+                resolved from the `MONTY_BIN` (or `MONTY_JS_BIN`) environment
+                variable, the environment's scripts directory (where the
+                `pydantic-monty-runtime` / `pydantic-monty-js-runtime` wheels
+                install it), or `PATH`.
             min_processes: Workers spawned eagerly and kept warm.
             max_processes: Cap on live workers (defaults to the CPU count);
                 checkouts beyond it wait for a worker to be returned.
@@ -633,7 +640,7 @@ class Monty:
     def checkout(
         self,
         *,
-        script_name: str = 'main.py',
+        script_name: str | None = None,
         limits: ResourceLimits | None = None,
         type_check: bool = False,
         type_check_stubs: str | None = None,
@@ -946,6 +953,7 @@ class AsyncMonty:
     def __new__(
         cls,
         *,
+        language: Language = 'python',
         binary_path: str | Path | None = None,
         min_processes: int = 1,
         max_processes: int | None = None,
@@ -966,7 +974,7 @@ class AsyncMonty:
     def checkout(
         self,
         *,
-        script_name: str = 'main.py',
+        script_name: str | None = None,
         limits: ResourceLimits | None = None,
         type_check: bool = False,
         type_check_stubs: str | None = None,
@@ -1085,7 +1093,7 @@ class AsyncMontyWebsocket:
     def checkout(
         self,
         *,
-        script_name: str = 'main.py',
+        script_name: str | None = None,
         limits: ResourceLimits | None = None,
         type_check: bool = False,
         type_check_stubs: str | None = None,

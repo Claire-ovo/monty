@@ -13,7 +13,14 @@ import { createRequire } from 'node:module'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const EXE = process.platform === 'win32' ? 'monty.exe' : 'monty'
+/** The sandbox language a pool runs, which picks the worker binary. */
+export type Language = 'python' | 'javascript'
+
+/** The worker binary's file name for a language. */
+function binaryName(language: Language): string {
+  const base = language === 'javascript' ? 'monty-js' : 'monty'
+  return process.platform === 'win32' ? `${base}.exe` : base
+}
 
 /**
  * The napi-style platform triple used to name binary packages, or `null` on
@@ -37,7 +44,9 @@ export function platformTriple(): string | null {
  * Resolves the `monty` binary path, throwing a descriptive error naming
  * every location tried when nothing is found.
  */
-export function findMontyBinary(explicit?: string): string {
+export function findMontyBinary(explicit?: string, language: Language = 'python'): string {
+  const exe = binaryName(language)
+  const envName = language === 'javascript' ? 'MONTY_JS_BIN' : 'MONTY_BIN'
   if (explicit !== undefined) {
     if (!existsSync(explicit)) {
       throw new Error(`monty binary not found at binaryPath: ${explicit}`)
@@ -47,27 +56,27 @@ export function findMontyBinary(explicit?: string): string {
 
   const tried: string[] = []
 
-  const envBin = process.env.MONTY_BIN
+  const envBin = process.env[envName]
   if (envBin) {
     if (existsSync(envBin)) {
       return envBin
     }
-    tried.push(`MONTY_BIN=${envBin}`)
+    tried.push(`${envName}=${envBin}`)
   }
 
-  const fromPackage = platformPackageBinary()
+  const fromPackage = platformPackageBinary(exe)
   if (fromPackage !== null) {
     return fromPackage
   }
   tried.push('platform package @pydantic/monty-<platform>')
 
-  const fromPath = searchPath()
+  const fromPath = searchPath(exe)
   if (fromPath !== null) {
     return fromPath
   }
   tried.push('PATH')
 
-  const fromWorkspace = workspaceBinary()
+  const fromWorkspace = workspaceBinary(exe)
   if (fromWorkspace !== null) {
     return fromWorkspace
   }
@@ -75,7 +84,7 @@ export function findMontyBinary(explicit?: string): string {
 
   throw new Error(
     `could not locate the monty binary (tried: ${tried.join(', ')}). ` +
-      'Install the platform package, set MONTY_BIN, or pass binaryPath.',
+      `Install the platform package, set ${envName}, or pass binaryPath.`,
   )
 }
 
@@ -86,14 +95,14 @@ export function findMontyBinary(explicit?: string): string {
  * the same package names previously shipped napi `.node` bindings, so a stale
  * install can resolve while holding no `monty` executable.
  */
-function platformPackageBinary(): string | null {
+function platformPackageBinary(exe: string): string | null {
   const triple = platformTriple()
   if (triple === null) {
     return null
   }
   const require = createRequire(import.meta.url)
   try {
-    return require.resolve(`@pydantic/monty-${triple}/${EXE}`)
+    return require.resolve(`@pydantic/monty-${triple}/${exe}`)
   } catch (err) {
     // Only not-found-style failures fall through (package not installed, or
     // installed without the binary). Anything else — permission errors,
@@ -108,12 +117,12 @@ function platformPackageBinary(): string | null {
 }
 
 /** Scans PATH directories for an executable `monty`. */
-function searchPath(): string | null {
+function searchPath(exe: string): string | null {
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
     if (dir === '') {
       continue
     }
-    const candidate = join(dir, EXE)
+    const candidate = join(dir, exe)
     if (isExecutableFile(candidate)) {
       return candidate
     }
@@ -140,12 +149,12 @@ function isExecutableFile(path: string): boolean {
  * containing a built `monty` binary (debug preferred — it matches the code
  * being developed; release as fallback).
  */
-function workspaceBinary(): string | null {
+function workspaceBinary(exe: string): string | null {
   let dir = dirname(fileURLToPath(import.meta.url))
   for (let i = 0; i < 6; i++) {
     if (existsSync(join(dir, 'Cargo.toml'))) {
       for (const profile of ['debug', 'release']) {
-        const candidate = join(dir, 'target', profile, EXE)
+        const candidate = join(dir, 'target', profile, exe)
         if (existsSync(candidate)) {
           return candidate
         }

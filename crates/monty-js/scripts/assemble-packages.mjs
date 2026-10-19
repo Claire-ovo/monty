@@ -41,9 +41,9 @@ function findArtifact(name, directory = artifacts) {
   return matches[0]
 }
 
-/** Extracts the worker executable from a `pydantic-monty-runtime` wheel. */
-function extractRuntime(triple, destination) {
-  const wheelDirectory = join(artifacts, runtimeArtifacts[triple])
+/** Extracts a worker executable from a `pydantic-monty-runtime` / `-js-runtime` wheel. */
+function extractRuntime(triple, destination, binary, artifactPrefix) {
+  const wheelDirectory = join(artifacts, runtimeArtifacts[triple].replace('pypi_files-runtime-', artifactPrefix))
   const wheels = readdirSync(wheelDirectory).filter((name) => /-py3-none-.*\.whl$/.test(name))
   if (wheels.length !== 1)
     throw new Error(`expected one Python-independent runtime wheel in ${wheelDirectory}, found ${wheels.length}`)
@@ -57,7 +57,6 @@ with zipfile.ZipFile(wheel) as archive:
     with archive.open(matches[0]) as source, open(destination, 'wb') as target:
         target.write(source.read())
 `
-  const binary = triple.startsWith('win32') ? 'monty.exe' : 'monty'
   execFileSync('python3', ['-c', script, join(wheelDirectory, wheels[0]), binary, destination])
 }
 
@@ -90,14 +89,25 @@ deepStrictEqual(
 execFileSync('node', ['scripts/create-platform-packages.mjs'], { cwd: root, stdio: 'inherit' })
 
 for (const triple of triples) {
-  const binary = triple.startsWith('win32') ? 'monty.exe' : 'monty'
+  const suffix = triple.startsWith('win32') ? '.exe' : ''
   const platformDirectory = join(root, 'npm', triple)
   const addonArtifacts = join(artifacts, `monty-addon-${triple}`)
   cpSync(findArtifact(`monty.${triple}.node`, addonArtifacts), join(platformDirectory, `monty.${triple}.node`))
-  const installedBinary = join(platformDirectory, binary)
-  extractRuntime(triple, installedBinary)
-  if (!triple.startsWith('win32')) chmodSync(installedBinary, 0o755)
-  packAndValidate(platformDirectory, `monty-${triple}.tgz`, ['package.json', `monty.${triple}.node`, binary])
+  // both worker binaries ship next to the addon: `monty` for Python sessions, `monty-js` for JavaScript ones
+  const binaries = [
+    [`monty${suffix}`, 'pypi_files-runtime-'],
+    [`monty-js${suffix}`, 'pypi_files-js-runtime-'],
+  ]
+  for (const [binary, artifactPrefix] of binaries) {
+    const installedBinary = join(platformDirectory, binary)
+    extractRuntime(triple, installedBinary, binary, artifactPrefix)
+    if (!triple.startsWith('win32')) chmodSync(installedBinary, 0o755)
+  }
+  packAndValidate(platformDirectory, `monty-${triple}.tgz`, [
+    'package.json',
+    `monty.${triple}.node`,
+    ...binaries.map(([binary]) => binary),
+  ])
 }
 
 const component = join(root, 'dist', 'worker', 'component', 'monty.component.js')

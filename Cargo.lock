@@ -2677,8 +2677,11 @@ name = "monty-ecma"
 version = "1.2.0"
 dependencies = [
  "ahash",
+ "chrono",
+ "getrandom 0.3.4",
  "indexmap",
  "insta",
+ "minicbor-serde",
  "monty-heap",
  "monty-regexp",
  "monty-types",

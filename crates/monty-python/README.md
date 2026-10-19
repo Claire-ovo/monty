@@ -51,7 +51,9 @@ Its `id` identifies the module when it crosses back out of the sandbox.
 The optional `.pyi` source in `stubs` is requested at the first type-checked import and retained for the session.
 
 This requires the `pydantic-monty-runtime` package, which is generally
-installed as part of the `pydantic-monty` meta-package.
+installed as part of the `pydantic-monty` meta-package. `Monty(language='javascript')`
+runs JavaScript instead and needs `pydantic-monty-js-runtime` (the `pydantic-monty[js]`
+extra); its binary is resolved the same way, with `MONTY_JS_BIN` in place of `MONTY_BIN`.
 
 ```python
 from pydantic_monty import Monty

@@ -230,7 +230,7 @@ jobs:
       # real `monty` binary: build it plainly first (outside the llvm-cov
       # target dir) and point the tests at it explicitly.
       - run: cargo build -p monty-runtime
-      - run: cargo llvm-cov --no-report -p monty-proto -p monty-runtime -p monty-pool --features monty-pool/telemetry
+      - run: cargo llvm-cov --no-report -p monty-proto -p monty-runtime -p monty-pool -p monty-ecma -p monty-js-runtime --features monty-pool/telemetry
         env:
           MONTY_TEST_BIN: ${{ github.workspace }}/target/debug/monty
       - name: Compile Rust documentation examples
@@ -290,6 +290,7 @@ jobs:
       # workspace (plain build, outside the llvm-cov env, so the worker binary
       # is not instrumented)
       - run: uv run maturin develop --uv -m crates/monty-runtime/Cargo.toml
+      - run: uv run maturin develop --uv -m crates/monty-js-runtime/Cargo.toml
 
       - name: Build and test Python bindings and run pytest with Rust coverage
         run: |
@@ -386,6 +387,8 @@ jobs:
       - run: make install-py
       - name: Build runtime wheel
         run: uv run maturin build -m crates/monty-runtime/Cargo.toml --profile ${{ matrix.profile }} --out runtime-wheels
+      - name: Build JavaScript runtime wheel
+        run: uv run maturin build -m crates/monty-js-runtime/Cargo.toml --profile ${{ matrix.profile }} --out runtime-wheels
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -506,12 +509,12 @@ jobs:
       - run: cargo build -p monty-runtime
       - name: Test subprocess crates (Unix)
         if: runner.os != 'Windows'
-        run: cargo test -p monty-proto -p monty-runtime -p monty-pool --features monty-pool/telemetry
+        run: cargo test -p monty-proto -p monty-runtime -p monty-pool -p monty-ecma -p monty-js-runtime --features monty-pool/telemetry
         env:
           MONTY_TEST_BIN: ${{ github.workspace }}/target/debug/monty
       - name: Test subprocess crates (Windows)
         if: runner.os == 'Windows'
-        run: cargo test -p monty-proto -p monty-runtime -p monty-pool --features monty-pool/telemetry
+        run: cargo test -p monty-proto -p monty-runtime -p monty-pool -p monty-ecma -p monty-js-runtime --features monty-pool/telemetry
         env:
           MONTY_TEST_BIN: ${{ github.workspace }}\target\debug\monty.exe
 
@@ -746,6 +749,13 @@ jobs:
           rust-toolchain: stable
           working-directory: crates/monty-runtime
 
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          command: sdist
+          args: --out dist
+          rust-toolchain: stable
+          working-directory: crates/monty-js-runtime
+
       # the sdist carries only the client crate and its Rust path dependencies,
       # so its build.rs must not reach for anything else in the workspace —
       # check that here rather than discovering it from a PyPI install
@@ -771,6 +781,11 @@ jobs:
         with:
           name: pypi_files-cli-sdist
           path: crates/monty-runtime/dist
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pypi_files-cli-js-sdist
+          path: crates/monty-js-runtime/dist
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -915,6 +930,24 @@ jobs:
           name: pypi_files-runtime-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux || 'manylinux' }}
           path: crates/monty-runtime/dist
 
+      # The JavaScript worker: the same bin-bindings wheel shape, without PGO.
+      - name: build JavaScript runtime wheel
+        uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux || 'manylinux_2_28' }}
+          args: --release --out dist
+          rust-toolchain: stable
+          docker-options: -e CI -e CFLAGS_s390x_unknown_linux_gnu
+          working-directory: crates/monty-js-runtime
+        env:
+          CFLAGS_s390x_unknown_linux_gnu: -march=z10
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pypi_files-js-runtime-${{ matrix.os }}-${{ matrix.target }}-${{ matrix.manylinux || 'manylinux' }}
+          path: crates/monty-js-runtime/dist
+
   # Test wheels on exotic architectures via QEMU
   test-builds-arch:
     name: test build on ${{ matrix.target }}
@@ -997,8 +1030,8 @@ jobs:
       - run: pip install pydantic-monty-client --no-index --no-deps --find-links dist --force-reinstall
       - run: python -c "import pydantic_monty; print(pydantic_monty.__version__)"
 
-      # the cli wheel built for this platform must serve the worker pools
-      - run: pip install pydantic-monty-runtime --no-index --no-deps --find-links dist --force-reinstall
+      # the cli wheels built for this platform must serve the worker pools
+      - run: pip install pydantic-monty-runtime pydantic-monty-js-runtime --no-index --no-deps --find-links dist --force-reinstall
       - name: smoke test worker pools
         shell: bash
         run: |
@@ -1009,6 +1042,9 @@ jobs:
           with Monty() as pool:
               with pool.checkout() as session:
                   assert session.feed_run('1 + 2') == 3
+          with Monty(language='javascript') as pool:
+              with pool.checkout() as session:
+                  assert session.feed_run('[1, 2].map((n) => n * 2)') == [2, 4]
 
           async def main():
               async with AsyncMonty() as pool:
@@ -1169,8 +1205,12 @@ jobs:
           node-version: ${{ matrix.node }}
 
       # the workers the JS client drives
-      - name: Build the monty binary
-        run: cargo build -p monty-runtime
+      - name: Build the worker binaries
+        run: cargo build -p monty-runtime -p monty-js-runtime
+
+      # the JavaScript engine's cases, each run through monty-ecma and through Node
+      - name: Differential JavaScript cases
+        run: cargo run -p monty-js-datatest
 
       # debug napi build + TypeScript; tests and the smoke test load it
       - name: Build
@@ -1187,6 +1227,7 @@ jobs:
         working-directory: crates/monty-js
         env:
           MONTY_BIN: ${{ github.workspace }}/target/debug/monty${{ runner.os == 'Windows' && '.exe' || '' }}
+          MONTY_JS_BIN: ${{ github.workspace }}/target/debug/monty-js${{ runner.os == 'Windows' && '.exe' || '' }}
 
   # Release builds of the napi shared library for each npm platform package.
   # The worker executables are reused from the pydantic-monty-runtime wheels.
@@ -1383,6 +1424,12 @@ jobs:
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: pypi_files-runtime-*
+          path: crates/monty-js/artifacts
+
+      - name: Download JavaScript runtime wheel artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: pypi_files-js-runtime-*
           path: crates/monty-js/artifacts
 
       - name: Download wasm component

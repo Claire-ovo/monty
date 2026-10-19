@@ -22,6 +22,9 @@ export function createWorkerPoolFromFactory(
   options: WasmPoolOptions,
   concurrency: number,
 ): Promise<Monty> {
+  if (options.language !== undefined && options.language !== 'python') {
+    throw new Error(`the WASM worker runs Python only; a '${options.language}' pool needs the native binary`)
+  }
   return WorkerPool.create(factory, {
     minWorkers: options.minProcesses,
     maxWorkers: options.maxProcesses ?? concurrency,

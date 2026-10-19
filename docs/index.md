@@ -100,7 +100,8 @@ Installation
     npm install @pydantic/monty
     ```
 
-    See [getting started with JavaScript](quickstart/javascript.md).
+    See [getting started with JavaScript](quickstart/javascript.md), and the [JavaScript sandbox](javascript-sandbox.md)
+    page for running JavaScript rather than Python inside the sandbox.
 
 === "Rust"
 

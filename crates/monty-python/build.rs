@@ -97,7 +97,11 @@ fn sync_meta_pyproject(path: &Path) {
 }
 
 /// The PyPI distributions the metapackage pins exactly; see [`sync_meta_pyproject`].
-const PINNED_DISTS: [&str; 2] = ["pydantic-monty-client", "pydantic-monty-runtime"];
+const PINNED_DISTS: [&str; 3] = [
+    "pydantic-monty-client",
+    "pydantic-monty-runtime",
+    "pydantic-monty-js-runtime",
+];
 
 /// The metapackage's pyproject.toml, which owns the `pydantic-monty` name on
 /// PyPI, or `None` when there is nothing to sync.

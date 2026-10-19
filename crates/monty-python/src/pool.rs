@@ -47,8 +47,8 @@ use monty_pool::{
 };
 use monty_proto::python::{InstanceStore, exc_py_to_monty, monty_to_py, py_to_monty_value};
 use monty_types::{
-    AssertMessageAnnotations, CallArgs, ExtFunctionResult, MontyException, MontyObject, NameLookupResult, NamedValues,
-    OsPolicy, PrintStream, TypeCheckingConfig, TypeCheckingFormat,
+    AssertMessageAnnotations, CallArgs, ExtFunctionResult, Language, MontyException, MontyObject, NameLookupResult,
+    NamedValues, OsPolicy, PrintStream, TypeCheckingConfig, TypeCheckingFormat,
 };
 use pyo3::{
     Borrowed,
@@ -118,6 +118,8 @@ where
 pub struct PyMonty {
     config: PoolConfig,
     pool: SharedPool,
+    /// The language the pool's workers run: it picks the binary and the default script name.
+    language: Language,
 }
 
 #[pymethods]
@@ -126,6 +128,7 @@ impl PyMonty {
     #[new]
     #[pyo3(signature = (
         *,
+        language = "python",
         binary_path = None,
         min_processes = 1,
         max_processes = None,
@@ -138,6 +141,7 @@ impl PyMonty {
     #[expect(clippy::too_many_arguments, reason = "one parameter per constructor argument")]
     fn new(
         py: Python<'_>,
+        language: &str,
         binary_path: Option<PathBuf>,
         min_processes: usize,
         max_processes: Option<usize>,
@@ -147,9 +151,12 @@ impl PyMonty {
         feed_duration_limit_grace: Option<f64>,
         turn_duration_limit_grace: Option<f64>,
     ) -> PyResult<Self> {
+        let language = parse_language(language)?;
         Ok(Self {
+            language,
             config: parse_pool_config(
                 py,
+                language,
                 binary_path,
                 min_processes,
                 max_processes,
@@ -187,7 +194,7 @@ impl PyMonty {
     /// Prepares a REPL session; the worker is checked out by `with`.
     #[pyo3(signature = (
         *,
-        script_name = "main.py",
+        script_name = None,
         limits = None,
         type_check = false,
         type_check_stubs = None,
@@ -202,7 +209,7 @@ impl PyMonty {
     fn checkout(
         &self,
         py: Python<'_>,
-        script_name: &str,
+        script_name: Option<&str>,
         limits: Option<&Bound<'_, PyDict>>,
         type_check: bool,
         type_check_stubs: Option<&Bound<'_, PyString>>,
@@ -217,7 +224,7 @@ impl PyMonty {
             pool: Arc::clone(&self.pool),
             repl_config: parse_repl_config(
                 py,
-                script_name,
+                script_name.unwrap_or(default_script_name(self.language)),
                 limits,
                 type_check,
                 type_check_stubs,
@@ -517,6 +524,8 @@ impl PyMontySession {
 pub struct PyAsyncMonty {
     config: PoolConfig,
     pool: SharedPool,
+    /// The language the pool's workers run: it picks the binary and the default script name.
+    language: Language,
 }
 
 #[pymethods]
@@ -525,6 +534,7 @@ impl PyAsyncMonty {
     #[new]
     #[pyo3(signature = (
         *,
+        language = "python",
         binary_path = None,
         min_processes = 1,
         max_processes = None,
@@ -537,6 +547,7 @@ impl PyAsyncMonty {
     #[expect(clippy::too_many_arguments, reason = "one parameter per constructor argument")]
     fn new(
         py: Python<'_>,
+        language: &str,
         binary_path: Option<PathBuf>,
         min_processes: usize,
         max_processes: Option<usize>,
@@ -546,9 +557,12 @@ impl PyAsyncMonty {
         feed_duration_limit_grace: Option<f64>,
         turn_duration_limit_grace: Option<f64>,
     ) -> PyResult<Self> {
+        let language = parse_language(language)?;
         Ok(Self {
+            language,
             config: parse_pool_config(
                 py,
+                language,
                 binary_path,
                 min_processes,
                 max_processes,
@@ -591,7 +605,7 @@ impl PyAsyncMonty {
     /// Prepares a REPL session; the worker is checked out by `async with`.
     #[pyo3(signature = (
         *,
-        script_name = "main.py",
+        script_name = None,
         limits = None,
         type_check = false,
         type_check_stubs = None,
@@ -606,7 +620,7 @@ impl PyAsyncMonty {
     fn checkout(
         &self,
         py: Python<'_>,
-        script_name: &str,
+        script_name: Option<&str>,
         limits: Option<&Bound<'_, PyDict>>,
         type_check: bool,
         type_check_stubs: Option<&Bound<'_, PyString>>,
@@ -621,7 +635,7 @@ impl PyAsyncMonty {
             pool: Arc::clone(&self.pool),
             repl_config: parse_repl_config(
                 py,
-                script_name,
+                script_name.unwrap_or(default_script_name(self.language)),
                 limits,
                 type_check,
                 type_check_stubs,
@@ -748,7 +762,7 @@ impl PyAsyncMontyWebsocket {
     /// Prepares a REPL session; the connection is opened by `async with`.
     #[pyo3(signature = (
         *,
-        script_name = "main.py",
+        script_name = None,
         limits = None,
         type_check = false,
         type_check_stubs = None,
@@ -765,7 +779,7 @@ impl PyAsyncMontyWebsocket {
     fn checkout(
         &self,
         py: Python<'_>,
-        script_name: &str,
+        script_name: Option<&str>,
         limits: Option<&Bound<'_, PyDict>>,
         type_check: bool,
         type_check_stubs: Option<&Bound<'_, PyString>>,
@@ -782,7 +796,7 @@ impl PyAsyncMontyWebsocket {
             pool: Arc::clone(&self.pool),
             repl_config: parse_repl_config(
                 py,
-                script_name,
+                script_name.unwrap_or("main.py"),
                 limits,
                 type_check,
                 type_check_stubs,
@@ -1123,12 +1137,31 @@ pub(crate) fn binary_finder(py: Python<'_>) -> PyResult<&Py<PyAny>> {
     })
 }
 
+/// The worker language a pool runs: `'python'` or `'javascript'`.
+fn parse_language(language: &str) -> PyResult<Language> {
+    match language.parse() {
+        Ok(language @ (Language::Python | Language::JavaScript)) => Ok(language),
+        _ => Err(PyValueError::new_err(format!(
+            "language must be 'python' or 'javascript', not '{language}'"
+        ))),
+    }
+}
+
+/// The script name a session reports when none is given: `main.py` or `main.js`.
+fn default_script_name(language: Language) -> &'static str {
+    match language {
+        Language::JavaScript | Language::TypeScript => "main.js",
+        Language::Python | Language::Bash => "main.py",
+    }
+}
+
 /// Builds the subprocess-transport `monty-pool` config from the (shared)
 /// `Monty`/`AsyncMonty` constructor arguments, resolving the binary via
 /// [`binary_finder`] when not given explicitly.
 #[expect(clippy::too_many_arguments, reason = "one parameter per constructor argument")]
 fn parse_pool_config(
     py: Python<'_>,
+    language: Language,
     binary_path: Option<PathBuf>,
     min_processes: usize,
     max_processes: Option<usize>,
@@ -1139,7 +1172,9 @@ fn parse_pool_config(
 ) -> PyResult<PoolConfig> {
     let binary_path = match binary_path {
         Some(path) => path,
-        None => binary_finder(py)?.call0(py)?.extract(py)?,
+        None => binary_finder(py)?
+            .call1(py, (py.None(), language.to_string()))?
+            .extract(py)?,
     };
     let mut config = PoolConfig::subprocess(binary_path);
     config.min_processes = min_processes;
