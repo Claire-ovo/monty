@@ -17,6 +17,7 @@ use std::{
     sync::Arc,
 };
 
+pub(crate) use monty_heap::{HeapId, StableHeap};
 use monty_types::{DEFAULT_GC_INTERVAL, MontyUuid, ResourceTracker};
 use serde::{de::Error as _, ser::SerializeStruct};
 
@@ -34,34 +35,8 @@ pub(crate) use crate::{
     heap_traits::{ContainsHeap, DropGuard, DropWithContext, HeapItem},
 };
 
-mod free_list;
-mod stable_heap;
-pub(crate) use stable_heap::StableHeap;
-
-/// Unique identifier for values stored inside the heap arena.
-///
-/// The ID does not encode ownership. Local IDs should normally be borrowed or
-/// wrapped immediately in `Value::Ref`; owned fields must document and release
-/// their reference through `HeapItem` or `DropWithContext` cleanup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct HeapId(usize);
-
-impl HeapId {
-    /// Creates a `HeapId` from a raw index.
-    #[inline]
-    pub(crate) fn from_index(index: usize) -> Self {
-        Self(index)
-    }
-
-    /// Returns the raw index value.
-    #[inline]
-    pub fn index(self) -> usize {
-        self.0
-    }
-}
-
 /// The empty tuple is a singleton which is allocated at startup.
-const EMPTY_TUPLE_ID: HeapId = HeapId(0);
+const EMPTY_TUPLE_ID: HeapId = HeapId::from_index(0);
 
 /// Color tag used by the trial-deletion cycle collector (Bacon–Rajan, ECOOP 2001).
 ///
@@ -1580,7 +1555,7 @@ impl<'a> HeapReader<'a> {
         //    The linear scan may legitimately encounter freed slots, so we use
         //    `try_entry` to skip them rather than panicking.
         for i in 0..self.heap.entries.len() {
-            let id = HeapId(i);
+            let id = HeapId::from_index(i);
             let ptr = self.read_ptr(id);
             let Some(entry) = ptr.try_entry(self) else {
                 continue;

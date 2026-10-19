@@ -4,7 +4,7 @@ use std::{
     mem::MaybeUninit,
 };
 
-use crate::heap::{HeapId, free_list::FreeList, stable_heap::iter::HeapEntriesIter};
+use crate::{HeapId, free_list::FreeList, stable_heap::iter::HeapEntriesIter};
 
 /// Number of entries per page. Chosen to balance between wasted memory (from
 /// partially-filled last pages) and the frequency of page allocations.
@@ -46,7 +46,7 @@ type Slot<T> = MaybeUninit<Option<T>>;
 ///   `Box`'s heap allocation, not into the `Vec`'s buffer.
 ///
 /// Index `i` maps to `pages[i / PAGE_SIZE][i % PAGE_SIZE]`.
-pub(crate) struct StableHeap<T> {
+pub struct StableHeap<T> {
     /// Fixed-size pages of heap entries. Each page is heap-allocated once and
     /// never moved, providing address stability for all contained entries.
     /// Wrapped in `UnsafeCell` to allow `allocate(&self)` to append new pages.
@@ -70,6 +70,7 @@ impl<T: fmt::Debug> fmt::Debug for StableHeap<T> {
 
 impl<T> StableHeap<T> {
     /// Creates a new paged storage pre-allocating enough pages for `capacity` entries.
+    #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         let num_pages = capacity.div_ceil(PAGE_SIZE);
         let mut pages = Vec::with_capacity(num_pages);
@@ -85,6 +86,10 @@ impl<T> StableHeap<T> {
 
     /// Returns the total number of initialized slots (including freed ones).
     #[inline]
+    #[expect(
+        clippy::len_without_is_empty,
+        reason = "counts slots, freed ones included, so emptiness is not meaningful"
+    )]
     pub fn len(&self) -> usize {
         self.len.get()
     }
@@ -179,8 +184,7 @@ impl<T> StableHeap<T> {
         (id, slot)
     }
 
-    /// Iterates the live values
-    #[cfg(any(feature = "ref-count-return", test))]
+    /// Iterates the live values.
     pub fn iter(&self) -> impl Iterator<Item = (HeapId, &T)> {
         // SAFETY: [DH] - iterating only the live entries ensures that caller
         // can never observe `None` entries which could be invalidated by
@@ -191,7 +195,7 @@ impl<T> StableHeap<T> {
     /// Accesses the slot at `id` with an immutable borrow on self. Returns `None` if the slot
     /// is out of bounds.
     ///
-    /// # Safety:
+    /// # Safety
     /// - Caller must ensure that `Some(&None)` references do not overlap with any calls to `allocate()`,
     ///   as these will be invalidated by the reuse of freed slots.
     #[track_caller]
@@ -228,7 +232,7 @@ fn create_page<T>() -> Box<[Slot<T>; PAGE_SIZE]> {
 mod stable_heap_entry {
     use std::ops::{Deref, DerefMut};
 
-    use crate::heap::{HeapId, free_list::FreeList};
+    use crate::{HeapId, free_list::FreeList};
 
     pub struct StableHeapEntry<'a, T> {
         id: HeapId,
@@ -338,7 +342,7 @@ impl<T> Drop for StableHeap<T> {
 /// Place iterator inside a submodule to create a safety boundary on `new` constructor
 mod iter {
     use super::StableHeap;
-    use crate::heap::HeapId;
+    use crate::HeapId;
 
     pub(super) struct HeapEntriesIter<'a, T> {
         entries: &'a StableHeap<T>,
@@ -346,7 +350,7 @@ mod iter {
     }
 
     impl<'a, T> HeapEntriesIter<'a, T> {
-        /// # Safety:
+        /// # Safety
         ///
         /// The caller must ensure that `HeapEntries::allocate()`
         /// is never called for the lifetime `'a` for which this iterator and its

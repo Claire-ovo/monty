@@ -18,6 +18,7 @@ path = "src/lib.rs"
 
 [dependencies]
 monty-macros = { workspace = true }
+monty-heap = { workspace = true }
 monty-types = { workspace = true }
 ruff_python_parser = { workspace = true }
 ruff_python_stdlib = { workspace = true }
@@ -60,15 +61,15 @@ jiter = { version = "0.17.0", features = ["num-bigint"] }
 [features]
 # ref-count-return changes behavior to return information on reference counts to check they're correct
 # should be used for testing only
-ref-count-return = ["test-hooks"]
+ref-count-return = ["test-hooks", "monty-heap/ref-count-return"]
 # memory-model-checks enables a Drop implementation on Value which catches heap allocated values that are dropped
 # without being dereferenced, and sets the default GC interval to 1 so garbage collection runs on every
 # GC-tracked allocation.
 # should be used for testing only
-memory-model-checks = []
+memory-model-checks = ["monty-heap/memory-model-checks"]
 # test-hooks exposes small internal helpers needed by integration tests that
 # exercise production behavior without duplicating implementation details.
-test-hooks = ["monty-types/test-hooks"]
+test-hooks = ["monty-types/test-hooks", "monty-heap/test-hooks"]
 
 [dev-dependencies]
 monty-types = { workspace = true, features = ["tzdb"] }

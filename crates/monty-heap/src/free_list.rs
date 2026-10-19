@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
 
-use crate::heap::HeapId;
+use crate::HeapId;
 
 /// Not-thread-safe free list for `HeapId`s.
 pub struct FreeList {
