@@ -141,12 +141,15 @@ Everything else raises `AttributeError`, including: `truncate()`,
     loops and are unaffected, so `list(x for x in f)` reads an unread file.
 - `close()` releases the cached buffer (matching CPython), returning its memory
     when no other value, such as `data = f.read()`, retains it.
+- Reading a closed file always raises `ValueError: I/O operation on closed file.`,
+    CPython's text-mode wording; CPython's binary files say `read of closed file`.
 - File I/O is rejected inside callbacks the interpreter evaluates in a
     synchronous context that cannot suspend to the host — the `key` of
     `sorted()`/`list.sort()`/`min()`/`max()`, `map()`/`filter()` functions,
     `iter(callable, sentinel)`, `defaultdict`'s `default_factory`, and dunder
-    methods invoked implicitly. The first read that needs the host raises
-    `NotImplementedError: <context>: OS function 'Path.read_text' is not yet supported in this context` where CPython
+    methods that cannot suspend (see [classes.md](classes.md)).
+    The first read that needs the host raises
+    `NotImplementedError: OS function 'Path.read_text' cannot suspend in this synchronous context` where CPython
     would simply read.
 - A read that *fails* in the host leaves the file in a retry-safe state:
     `pending_read` is cleared, the buffer stays empty, and `eof` is not

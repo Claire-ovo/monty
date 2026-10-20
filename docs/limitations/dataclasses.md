@@ -29,6 +29,9 @@ around a decoration will not catch these.
     Setting one away from its CPython default raises
     `NotImplementedError: dataclass() does not yet support the <name> option`;
     each is named individually rather than reported as an unknown keyword.
+    The default `match_args=True` does write `__match_args__` (every field, in
+    order) unless the class body defines its own, so positional class patterns
+    work; see [match.md](match.md).
     Ordering dunders therefore do not exist, and hashing is whatever `eq`/`frozen`
     imply.
 - **`InitVar[...]`** — raises
@@ -80,8 +83,9 @@ field after a defaulted one
 - **`default_factory` and `__post_init__` cannot suspend.** Both run in a
     synchronous position the interpreter cannot preserve and resume, so calling an
     external function, an `os` function, or awaiting inside one raises
-    `NotImplementedError: dataclass field default_factory: external function 'f' is not yet supported in this context`
-    (and the `__post_init__` equivalent). Ordinary in-sandbox code in them runs normally.
+    `NotImplementedError: external function 'f' cannot suspend in this synchronous context`.
+    The traceback identifies the calling code.
+    Ordinary in-sandbox code in them runs normally.
 - **`ClassVar` / `InitVar` detection is purely textual.** Monty matches the
     annotation text (bare, dotted, subscripted, or quoted) without checking that
     the name is actually imported, where CPython resolves a *string* annotation

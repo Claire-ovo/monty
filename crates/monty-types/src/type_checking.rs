@@ -195,8 +195,10 @@ pub const SANDBOX_MODULE_NAMES: &[&str] = &[
     "asyncio",
     "base64",
     "binascii",
+    "bisect",
     "collections",
     "copy",
+    "csv",
     "dataclasses",
     "datetime",
     "functools",
@@ -212,6 +214,7 @@ pub const SANDBOX_MODULE_NAMES: &[&str] = &[
     "re",
     "sys",
     "time",
+    "tomllib",
     "typing",
     "unicodedata",
 ];

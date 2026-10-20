@@ -120,6 +120,7 @@ const SANDBOX_MODULES = new Set([
   'binascii',
   'collections',
   'copy',
+  'csv',
   'dataclasses',
   'datetime',
   'functools',
@@ -135,6 +136,7 @@ const SANDBOX_MODULES = new Set([
   're',
   'sys',
   'time',
+  'tomllib',
   'typing',
   'unicodedata',
 ])

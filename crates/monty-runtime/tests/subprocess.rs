@@ -16,8 +16,9 @@ use monty_proto::{
     WireFunctionCall, exceeds_max_frame_len, ext_result_to_proto, named_values_to_proto, pb, write_frame,
 };
 use monty_types::{
-    CallArgs, DateTimeSource, ExtFunctionResult, IMPORT_STUBS_CALL_ID, MontyDate, MontyDateTime, MontyObject,
-    NameLookupResult, NamedValues, OsPolicy, RandomSeed, RandomStart, SandboxTimeZone, SleepMode, SourceRange,
+    CallArgs, DateTimeSource, ExtFunctionResult, FileMode, IMPORT_STUBS_CALL_ID, MontyDate, MontyDateTime,
+    MontyFileHandle, MontyObject, NameLookupResult, NamedValues, OsPolicy, RandomSeed, RandomStart, SandboxTimeZone,
+    SleepMode, SourceRange,
     scan::{EntryInfo, ScanEntry, scan_reply},
     unstable::{self, MontyNode},
 };
@@ -1199,6 +1200,8 @@ fn large_allocations_are_rejected_before_the_hard_limit() {
             "from collections import deque\nd = deque()\nd.extend(range(1_000_000))",
             16_042_653,
         ),
+        // The json encoder preflights each doubling of its output buffer.
+        ("import json\njson.dumps(['x' * 1000] * 2000)", 1_167_196),
         // `randbytes` charges its word buffer and the byte buffer it fills.
         ("import random\nrandom.seed(0)\nrandom.randbytes(600_000)", 1_247_167),
         // A `range` population can be as long as `i64::MAX` while costing nothing,
@@ -1228,6 +1231,28 @@ fn large_allocations_are_rejected_before_the_hard_limit() {
         // would fit is still refused.
         ("import hashlib\nhashlib.shake_128().digest(2_000_000)", 2_045_903),
         ("import hashlib\nhashlib.shake_128().hexdigest(400_000)", 1_245_904),
+        // A csv record copies its fields' text into the line, refused at a capacity
+        // doubling like the formatter cases above.
+        (
+            "import csv\nclass S:\n    def write(self, t):\n        pass\ns = 'x' * 400_000\ncsv.writer(S()).writerow([s, s])",
+            1_250_723,
+        ),
+        // A `DictReader` row's dict is sized from `fieldnames` up front, preflighted like a
+        // dict copy.
+        (
+            "import csv\nnames = list(range(30_000))\nnext(csv.DictReader(['x'], fieldnames=names))",
+            1_965_832,
+        ),
+        // A list `fieldnames` is copied per row, and the keys of a row dict are copied for
+        // the `extrasaction='raise'` check: both bulk copies are preflighted.
+        (
+            "import csv\nclass S:\n    def write(self, t):\n        pass\nnames = [None] * 40_000\ncsv.DictWriter(S(), names).writerow({})",
+            1_331_169,
+        ),
+        (
+            "import csv\nclass S:\n    def write(self, t):\n        pass\nrow = {i: None for i in range(10_000)}\ncsv.DictWriter(S(), []).writerow(row)",
+            1_079_568,
+        ),
     ];
 
     for (code, expected) in cases {
@@ -1241,6 +1266,32 @@ fn large_allocations_are_rejected_before_the_hard_limit() {
         assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{code}");
         child.shutdown();
     }
+}
+
+/// `DictWriter.writerows()` on a file keeps one list per row until its single
+/// write, so wide `fieldnames` over many sparse dicts amplify the input: each
+/// row's list is preflighted against the usage so far.
+#[test]
+fn dict_writer_rows_are_rejected_before_the_hard_limit() {
+    let code = "import csv\nf = open('/out.csv', 'w')\ncsv.DictWriter(f, range(20_000)).writerows([{}] * 100)";
+    let mut child = ChildProc::spawn();
+    child.create_repl_with(configure_with_max_memory(1024 * 1024));
+    let (_, event) = child.feed(code);
+    let pb::child_event::Kind::OsCall(call) = event else {
+        panic!("expected OsCall, got {event:?}");
+    };
+    let handle = MontyFileHandle {
+        path: "/out.csv".to_owned(),
+        mode: "w".parse::<FileMode>().unwrap(),
+        position: 0,
+    };
+    let (_, event) = child.resume_return(call.call_id, MontyObject::file_handle(handle));
+    let error = expect_error(event);
+    assert_eq!(error.exc_type, "MemoryError", "{code}");
+    let message = error.message.expect("MemoryError should have a message");
+    assert_reported_usage(&message, 1_206_975, code);
+    assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{code}");
+    child.shutdown();
 }
 
 /// `os.path.expandvars` amplifies its input by the length of the values it
@@ -1769,6 +1820,65 @@ fn batched_without_a_size_hint_is_refused_before_the_hard_limit() {
     );
     assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2));
     child.shutdown();
+}
+
+/// `tomllib` turns a couple of source bytes into a tree node (`[[a]]` into a
+/// whole table), so a document that fits can build a tree that does not. Only
+/// the parser's per-element / per-statement poll stops it, and where that
+/// lands depends on the tree's growth, so this pins the property rather than
+/// a byte figure.
+#[test]
+fn tomllib_documents_are_refused_before_the_hard_limit() {
+    const SOFT_LIMIT: u64 = 1024 * 1024;
+    const HARD_CEILING: u64 = SOFT_LIMIT + 4 * 1024 * 1024;
+
+    for code in [
+        "import tomllib\ntomllib.loads('x = [' + '1,' * 200_000 + ']')",
+        "import tomllib\ntomllib.loads('[[a]]\\n' * 100_000)",
+    ] {
+        let mut child = ChildProc::spawn();
+        child.create_repl_with(configure_with_max_memory(SOFT_LIMIT));
+        let (_, event) = child.feed(code);
+        let error = expect_error(event);
+        assert_eq!(error.exc_type, "MemoryError", "{code}");
+        let message = error.message.expect("MemoryError should have a message");
+        let used = reported_usage(&message, code);
+        assert!(
+            (SOFT_LIMIT..HARD_CEILING).contains(&used),
+            "{code}: reported {used} bytes, expected a refusal between {SOFT_LIMIT} and {HARD_CEILING}"
+        );
+        assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{code}");
+        child.shutdown();
+    }
+}
+
+/// A document of many keys or tables fits under these soft limits until one
+/// insertion doubles a table's (or its namespace flags') buffers by more than
+/// the 4 MiB headroom, which only a growth preflight can refuse softly.
+#[test]
+fn tomllib_table_growth_is_refused_before_the_hard_limit() {
+    for (mib, source) in [
+        (16, "'\\n'.join(f'k{i} = 1' for i in range(100_000))"),
+        (16, "'x = {' + ', '.join(f'k{i} = 1' for i in range(100_000)) + '}'"),
+        (24, "'\\n'.join(f'[t{i}]' for i in range(100_000))"),
+        // Refused deep into a wide table, whose cleanup must not allocate in proportion to it.
+        (64, "'\\n'.join(f'k{i} = 1' for i in range(400_000))"),
+        // Each dotted part queues a namespace flag until the next header.
+        (96, "'\\n'.join(f'a.b.c.d.e.k{i} = 1' for i in range(200_000))"),
+    ] {
+        let mut child = ChildProc::spawn();
+        child.create_repl_with(configure_with_max_memory(mib * 1024 * 1024));
+        // Built in its own feed so a `MemoryError` can only come from parsing.
+        let (_, event) = child.feed(&format!("import tomllib\ns = {source}\nNone"));
+        assert!(
+            matches!(event, pb::child_event::Kind::Complete(_)),
+            "{source}: {event:?}"
+        );
+        let (_, event) = child.feed("tomllib.loads(s)");
+        assert_eq!(expect_error(event).exc_type, "MemoryError", "{source}");
+        assert_eq!(child.feed_complete("1 + 1"), MontyObject::int(2), "{source}");
+        child.shutdown();
+    }
 }
 
 /// A small `n` caps a batch however long the source, so batching a huge

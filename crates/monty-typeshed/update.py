@@ -137,6 +137,8 @@ COPY_FILES = [
     'json/__init__.pyi',
     'json/encoder.pyi',
     'json/decoder.pyi',
+    # narrowed to Monty's surface (no `parse_float`) by custom/tomllib.pyi
+    'tomllib.pyi',
     # ==============================
     'math.pyi',
     'datetime.pyi',
@@ -162,9 +164,11 @@ abc: 3.0-  # not importable at runtime, only for type checking
 asyncio: 3.4-
 base64: 3.0-
 binascii: 3.0-
+bisect: 3.0-
 builtins: 3.0-
 collections: 3.0-
 copy: 3.0-
+csv: 3.0-
 dataclasses: 3.7-
 datetime: 3.0-
 functools: 3.0-
@@ -182,6 +186,7 @@ random: 3.0-
 re: 3.0-
 sys: 3.0-
 time: 3.0-
+tomllib: 3.11-
 typing: 3.5-
 typing_extensions: 3.7-
 types: 3.0-

@@ -42,6 +42,10 @@ These raise `NameError`:
     `AttributeError`, so `[1].append`, `'a'.upper`, `{}.get`, `dict.fromkeys`
     and `list.__class_getitem__` cannot be assigned, passed as a callback or
     reached through `getattr`. Call them directly (`list.__class_getitem__(int)`).
+- **Large integer literal identity** — separate occurrences of the same literal outside the `i64` range are not
+    deduplicated, so `a = 18446744073709551616; b = 18446744073709551616; a is b` is `False` where CPython may reuse a
+    single constant and return `True`.
+    Repeated loads of one literal share its identity; use `==` to compare numeric values.
 - **`hash(x)`** — Monty hashes `str`, `bytes`, `float`, `complex` and every container with
     its own algorithm, so the values differ from CPython's. Only `bool`,
     small `int`, and a `float` or `complex` equal to one of them agree: an `int` hashes to itself, which is what CPython does
@@ -155,9 +159,8 @@ These raise `NameError`:
     or a tuple of those. Passing a host-supplied dataclass / namedtuple as the
     second argument raises `TypeError`.
 - **`iter()`** — see [iter.md](iter.md) for iterator and `iter(callable, sentinel)` divergences.
-- **`pow(base, exp, mod)`** — the three-argument form requires all integers and
-    rejects negative exponents with `ValueError` instead of computing a modular
-    inverse. Non-modular exponents whose result cannot be materialized raise
+- **`pow(base, exp, mod)` with integer operands** rejects negative exponents with `ValueError`
+    instead of computing a modular inverse. Non-modular exponents whose result cannot be materialized raise
     `OverflowError` (see [resource_limits.md](resource_limits.md)).
 - **`pow(base, exp)` and `**` with float operands and a real result** — overflow raises
     `OverflowError` like CPython, always worded

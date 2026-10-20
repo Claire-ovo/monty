@@ -37,6 +37,8 @@ and function-attributes-become-methods), bound methods, class variables
 (arbitrary expressions, evaluated in a real suspendable class-body scope),
 **class decorators** (`@deco class Foo`),
 `__repr__`/`__str__`/`__enter__`/`__exit__`/`__hash__` and all six rich comparison dunders,
+`__call__`, `__getitem__`/`__setitem__`, unary `+`/`-`, and binary numeric operators
+(including `@`, `divmod()` and `pow()`) with their reflected forms,
 `obj.__class__`, `Foo.__name__`, `Foo.__doc__`/`obj.__doc__`,
 `Foo.__annotations__` (ordered; values stringized and provisional, see
 [typing.md](typing.md)), `type(obj)`/`isinstance(obj, Foo)`, and the 3-arg
@@ -95,6 +97,11 @@ order and error wording, but with these divergences:
     suspending.
 - **Rich comparison dunders, `__hash__` and `__index__` cannot suspend**: like `__repr__`/`__str__`,
     they run synchronously, so calling an external/OS function raises rather than yielding to the host.
+- **Arithmetic, conversion, rounding and subscript dunders cannot suspend.**
+    `__neg__`, `__pos__`, `__abs__`, `__invert__`, `__int__`, `__float__`, `__round__`, `__floor__`, `__ceil__`,
+    `__trunc__`, binary numeric dunders (including reflected forms), `__getitem__` and `__setitem__` run synchronously.
+    An external or OS call raises `NotImplementedError` rather than yielding to the host.
+    `__call__` uses the ordinary suspendable call path.
 - **Instances are always truthy**: `__bool__` and `__len__` are not dispatched,
     including when truth-testing an instance returned by a comparison dunder.
 - **Bound methods compare and hash by identity**: each `obj.method` access
@@ -125,8 +132,10 @@ order and error wording, but with these divergences:
     CPython's default 1000-frame limit would still render may raise
     `RecursionError` in Monty. The same cap applies to synchronous callback
     evaluation such as `map()`, `filter()`, `sorted()`/`list.sort(key=...)`,
-    `min()`/`max(key=...)`, and exotic `__init__` recursion (see the "Recursion"
-    section of [resource_limits.md](resource_limits.md)).
+    `min()`/`max(key=...)`, arithmetic and subscript dunders, and exotic `__init__` recursion.
+    A chain of callable instances stored as class-level `__call__` members also has this cap;
+    ordinary Python-function `__call__` recursion uses the normal frame limit
+    (see the "Recursion" section of [resource_limits.md](resource_limits.md)).
 - **Comprehensions in the class body** can see class variables, because Monty
     inlines comprehensions into the enclosing scope. In CPython a comprehension
     has its own scope that skips the class scope, so only the *leftmost iterable*
@@ -364,18 +373,14 @@ every construction request. Divergences:
     `...<N lines>...`), where CPython pins the individual decorator that raised.
     Every decorator in a stack reports that same location; only the callee frame
     identifies which one raised.
-- Dunder protocols other than `__init__`, `__repr__`, `__str__`,
-    `__enter__`, `__exit__`, `__iter__`, `__next__`, `__contains__`, `__eq__`, `__ne__`,
-    `__lt__`, `__le__`, `__gt__`, `__ge__`, `__hash__`, and `__index__`: `__new__`, `__call__`,
-    `__getitem__`, `__setitem__`, `__add__`, `__bool__`, etc. are not dispatched for user-defined instances.
-- **`__index__` is dispatched for indexing, but not for arithmetic
-    operators.** A class defining it works as a subscript *read* (`seq[obj]`), as
-    a slice bound (`seq[obj:]`, `slice(obj)`), and as an integer argument
-    (`range(obj)`, `'x'.center(obj)`, `s.find(sub, obj)`). It is **not**
-    consulted by sequence repetition, so `'ab' * obj` and `[0] * obj` raise
-    `TypeError: unsupported operand type(s) for *` where CPython repeats — each
-    numeric operator carries its own coercion, which does not route through the
-    shared index path.
+- Dunder protocols not dispatched for user-defined instances include `__new__`,
+    `__bool__`, `__len__`, `__complex__`, `__format__`, and all in-place arithmetic dunders (`__iadd__`, etc.).
+    Augmented assignment falls back to binary arithmetic rather than calling an in-place dunder,
+    except `@=`, which is rejected at compile time.
+- **Sequence repetition does not consult `__index__`.**
+    `'ab' * obj` and `[0] * obj` raise `TypeError: can't multiply sequence by non-int of type 'Foo'`
+    for an instance of `Foo`, where CPython repeats.
+- **Returning `bool` from `__int__` or `__index__` does not emit a `DeprecationWarning`.**
 - **Subscript assignment does not dispatch `__index__`.** `lst[obj] = x` raises
     `TypeError: list indices must be integers or slices, not Foo` where CPython
     coerces and assigns; only the read side takes the index path.
@@ -395,13 +400,11 @@ every construction request. Divergences:
     bounds written as literals and to those returned by `__index__` alike. Plain
     indexing is unaffected: `[1, 2, 3][10**30]` raises `IndexError` as CPython
     does.
-- `__iter__` / `__next__` / `__contains__` **are** dispatched, but like
-    `__repr__`/`__str__` they run synchronously, so one that calls an external or
-    OS function cannot suspend and raises `NotImplementedError`. The error is
-    raised at the offending call inside the callee, so a `try`/`except` there
-    catches it like any other exception. Two related protocols are still not
-    dispatched, so a class relying on either is not
-    iterable:
+- `__contains__` cannot suspend on an external or OS call; it raises `NotImplementedError` inside the method.
+    `__iter__` and `__next__` have the same restriction in `for`, comprehensions, collection constructors,
+    and native iterator adaptors, but can suspend through direct `iter()`, `next()`, and `functools.reduce()` calls.
+    See [iter.md](iter.md) for other iteration restrictions.
+    Two related protocols are still not dispatched:
     - the legacy `__getitem__`-only fallback: CPython iterates a class defining
         `__getitem__` but not `__iter__` from index 0 until `IndexError`, while
         Monty reports it as not iterable. (`monty -t` accepts `iter(obj)` for

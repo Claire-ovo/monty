@@ -1,4 +1,5 @@
 import asyncio
+import bisect
 import datetime
 import functools
 import hashlib
@@ -8,6 +9,7 @@ import os
 import random
 import re
 import sys
+import tomllib
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -625,6 +627,15 @@ assert_type(tz, datetime.timezone)
 assert_type(json.loads('null'), Any)
 assert_type(json.dumps(None), str)
 
+# === tomllib ===
+assert_type(tomllib.loads('a = 1'), dict[str, Any])
+with Path('pyproject.toml').open('rb') as toml_file:
+    assert_type(tomllib.load(toml_file), dict[str, Any])
+try:
+    tomllib.loads('?')
+except tomllib.TOMLDecodeError as toml_exc:
+    check_str(str(toml_exc))
+
 # === iter() / next() ===
 # Element types must survive the `Iterator` protocol: `Iterator.__next__` is
 # decorated `@abstractmethod`, so a stub tree missing `abc` degrades every one
@@ -644,6 +655,32 @@ assert_type(list(iter(lambda: 0, 0)), list[int])
 # this annotation is a `not-subscriptable` error. ty models `partial` calls
 # itself, so the return type is not the stub's to get wrong.
 partial_ann: functools.partial[list[int]] = functools.partial(get_list_int)
+
+
+# The cached wrapper's return type comes from the wrapped function, and
+# `cache_info()` from the stub's `_CacheInfo`.
+@functools.cache
+def cached_double(n: int) -> int:
+    return n * 2
+
+
+assert_type(cached_double(2), int)
+assert_type(cached_double.cache_info().hits, int)
+assert_type(cached_double.cache_info().currsize, int)
+assert_type(cached_double.__wrapped__(2), int)
+
+
+# Keyword arguments and defaults come through the wrapper too, in every
+# decorator form.
+@functools.lru_cache(maxsize=2)
+def cached_repeat(a: int, b: str = 'x') -> str:
+    return b * a
+
+
+assert_type(cached_repeat(2), str)
+assert_type(cached_repeat(2, 'y'), str)
+assert_type(cached_repeat(2, b='y'), str)
+assert_type(functools.lru_cache(get_list_int)(), list[int])
 
 # Loop variables keep their element type for every iterable, not just lists
 for x_list in get_list_int():
@@ -698,3 +735,14 @@ assert_type(random.choices('abc', k=2), list[str])
 assert_type(random.Random(42).uniform(1, 2), float)
 assert_type(random.Random().getrandbits(8), int)
 assert_type(os.urandom(4), bytes)
+
+
+# === bisect ===
+
+assert_type(bisect.bisect_left([1, 2, 3], 2), int)
+assert_type(bisect.bisect_right((1, 2), 2, hi=None), int)
+assert_type(bisect.bisect([1, 2], 2, lo=False), int)
+assert_type(bisect.bisect_left([(1, 'a')], 1, key=lambda row: row[0]), int)
+assert_type(bisect.insort_left([1, 2], 2), None)
+assert_type(bisect.insort_right([(1, 'a')], (2, 'b'), key=lambda row: row[0]), None)
+assert_type(bisect.insort([1, 2], 3), None)

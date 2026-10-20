@@ -31,31 +31,19 @@ struct ListSortArgs {
 }
 
 /// Parses sorting keywords and sorts detached items in place.
-/// `key_context` names the caller in rejected-suspension errors.
-pub fn parse_and_sort(
-    key_context: &'static str,
-    items: &mut [Value],
-    args: ArgValues,
-    vm: &mut VM<'_>,
-) -> RunResult<()> {
+pub fn parse_and_sort(items: &mut [Value], args: ArgValues, vm: &mut VM<'_>) -> RunResult<()> {
     let ListSortArgs { key, reverse } = ListSortArgs::from_args(args, vm)?;
     let key_fn = match key {
         Some(Value::None) => None,
         other => other,
     };
     defer_drop!(key_fn, vm);
-    sort_values(key_context, items, key_fn.as_ref(), reverse.bool(), vm)
+    sort_values(items, key_fn.as_ref(), reverse.bool(), vm)
 }
 
 /// Sorts values stably, evaluating each optional key once in input order.
 /// Comparisons and key calls may fail without losing any owned values.
-pub fn sort_values(
-    key_context: &'static str,
-    values: &mut [Value],
-    key_fn: Option<&Value>,
-    reverse: bool,
-    vm: &mut VM<'_>,
-) -> RunResult<()> {
+pub fn sort_values(values: &mut [Value], key_fn: Option<&Value>, reverse: bool, vm: &mut VM<'_>) -> RunResult<()> {
     if values.len() > INSERTION_SORT_THRESHOLD {
         vm.heap
             .tracker
@@ -70,7 +58,7 @@ pub fn sort_values(
             // Re-entry restarts the VM countdown, so short keys need this poll.
             vm.heap.tracker.check_time_every(i)?;
             let item = item.clone_with_heap(vm);
-            keys.push(vm.evaluate_function(key_context, f, ArgValues::One(item))?);
+            keys.push(vm.evaluate_function(f, ArgValues::One(item))?);
         }
         sort_indices(&mut indices, keys, reverse, vm)?;
     } else {

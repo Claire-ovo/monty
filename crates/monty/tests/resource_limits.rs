@@ -370,6 +370,60 @@ x
     );
 }
 
+/// `DictReader` skips blank rows in a native loop over the source, which must poll the
+/// clock: an endless source of blank lines never reaches a Python-level checkpoint.
+#[test]
+fn time_limit_covers_csv_blank_row_skipping() {
+    let code = r"
+import csv
+import itertools
+next(csv.DictReader(itertools.repeat(''), fieldnames=['a']))
+";
+    let mut ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let limits = ResourceLimits::default().max_feed_duration(Duration::from_millis(50));
+    let exc = ex
+        .run(vec![], ResourceTracker::new(limits), PrintWriter::Stdout)
+        .unwrap_err();
+    assert_eq!(exc.exc_type(), ExcType::TimeoutError);
+}
+
+/// The streaming `writerows()` loops feed a non-file target from a native loop, which
+/// polls through its retained iterator view; a `write` that is a builtin never runs a
+/// frame, so nothing else would check the clock.
+#[test]
+fn time_limit_covers_csv_streaming_writerows() {
+    for code in [
+        "import csv\nimport itertools\nclass Sink:\n    pass\nsink = Sink()\nsink.write = len\ncsv.writer(sink).writerows(itertools.repeat([]))\n",
+        "import csv\nimport itertools\nclass Sink:\n    pass\nsink = Sink()\nsink.write = len\ncsv.DictWriter(sink, ['a']).writerows(itertools.repeat({}))\n",
+    ] {
+        let mut ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+        let limits = ResourceLimits::default().max_feed_duration(Duration::from_millis(50));
+        let exc = ex
+            .run(vec![], ResourceTracker::new(limits), PrintWriter::Stdout)
+            .unwrap_err();
+        assert_eq!(exc.exc_type(), ExcType::TimeoutError, "{code}");
+    }
+}
+
+/// A field with no special character is scanned as one run: too few rows for the
+/// per-row poll and a single run per field would otherwise never read the clock. The
+/// turn's closing check raises either way, so the elapsed time is what proves the poll:
+/// the rows take tens of seconds to format in full.
+#[test]
+fn time_limit_covers_csv_long_ordinary_fields() {
+    let code = "import csv\nclass Sink:\n    pass\nsink = Sink()\nsink.write = len\ncsv.writer(sink).writerows([['x' * 10_000_000]] * 60)\n";
+    let mut ex = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let limits = ResourceLimits::default().max_feed_duration(Duration::from_millis(50));
+    let start = Instant::now();
+    let result = ex.run(vec![], ResourceTracker::new(limits), PrintWriter::Stdout);
+    let elapsed = start.elapsed();
+    assert_eq!(result.unwrap_err().exc_type(), ExcType::TimeoutError);
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "formatting should stop at the first poll past the limit, took {elapsed:?}"
+    );
+}
+
 #[test]
 fn time_limit_not_exceeded() {
     // Simple code that runs quickly
@@ -1565,6 +1619,19 @@ typing.Union[members]
     assert_timeout_promptly(code, "union construction");
 }
 
+/// Test that the match scans of `re.split()` and `re.findall()` respect the time limit.
+///
+/// Each scan collects its matches in one native loop, so a subject with a million
+/// matches would run to completion without the poll in `check_slice_growth`. A
+/// pattern with a capture group takes its own loop, `split_with_groups`.
+#[test]
+fn timeout_in_re_scans() {
+    for expression in ["re.split('(,)', s)", "re.split(',', s)", "re.findall(',', s)"] {
+        let code = format!("import re\ns = ',' * 1_000_000\ninterrupt()\n{expression}");
+        assert_timeout_promptly(&code, expression);
+    }
+}
+
 /// Test that `repr(large_set)` respects the time limit.
 ///
 /// The elements are ints rather than strings so that the promptness bound
@@ -1602,6 +1669,38 @@ re.sub('(a+)+\\1b', 'X', 'a' * 30 + 'c')
         exc.message().is_some_and(|m| m.contains("backtrack")),
         "expected backtracking error, got: {exc}"
     );
+}
+
+/// User slots that recurse through native dispatch must fail before exhausting the Rust stack.
+#[test]
+fn recursive_instance_protocols_are_bounded() {
+    for (slot, body, invocation) in [
+        ("__neg__", "return -self", "-obj"),
+        ("__add__", "return self + args[0]", "obj + ['argument']"),
+        ("__radd__", "return args[0] + self", "['argument'] + obj"),
+        (
+            "__pow__",
+            "return pow(self, *args)",
+            "pow(obj, ['exponent'], ['modulus'])",
+        ),
+        ("__getitem__", "return self[args[0]]", "obj[['key']]"),
+        ("__setitem__", "self[args[0]] = args[1]", "obj[['key']] = ['value']"),
+        ("__call__", "return self(*args)", "obj(['argument'])"),
+    ] {
+        let code =
+            format!("class Recursive:\n    def {slot}(self, *args):\n        {body}\nobj = Recursive()\n{invocation}");
+        let mut runner = MontyRun::new(code, "test.py", vec![], CompileOptions::default()).unwrap();
+        let error = runner
+            .run_no_limits(vec![])
+            .expect_err(&format!("slot {slot} should exceed the recursion limit"));
+        assert_eq!(error.exc_type(), ExcType::RecursionError, "slot: {slot}");
+    }
+
+    // This cycle never pushes a Python frame: the slot is itself a callable instance.
+    let code = "class Recursive:\n    pass\nobj = Recursive()\nRecursive.__call__ = obj\nobj(['argument'])";
+    let mut runner = MontyRun::new(code.to_owned(), "test.py", vec![], CompileOptions::default()).unwrap();
+    let error = runner.run_no_limits(vec![]).unwrap_err();
+    assert_eq!(error.exc_type(), ExcType::RecursionError);
 }
 
 /// Source-driving `itertools` adaptors delegate `next()` to their wrapped

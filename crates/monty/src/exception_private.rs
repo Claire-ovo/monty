@@ -14,6 +14,7 @@ use crate::{
     heap::{DropWithContext, HeapData, HeapRead},
     intern::{Interns, StaticStrings, StringId},
     parse::CodeRange,
+    py_value::PyValue,
     source_map::{SourceMap, StackFrameExt},
     types::{
         PyTrait, Type, allocate_tuple,
@@ -1036,6 +1037,26 @@ pub(crate) trait ExcTypeExt: Sized {
         .into()
     }
 
+    /// `ValueError: mapping pattern checks duplicate key (<repr>)`: two keys of
+    /// one mapping pattern compared equal at run time (`case {A: x, B: y}` with
+    /// `A == B`), as CPython's `MATCH_KEYS` reports it.
+    fn value_error_duplicate_mapping_key(key: &Value, vm: &mut VM<'_>) -> RunError {
+        let repr = match key.py_repr(vm) {
+            Ok(repr_value) => {
+                defer_drop!(repr_value, vm);
+                repr_value
+                    .to_str(vm)
+                    .map_or_else(|_| format!("<{}>", key.py_type_name(vm)), str::to_owned)
+            }
+            Err(err) => return err,
+        };
+        SimpleException::new_msg(
+            ExcType::ValueError,
+            format!("mapping pattern checks duplicate key ({repr})"),
+        )
+        .into()
+    }
+
     /// Creates a generic `ValueError` with a custom message.
     fn value_error(msg: impl fmt::Display) -> RunError {
         SimpleException::new_msg(ExcType::ValueError, msg).into()
@@ -1197,20 +1218,6 @@ pub(crate) trait ExcTypeExt: Sized {
         Self::value_error("Step for islice() must be a positive integer or None.")
     }
 
-    /// Creates the TypeError `functools.reduce` raises when the iterable is
-    /// empty and no `initial` was given, so there is nothing to return.
-    #[must_use]
-    fn reduce_empty_iterable() -> RunError {
-        Self::type_error("reduce() of empty iterable with no initial value")
-    }
-
-    /// Creates the TypeError `functools.reduce` raises for a second argument
-    /// that cannot be iterated, replacing the generic not-iterable wording.
-    #[must_use]
-    fn reduce_not_iterable() -> RunError {
-        Self::type_error("reduce() arg 2 must support iteration")
-    }
-
     /// Creates the TypeError `functools.partial()` raises when called with no
     /// positional argument, so there is no callable to wrap.
     #[must_use]
@@ -1304,6 +1311,24 @@ pub(crate) trait ExcTypeExt: Sized {
             format!("int() argument must be a string, a bytes-like object or a real number, not '{type_}'"),
         )
         .into()
+    }
+
+    /// Reports an absent rounding or truncation hook without coercing the operand.
+    #[must_use]
+    fn type_error_missing_numeric_dunder(type_: &str, dunder: &str) -> RunError {
+        Self::type_error(format!("type {type_} doesn't define {dunder} method"))
+    }
+
+    /// Reports an invalid result from an integer conversion hook.
+    #[must_use]
+    fn type_error_non_int_return(dunder: &str, type_: &str) -> RunError {
+        Self::type_error(format!("{dunder} returned non-int (type {type_})"))
+    }
+
+    /// Reports a non-numeric argument to a real-valued math function.
+    #[must_use]
+    fn type_error_not_real_number(type_: &str) -> RunError {
+        Self::type_error(format!("must be real number, not {type_}"))
     }
 
     /// Creates a TypeError for float() constructor with invalid type.
@@ -1443,6 +1468,16 @@ pub(crate) trait ExcTypeExt: Sized {
         .into()
     }
 
+    /// A `_csv.Error` with the given message.
+    fn csv_error(msg: impl fmt::Display) -> RunError {
+        SimpleException::new_msg(ExcType::CsvError, msg).into()
+    }
+
+    /// The `_csv.Error` for a dialect name that is not registered.
+    fn csv_unknown_dialect() -> RunError {
+        Self::csv_error("unknown dialect")
+    }
+
     /// Creates an IndexError for list index out of range (getitem).
     ///
     /// Matches CPython's format: `IndexError('list index out of range')`
@@ -1578,6 +1613,12 @@ pub(crate) trait ExcTypeExt: Sized {
     #[must_use]
     fn not_implemented(msg: impl fmt::Display) -> SimpleException {
         SimpleException::new_msg(ExcType::NotImplementedError, msg)
+    }
+
+    /// Reports a host call rejected by a synchronous VM boundary; the traceback identifies the caller.
+    #[must_use]
+    fn not_implemented_synchronous_call(kind: &str, name: &str) -> SimpleException {
+        Self::not_implemented(format!("{kind} '{name}' cannot suspend in this synchronous context"))
     }
 
     /// Creates a ZeroDivisionError for division by zero.
@@ -1792,6 +1833,18 @@ pub(crate) trait ExcTypeExt: Sized {
             format!("unsupported operand type(s) for {op}: '{lhs_name}' and '{rhs_name}'")
         };
         SimpleException::new_msg(ExcType::TypeError, message).into()
+    }
+
+    /// Reports an invalid repetition count after both multiplication implementations decline.
+    #[must_use]
+    fn type_error_sequence_repeat(type_name: impl Display) -> RunError {
+        Self::type_error(format!("can't multiply sequence by non-int of type '{type_name}'"))
+    }
+
+    /// Float power slots reject a modulus before coercing the other operands.
+    #[must_use]
+    fn type_error_pow_modulo() -> RunError {
+        Self::type_error("pow() 3rd argument not allowed unless all arguments are integers")
     }
 
     /// Creates a TypeError for unsupported unary operations.
@@ -2231,6 +2284,46 @@ pub(crate) trait ExcTypeExt: Sized {
         .into()
     }
 
+    /// Creates a `tomllib.TOMLDecodeError`, formatted as CPython does:
+    /// `{message} (at line {line}, column {column})`, or `(at end of document)`
+    /// when `at_end` (the caller knows from the byte offset whether `index`
+    /// reached the end of `doc`, so the document is not rescanned).
+    ///
+    /// `doc` is the `\r\n`-normalised source and `index` a character offset into
+    /// it; the five fields travel in the same [`JsonErrorData`] payload as
+    /// `json.JSONDecodeError`, since the two exceptions define the same attributes.
+    #[must_use]
+    fn toml_decode_error(message: &str, doc: &str, index: usize, line: usize, column: usize, at_end: bool) -> RunError {
+        let location = if at_end {
+            "end of document".to_owned()
+        } else {
+            format!("line {line}, column {column}")
+        };
+        SimpleException::new_msg(ExcType::TomlDecodeError, format!("{message} (at {location})"))
+            .with_data(JsonErrorData::build(message, doc.as_bytes(), index, line, column))
+            .into()
+    }
+
+    /// Creates the `TypeError` used by `tomllib.loads()` for non-`str` input.
+    ///
+    /// Matches CPython's format: `Expected str object, not '{type}'`
+    #[must_use]
+    fn toml_loads_type_error(type_: &str) -> RunError {
+        SimpleException::new_msg(ExcType::TypeError, format!("Expected str object, not '{type_}'")).into()
+    }
+
+    /// Creates the `TypeError` used by `tomllib.load()` for a text-mode file.
+    ///
+    /// Matches CPython's message: ``File must be opened in binary mode, e.g. use `open('foo.toml', 'rb')` ``
+    #[must_use]
+    fn toml_load_text_mode_error() -> RunError {
+        SimpleException::new_msg(
+            ExcType::TypeError,
+            "File must be opened in binary mode, e.g. use `open('foo.toml', 'rb')`",
+        )
+        .into()
+    }
+
     /// Creates the `TypeError` used by `json.loads()` for unsupported input types.
     ///
     /// Matches CPython's format:
@@ -2415,31 +2508,14 @@ pub(crate) trait ExcTypeExt: Sized {
 }
 
 impl ExcTypeExt for ExcType {
-    /// Creates an exception instance from an exception type and arguments.
-    ///
-    /// Handles exception constructors like `ValueError('message')`.
+    /// Allocates an exception for constructors like `ValueError('message')`.
     /// Currently supports zero or one string argument.
-    ///
-    /// The `interns` parameter provides access to interned string content.
-    /// Returns a heap-allocated exception value.
     fn call(self, vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
         defer_drop!(args, vm);
         let exc = match args {
             ArgValues::Empty => Ok(SimpleException::new_none(self)),
-            ArgValues::One(value) => match value {
-                Value::InternString(string_id) => Ok(SimpleException::new_msg(
-                    self,
-                    vm.interns.get_str(*string_id).to_owned(),
-                )),
-                Value::Ref(heap_id) => {
-                    if let HeapData::Str(s) = vm.heap.get(*heap_id) {
-                        Ok(SimpleException::new_msg(self, s.as_str().to_owned()))
-                    } else {
-                        Err(RunError::internal(
-                            "exceptions can only be called with zero or one string argument",
-                        ))
-                    }
-                }
+            ArgValues::One(value) => match value.py_value(vm) {
+                PyValue::Str(string) => Ok(SimpleException::new_msg(self, string.as_str(vm))),
                 _ => Err(RunError::internal(
                     "exceptions can only be called with zero or one string argument",
                 )),
@@ -2865,6 +2941,12 @@ impl From<fmt::Error> for RunError {
 }
 
 impl RunError {
+    /// Whether this is a catchable `exc_type`, matching only `Exc` so an uncatchable
+    /// host or resource error is never swallowed by a guard that expects one.
+    pub(crate) fn is_catchable(&self, exc_type: ExcType) -> bool {
+        matches!(self, Self::Exc(raise) if raise.exc.exc_type() == exc_type)
+    }
+
     /// Whether this is a catchable `StopIteration` from `__next__`.
     ///
     /// Matching only `Exc` prevents uncatchable errors being mistaken for exhaustion.

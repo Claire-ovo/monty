@@ -12,7 +12,7 @@ impl VM<'_> {
     /// Evaluates a comparison as a boolean without consuming its operands.
     /// Fused asserts truth-test rich results exactly as an ordinary branch does.
     #[inline]
-    pub(super) fn cmp_values(&mut self, op: CmpOperator, lhs: &Value, rhs: &Value) -> RunResult<bool> {
+    pub(crate) fn cmp_values(&mut self, op: CmpOperator, lhs: &Value, rhs: &Value) -> RunResult<bool> {
         match op {
             CmpOperator::Eq => lhs.py_eq_operator(rhs, self),
             CmpOperator::NotEq => lhs.py_ne_operator(rhs, self),
