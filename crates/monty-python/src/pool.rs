@@ -1137,20 +1137,24 @@ pub(crate) fn binary_finder(py: Python<'_>) -> PyResult<&Py<PyAny>> {
     })
 }
 
-/// The worker language a pool runs: `'python'` or `'javascript'`.
+/// The worker language a pool runs: `'python'`, `'javascript'` or `'typescript'`.
 fn parse_language(language: &str) -> PyResult<Language> {
     match language.parse() {
-        Ok(language @ (Language::Python | Language::JavaScript)) => Ok(language),
+        Ok(language @ (Language::Python | Language::JavaScript | Language::TypeScript)) => Ok(language),
         _ => Err(PyValueError::new_err(format!(
-            "language must be 'python' or 'javascript', not '{language}'"
+            "language must be 'python', 'javascript' or 'typescript', not '{language}'"
         ))),
     }
 }
 
-/// The script name a session reports when none is given: `main.py` or `main.js`.
+/// The script name a session reports when none is given: `main.py`, `main.js`
+/// or `main.ts`. The `monty-js` worker parses a session as the dialect its
+/// script name's extension implies, so this is what makes a TypeScript pool
+/// run TypeScript.
 fn default_script_name(language: Language) -> &'static str {
     match language {
-        Language::JavaScript | Language::TypeScript => "main.js",
+        Language::JavaScript => "main.js",
+        Language::TypeScript => "main.ts",
         Language::Python | Language::Bash => "main.py",
     }
 }

@@ -27,8 +27,7 @@ impl Engine for JsEngine {
     type Progress = JsSuspension;
     type Restored = ();
 
-    // TODO(ts-syntax): add `Language::TypeScript` once the engine accepts it.
-    const LANGUAGES: &'static [Language] = &[Language::JavaScript];
+    const LANGUAGES: &'static [Language] = &[Language::JavaScript, Language::TypeScript];
 
     // TODO(ts-typecheck): accept `type_check` once a tsgo-backed checker exists.
     fn configure(&mut self, configure: &pb::Configure) -> Result<(), Box<pb::ChildEvent>> {

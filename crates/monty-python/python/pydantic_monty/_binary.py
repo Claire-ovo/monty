@@ -30,6 +30,7 @@ _EXE = '.exe' if sys.platform == 'win32' else ''
 _RUNTIMES = {
     'python': ('monty', 'MONTY_BIN', 'pydantic-monty'),
     'javascript': ('monty-js', 'MONTY_JS_BIN', 'pydantic-monty[js]'),
+    'typescript': ('monty-js', 'MONTY_JS_BIN', 'pydantic-monty[js]'),
 }
 
 

@@ -610,9 +610,11 @@ class Monty:
 
         Arguments:
             language: The language the workers run: `'python'` (the `monty`
-                binary) or `'javascript'` (the `monty-js` binary, installed by
-                the `pydantic-monty[js]` extra). Sessions of a JavaScript pool
-                feed JavaScript and report `main.js` as their default script name.
+                binary), `'javascript'` or `'typescript'` (both the `monty-js`
+                binary, installed by the `pydantic-monty[js]` extra). Sessions
+                of a JavaScript pool default to the script name `main.js`, a
+                TypeScript pool to `main.ts`; a `script_name` ending in `.tsx`
+                or `.jsx` enables JSX for the session.
             binary_path: Path to the worker binary. When omitted it is
                 resolved from the `MONTY_BIN` (or `MONTY_JS_BIN`) environment
                 variable, the environment's scripts directory (where the

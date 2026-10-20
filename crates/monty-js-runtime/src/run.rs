@@ -2,7 +2,7 @@
 //! behaves like `node`: `console.log` goes to stdout, an uncaught error is
 //! reported on stderr and exits with status 1.
 
-use std::{fs, process::ExitCode, time::Duration};
+use std::{fs, path::Path, process::ExitCode, time::Duration};
 
 use monty_ecma::{JsProgress, JsRepl, JsSuspensionKind};
 use monty_types::{
@@ -30,12 +30,13 @@ pub(crate) fn run(cli: &Cli) -> ExitCode {
     let language = cli.language.unwrap_or_else(|| {
         cli.file
             .as_deref()
+            .and_then(|file| Path::new(file).extension())
+            .and_then(|extension| extension.to_str())
             .and_then(Language::from_extension)
             .unwrap_or(Language::JavaScript)
     });
-    if language != Language::JavaScript {
-        // TODO(ts-syntax): TypeScript feeds go through the same engine once it accepts them.
-        eprintln!("error: {language} is not supported yet");
+    if !matches!(language, Language::JavaScript | Language::TypeScript) {
+        eprintln!("error: monty-js runs javascript or typescript, not {language}");
         return ExitCode::FAILURE;
     }
     let limits = match resource_limits(cli) {
@@ -48,7 +49,9 @@ pub(crate) fn run(cli: &Cli) -> ExitCode {
     // `max_memory` is only a soft limit until the allocator's hard ceiling is armed
     let hard_memory_limit = memory_limit_with_headroom(limits.max_memory, false);
     monty_alloc::set_hard_limit(hard_memory_limit).expect("monty-js-runtime must install LimitedAllocator globally");
+    // the script name picks the dialect (`.ts`, `.tsx`, `.jsx`); an explicit `--language` overrides its TypeScript half
     let repl = match JsRepl::new(&name, limits) {
+        Ok(repl) if cli.language.is_some() => repl.with_typescript(language == Language::TypeScript),
         Ok(repl) => repl,
         Err(err) => {
             eprintln!("error: {err}");

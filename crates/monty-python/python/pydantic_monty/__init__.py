@@ -339,7 +339,7 @@ instance or by type name), or a pending `future`."""
 PrintCallback: TypeAlias = Callable[[Literal['stdout', 'stderr'], str], None] | CollectStreams | CollectString
 """Print sink accepted by `feed_run` / `feed_start` / `load_snapshot`."""
 
-Language: TypeAlias = Literal['python', 'javascript']
+Language: TypeAlias = Literal['python', 'javascript', 'typescript']
 """The sandbox language a pool's workers run: Python with the `monty` binary, JavaScript with `monty-js`."""
 
 TypeCheckFormat: TypeAlias = Literal[

@@ -23,8 +23,10 @@ import { captureTelemetryContext } from './telemetry.js'
 export interface MontyOptions {
   /**
    * The language the workers run: `'python'` (the `monty` binary, the
-   * default) or `'javascript'` (the `monty-js` binary). Sessions of a
-   * JavaScript pool feed JavaScript and default to `main.js` as their script name.
+   * default), `'javascript'` or `'typescript'` (both the `monty-js` binary).
+   * Sessions of a JavaScript pool default to the script name `main.js`, a
+   * TypeScript pool to `main.ts`; a `scriptName` ending in `.tsx` or `.jsx`
+   * enables JSX for the session.
    */
   language?: Language
   /** Path to the worker binary; resolved automatically (for the language) when omitted. */
@@ -214,7 +216,7 @@ export class Monty {
     const osPolicy = encodeOsPolicy(options.osPolicy ?? {})
     const modules = new HostModules(options.externalModules)
     const native = this.native.checkout({
-      scriptName: options.scriptName ?? (this.language === 'javascript' ? 'main.js' : 'main.py'),
+      scriptName: options.scriptName ?? defaultScriptName(this.language),
       ...(options.limits !== undefined ? { limits: options.limits } : {}),
       typeCheck: options.typeCheck ?? false,
       ...(options.typeCheckStubs !== undefined ? { typeCheckStubs: options.typeCheckStubs } : {}),
@@ -288,4 +290,20 @@ function nativeOsPolicy(calls: EncodedOsPolicy): Record<string, unknown> {
   }
   if (calls.processTime !== undefined) fields.processTime = calls.processTime
   return fields
+}
+
+/**
+ * The script name a session reports when none is given. The `monty-js` worker
+ * parses a session as the dialect its script name's extension implies, so this
+ * is what makes a TypeScript pool run TypeScript.
+ */
+function defaultScriptName(language: Language): string {
+  switch (language) {
+    case 'javascript':
+      return 'main.js'
+    case 'typescript':
+      return 'main.ts'
+    default:
+      return 'main.py'
+  }
 }

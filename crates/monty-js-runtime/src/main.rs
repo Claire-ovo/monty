@@ -17,7 +17,8 @@ static ALLOC: monty_alloc::LimitedAllocator = monty_alloc::LimitedAllocator;
 
 /// Monty JS — a secure JavaScript sandbox written in Rust.
 ///
-/// Run a script with `monty-js <file>` or a snippet with `monty-js -e <code>`.
+/// Run a script with `monty-js <file>` (JavaScript, TypeScript, JSX or TSX by
+/// extension) or a snippet with `monty-js -e <code>`.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
@@ -28,9 +29,9 @@ struct Cli {
     /// JavaScript file to execute.
     file: Option<String>,
 
-    /// The language of the file or snippet: `javascript` (the default, also
-    /// inferred from a `.js` extension) or `typescript`.
-    // TODO(ts-syntax): `typescript` is accepted by the parser but rejected by the engine for now.
+    /// The language of the file or snippet: `javascript` or `typescript`,
+    /// inferred from the file's extension (`.js`, `.jsx`, `.ts`, `.tsx`) and
+    /// `javascript` for `-e`.
     #[arg(long)]
     language: Option<Language>,
 

@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from inline_snapshot import snapshot
 
-from pydantic_monty import AsyncMonty, CollectString, Monty, MontyRuntimeError
+from pydantic_monty import AsyncMonty, CollectString, Monty, MontyRuntimeError, MontySyntaxError
 
 
 @pytest.fixture(scope='module')
@@ -97,7 +97,7 @@ def test_default_script_name_is_main_js(js_pool: Monty):
 def test_unknown_language_is_rejected():
     with pytest.raises(ValueError) as exc_info:
         Monty(language='cobol')  # type: ignore[arg-type]
-    assert exc_info.value.args[0] == snapshot("language must be 'python' or 'javascript', not 'cobol'")
+    assert exc_info.value.args[0] == snapshot("language must be 'python', 'javascript' or 'typescript', not 'cobol'")
 
 
 def test_async_pool_runs_javascript():
@@ -107,3 +107,75 @@ def test_async_pool_runs_javascript():
                 return await session.feed_run('const v = await Promise.resolve(20); v + 1')
 
     assert asyncio.run(main()) == snapshot(21)
+
+
+@pytest.fixture(scope='module')
+def ts_pool() -> Iterator[Monty]:
+    with Monty(language='typescript') as pool:
+        yield pool
+
+
+def test_typescript_pool_strips_types(ts_pool: Monty):
+    code = """
+interface User { name: string; age?: number }
+const users: User[] = [{ name: 'ada', age: 36 }, { name: 'lin' }];
+function describe<T extends User>(user: T): string {
+  return `${user.name}:${user.age ?? 'unknown'}`;
+}
+users.map(describe) satisfies string[];
+"""
+    assert js_run(ts_pool, code) == snapshot(['ada:36', 'lin:unknown'])
+    with ts_pool.checkout() as session:
+        assert session.feed_run("new Error('x').stack.split('\\n')[1].includes('main.ts')") is True
+
+
+def test_typescript_pool_rejects_enums(ts_pool: Monty):
+    with pytest.raises(MontySyntaxError) as exc_info:
+        js_run(ts_pool, 'enum Color { Red }')
+    assert str(exc_info.value) == snapshot('TypeScript enum is not supported in strip-only mode')
+
+
+def test_tsx_session_returns_a_tree(ts_pool: Monty):
+    code = """
+type Props = { title: string; children?: unknown };
+const Card = ({ title, children }: Props) => <section className="card"><h2>{title}</h2>{children}</section>;
+const tree = <Card title="Users"><ul>{names.map((name: string) => <li key={name}>{name}</li>)}</ul></Card>;
+[tree, renderToString(tree)];
+"""
+    with ts_pool.checkout(script_name='page.tsx') as session:
+        tree, html = session.feed_run(code, inputs={'names': ['ada', 'lin']})
+    assert tree == snapshot(
+        {
+            'type': 'section',
+            'props': {'className': 'card'},
+            'children': [
+                {'type': 'h2', 'props': {}, 'children': ['Users']},
+                {
+                    'type': 'ul',
+                    'props': {},
+                    'children': [
+                        {'type': 'li', 'props': {'key': 'ada'}, 'children': ['ada']},
+                        {'type': 'li', 'props': {'key': 'lin'}, 'children': ['lin']},
+                    ],
+                },
+            ],
+        }
+    )
+    assert html == snapshot('<section class="card"><h2>Users</h2><ul><li>ada</li><li>lin</li></ul></section>')
+
+
+def test_async_component_awaits_a_host_function(ts_pool: Monty):
+    code = """
+async function Users() {
+  const rows: string[] = await load('users');
+  return <ul>{rows.map((row) => <li>{row}</li>)}</ul>;
+}
+await renderToString(<main><Users /></main>);
+"""
+
+    def load(table: str) -> list[str]:
+        return ['ada', 'lin'] if table == 'users' else []
+
+    with ts_pool.checkout(script_name='page.tsx') as session:
+        html = session.feed_run(code, external_lookup={'load': load})
+    assert html == snapshot('<main><ul><li>ada</li><li>lin</li></ul></main>')

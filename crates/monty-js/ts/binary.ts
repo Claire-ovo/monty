@@ -14,11 +14,16 @@ import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** The sandbox language a pool runs, which picks the worker binary. */
-export type Language = 'python' | 'javascript'
+export type Language = 'python' | 'javascript' | 'typescript'
+
+/** Whether a language runs in the `monty-js` worker rather than `monty`. */
+export function usesJsWorker(language: Language): boolean {
+  return language === 'javascript' || language === 'typescript'
+}
 
 /** The worker binary's file name for a language. */
 function binaryName(language: Language): string {
-  const base = language === 'javascript' ? 'monty-js' : 'monty'
+  const base = usesJsWorker(language) ? 'monty-js' : 'monty'
   return process.platform === 'win32' ? `${base}.exe` : base
 }
 
@@ -46,7 +51,7 @@ export function platformTriple(): string | null {
  */
 export function findMontyBinary(explicit?: string, language: Language = 'python'): string {
   const exe = binaryName(language)
-  const envName = language === 'javascript' ? 'MONTY_JS_BIN' : 'MONTY_BIN'
+  const envName = usesJsWorker(language) ? 'MONTY_JS_BIN' : 'MONTY_BIN'
   if (explicit !== undefined) {
     if (!existsSync(explicit)) {
       throw new Error(`monty binary not found at binaryPath: ${explicit}`)
