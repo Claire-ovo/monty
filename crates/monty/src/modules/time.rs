@@ -783,7 +783,8 @@ fn time_tuple_parts<H: RuntimeRef>(
     name: &str,
     vm: &VM<'_, H>,
 ) -> RunResult<([i64; 9], Option<MontyTimeZone>)> {
-    let items = match value.read_heap(vm) {
+    let read = value.read_heap(vm);
+    let items = match &read {
         Some(HeapReadOutput::Tuple(tuple)) => tuple.get(vm.heap).as_slice(),
         Some(HeapReadOutput::NamedTuple(tuple)) => tuple.get(vm.heap).items(),
         _ => return Err(ExcType::type_error("Tuple or struct_time argument required".to_owned())),

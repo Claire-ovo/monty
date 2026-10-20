@@ -51,7 +51,7 @@ impl<H: RuntimeRef> FilterFalse<H> {
 
 /// Pulls items until one the predicate rejects, which is the one yielded.
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapRead<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let mut steps = 0usize;

@@ -94,7 +94,7 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{
-        DropGuard, DropWithContext, Heap, HeapData, HeapItem, HeapObjectRead, HeapRead, HeapReadOutput, Reference,
+        DropGuard, DropWithContext, Heap, HeapData, HeapItem, HeapObjectRead, HeapReadMut, HeapReadOutput, Reference,
         RuntimeRef,
     },
     intern::StaticStrings,
@@ -343,6 +343,12 @@ struct BufferMeta {
     /// (cached `chars().count()`), bytes for binary (`== buffer.len()`).
     /// Constant once the buffer is loaded.
     buffer_total: u64,
+}
+
+/// The owned data of one host write, already checked against the file's mode.
+enum WritePayload {
+    Text(String),
+    Bytes(Vec<u8>),
 }
 
 impl<H: RuntimeRef> OpenFile<H> {
@@ -655,24 +661,41 @@ impl<'h, H: RuntimeRef> HeapObjectRead<'h, H, OpenFile<H>> {
     }
 
     /// Shared dispatch for any operation that needs the buffer loaded
-    /// (`readline`, `readlines`, `seek`).
-    ///
+    /// (`read`, `readline`, `readlines`, `seek`).
+    fn read_with_spec(&mut self, vm: &mut VM<'h, H>, spec: ReadSpec) -> RunResult<CallResult<H>> {
+        self.read_with_effect(vm, spec, |file_id| PostConversionEffect::BufferStore { file_id })
+    }
+
+    /// `json.load`'s `fp.read()`: the rest of the buffer when it is loaded,
+    /// otherwise the host load with `effect` armed to consume the content
+    /// (it must store the buffer via `apply_buffer_store`, which takes the
+    /// `pending_read` recorded here).
+    pub(crate) fn read_all_with(
+        &mut self,
+        vm: &mut VM<'h, H>,
+        effect: fn(H) -> PostConversionEffect<H>,
+    ) -> RunResult<CallResult<H>> {
+        self.read_with_effect(vm, ReadSpec::All, effect)
+    }
+
     /// If the buffer is already loaded, computes the slice synchronously.
     /// Otherwise records the spec on the file and yields a
     /// [`CallResult::OsCallWithEffect`] so the host loads the full content
-    /// and the resume hook completes the operation.
-    fn read_with_spec(&mut self, vm: &mut VM<'h, H>, spec: ReadSpec) -> RunResult<CallResult<H>> {
+    /// and the resume hook built by `effect` completes the operation.
+    fn read_with_effect(
+        &mut self,
+        vm: &mut VM<'h, H>,
+        spec: ReadSpec,
+        effect: fn(H) -> PostConversionEffect<H>,
+    ) -> RunResult<CallResult<H>> {
+        self.check_readable(vm)?;
+        // `eof` on a readable file is only ever flipped by a path that
+        // also populates `buffer`, so we never need to short-circuit on
+        // EOF without a loaded buffer here. Write-only files would be
+        // the only case where `eof=true && buffer=None` is possible, and
+        // they're rejected by the readable check above.
         let buffer_loaded = {
             let file = self.get(vm.heap);
-            file.ensure_open()?;
-            if !file.mode.readable() {
-                return Err(unsupported_operation("not readable"));
-            }
-            // `eof` on a readable file is only ever flipped by a path that
-            // also populates `buffer`, so we never need to short-circuit on
-            // EOF without a loaded buffer here. Write-only files would be
-            // the only case where `eof=true && buffer=None` is possible, and
-            // they're rejected by the readable check above.
             debug_assert!(!file.eof || file.buffer.is_some());
             file.buffer.is_some()
         };
@@ -683,8 +706,35 @@ impl<'h, H: RuntimeRef> HeapObjectRead<'h, H, OpenFile<H>> {
 
         // First buffered op: stash spec, yield to host for the full content.
         self.get_mut(vm.heap).pending_read = Some(spec);
-        let file_id = self.id();
-        Ok(self.buffer_load_call(vm, PostConversionEffect::BufferStore { file_id }))
+        let effect = effect(self.id());
+        Ok(self.buffer_load_call(vm, effect))
+    }
+
+    /// `tomllib.load(fp)`'s `fp.read()`: the whole remaining content as one
+    /// value. The caller loads an unread file first (see [`Self::needs_buffer_load`]).
+    pub(crate) fn read_all(&mut self, vm: &mut VM<'h, H>) -> RunResult<Value<H>> {
+        if self.get(vm.heap).buffer.is_some() {
+            compute_slice(self, ReadSpec::All, vm)
+        } else {
+            Err(RunError::internal("read_all: file buffer is not loaded"))
+        }
+    }
+
+    /// Raises what a read on this file would: `ValueError` once closed, then
+    /// `io.UnsupportedOperation` when it was not opened for reading.
+    pub(crate) fn check_readable(&self, vm: &VM<'h, H>) -> RunResult<()> {
+        let file = self.get(vm.heap);
+        file.ensure_open()?;
+        if file.mode.readable() {
+            Ok(())
+        } else {
+            Err(unsupported_operation("not readable"))
+        }
+    }
+
+    /// Whether reads yield `bytes` rather than `str`.
+    pub(crate) fn is_binary(&self, vm: &VM<'h, H>) -> bool {
+        self.get(vm.heap).mode.is_binary()
     }
 
     /// Whether an iteration step must load the buffer from the host first:
@@ -722,45 +772,87 @@ impl<'h, H: RuntimeRef> HeapObjectRead<'h, H, OpenFile<H>> {
         defer_drop!(data, vm);
         let binary = self.get(vm.heap).mode.is_binary();
         validate_write_data(data, binary, vm)?;
-        self.get(vm.heap).ensure_open()?;
-        let (path, append, binary, newline) = {
-            let file = self.get(vm.heap);
-            if !file.mode.writable() {
-                let message = if file.mode.is_binary() { "write" } else { "not writable" };
-                return Err(unsupported_operation(message));
-            }
-            // `first_write_done` is flipped in `apply_write_position`, only once
-            // the host confirms the write — a rejected or host-failed write must
-            // not turn the next write into an append.
-            let append = file.mode.is_append() || file.first_write_done;
-            let binary = file.mode.is_binary();
-            let path = file.path().to_owned();
-            (path, append, binary, file.newline)
-        };
-
+        self.check_writable(vm)?;
         // Extract the data payload into an owned `String` / `Vec<u8>` so the
         // OS-call args struct can own it across the snapshot/resume boundary.
         // `validate_write_data` already gated the variant — `binary` selects
         // bytes vs str.
-        let path = MontyPath::new(path);
-        let mut text_length = None;
-        let call = if binary {
+        let payload = if binary {
             let bytes = extract_bytes_payload(data, vm).expect("validate_write_data accepted a bytes-shaped value");
-            let args = PathBytesDataArgs { path, data: bytes };
-            if append {
-                OsFunctionCall::AppendBytes(args)
-            } else {
-                OsFunctionCall::WriteBytes(args)
-            }
+            WritePayload::Bytes(bytes)
         } else {
             let text = extract_str_payload(data, vm).expect("validate_write_data accepted a str-shaped value");
-            let (text, original_length) = newline.translate_write(text);
-            text_length = original_length.map(|length| u64::try_from(length).expect("usize fits in u64"));
-            let args = PathStringDataArgs { path, data: text };
-            if append {
-                OsFunctionCall::AppendText(args)
-            } else {
-                OsFunctionCall::WriteText(args)
+            WritePayload::Text(text)
+        };
+        Ok(self.dispatch_write(vm, payload, false))
+    }
+
+    /// `json.dump`'s `fp.write(text)`: the same host write as [`Self::write`],
+    /// but the call answers `None` rather than the character count.
+    pub(crate) fn write_text_discarding_count(&mut self, vm: &mut VM<'h, H>, text: String) -> RunResult<CallResult<H>> {
+        self.check_text_write(vm)?;
+        Ok(self.dispatch_write(vm, WritePayload::Text(text), true))
+    }
+
+    /// The checks `write(str)` makes before reaching the host, in the same
+    /// order: text mode, then open and writable.
+    pub(crate) fn check_text_write(&self, vm: &VM<'h, H>) -> RunResult<()> {
+        if self.get(vm.heap).mode.is_binary() {
+            Err(ExcType::type_error("a bytes-like object is required, not 'str'"))
+        } else {
+            self.check_writable(vm)
+        }
+    }
+
+    /// Raises for a write on a closed or read-only file.
+    fn check_writable(&self, vm: &VM<'h, H>) -> RunResult<()> {
+        let file = self.get(vm.heap);
+        file.ensure_open()?;
+        if file.mode.writable() {
+            Ok(())
+        } else {
+            let message = if file.mode.is_binary() { "write" } else { "not writable" };
+            Err(unsupported_operation(message))
+        }
+    }
+
+    /// Builds the one-shot write or append for an already validated payload,
+    /// with the position update armed for the host's reply.
+    fn dispatch_write(&mut self, vm: &mut VM<'h, H>, payload: WritePayload, result_none: bool) -> CallResult<H> {
+        let (path, append, newline, previous_position, previous_length) = {
+            let file = self.get(vm.heap);
+            // `first_write_done` is flipped in `apply_write_position`, only once
+            // the host confirms the write — a rejected or host-failed write must
+            // not turn the next write into an append.
+            let append = file.mode.is_append() || file.first_write_done;
+            (
+                MontyPath::new(file.path().to_owned()),
+                append,
+                file.newline,
+                file.position,
+                file.file_length,
+            )
+        };
+
+        let mut text_length = None;
+        let call = match payload {
+            WritePayload::Bytes(bytes) => {
+                let args = PathBytesDataArgs { path, data: bytes };
+                if append {
+                    OsFunctionCall::AppendBytes(args)
+                } else {
+                    OsFunctionCall::WriteBytes(args)
+                }
+            }
+            WritePayload::Text(text) => {
+                let (text, original_length) = newline.translate_write(text);
+                text_length = original_length.map(|length| u64::try_from(length).expect("usize fits in u64"));
+                let args = PathStringDataArgs { path, data: text };
+                if append {
+                    OsFunctionCall::AppendText(args)
+                } else {
+                    OsFunctionCall::WriteText(args)
+                }
             }
         };
 
@@ -770,13 +862,13 @@ impl<'h, H: RuntimeRef> HeapObjectRead<'h, H, OpenFile<H>> {
         // call rejected before dispatch cannot leave stale write state.
         let effect = PostConversionEffect::WritePosition {
             file_id,
-            previous_position: self.get(vm.heap).position,
-            previous_length: self.get(vm.heap).file_length,
+            previous_position,
+            previous_length,
             text_length,
-            result_none: false,
+            result_none,
         }
         .into();
-        Ok(CallResult::OsCallWithEffect { call, effect })
+        CallResult::OsCallWithEffect { call, effect }
     }
 
     /// Marks the file wrapper as closed and releases the cached read buffer.
@@ -896,7 +988,7 @@ pub(crate) fn apply_open_name<H: RuntimeRef>(
     let parsed = newline.as_deref().map_or(Some(Newline::default()), Newline::parse);
     if let Some(parsed) = parsed
         && let Value::Ref(id) = &value
-        && let HeapReadOutput::OpenFile(mut file) = vm.heap.read(*id)
+        && let HeapReadOutput::OpenFile(file) = vm.heap.read(*id)
     {
         let file = file.get_mut(vm.heap);
         if !file.path.is_empty() && !file.path.starts_with('/') {
@@ -950,7 +1042,7 @@ pub(crate) fn apply_buffer_store<H: RuntimeRef>(
     let mut result_guard = DropGuard::new(result, vm);
     let (_, vm) = result_guard.as_parts_mut();
 
-    let HeapReadOutput::OpenFile(mut file) = vm.heap.read(file_id) else {
+    let HeapReadOutput::OpenFile(file) = vm.heap.read(file_id) else {
         return Err(RunError::internal(
             "apply_buffer_store: file_id does not point to an OpenFile",
         ));
@@ -960,10 +1052,10 @@ pub(crate) fn apply_buffer_store<H: RuntimeRef>(
     };
 
     let (result, vm) = result_guard.into_parts();
-    install_buffer(&mut file, result, vm)?;
+    install_buffer(&file, result, vm)?;
     // Compute the slice while the pin still keeps the file alive — otherwise
     // `open(p).read(5)` could release its last reference before slicing.
-    compute_slice(&mut file, spec, vm)
+    compute_slice(&file, spec, vm)
 }
 
 /// `BufferLoad` resume: installs the host content so the `ForIter` that
@@ -972,13 +1064,13 @@ pub(crate) fn apply_buffer_store<H: RuntimeRef>(
 pub(crate) fn apply_buffer_load<H: RuntimeRef>(file_id: H, result: Value<H>, vm: &mut VM<'_, H>) -> RunResult<()> {
     let pin = Value::Ref(file_id);
     defer_drop!(pin, vm);
-    let HeapReadOutput::OpenFile(mut file) = vm.heap.read(file_id) else {
+    let HeapReadOutput::OpenFile(file) = vm.heap.read(file_id) else {
         result.drop_with(vm);
         return Err(RunError::internal(
             "apply_buffer_load: file_id does not point to an OpenFile",
         ));
     };
-    install_buffer(&mut file, result, vm)
+    install_buffer(&file, result, vm)
 }
 
 /// `FileNext` resume: installs the host content, then answers the
@@ -995,14 +1087,14 @@ pub(crate) fn apply_file_next<H: RuntimeRef>(
     defer_drop!(pin, vm);
     let mut default_guard = DropGuard::new(default, vm);
     let (_, vm) = default_guard.as_parts_mut();
-    let HeapReadOutput::OpenFile(mut file) = vm.heap.read(file_id) else {
+    let HeapReadOutput::OpenFile(file) = vm.heap.read(file_id) else {
         result.drop_with(vm);
         return Err(RunError::internal(
             "apply_file_next: file_id does not point to an OpenFile",
         ));
     };
-    install_buffer(&mut file, result, vm)?;
-    match next_line(&mut file, vm)? {
+    install_buffer(&file, result, vm)?;
+    match next_line(&file, vm)? {
         Some(line) => Ok(line),
         None => default_guard.into_inner().ok_or_else(ExcType::stop_iteration),
     }
@@ -1013,7 +1105,7 @@ pub(crate) fn apply_file_next<H: RuntimeRef>(
 /// and universal-newline text is translated here, once. A buffer already
 /// present (a snapshot/restore race) is kept and the new content dropped.
 fn install_buffer<'h, H: RuntimeRef>(
-    file: &mut HeapRead<'h, OpenFile<H>>,
+    file: &HeapReadMut<'h, OpenFile<H>>,
     result: Value<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<()> {
@@ -1090,7 +1182,7 @@ fn translate_newlines(text: &str) -> String {
 /// The next line of a loaded buffer for the iterator protocol: `None` at EOF
 /// where `readline()` would return an empty string.
 fn next_line<'h, H: RuntimeRef>(
-    file: &mut HeapRead<'h, OpenFile<H>>,
+    file: &HeapReadMut<'h, OpenFile<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     ensure_buffer_meta(file, vm)?;
@@ -1130,8 +1222,8 @@ fn unloaded_iteration_error<H: RuntimeRef>(file_type: Type<H>) -> RunError {
 ///
 /// `text_length` replaces the host's count as the return value when newline
 /// translation lengthened the payload (see [`Newline::translate_write`]), and
-/// `result_none` replaces it with `None` (`csv.writer.writerows()`); the
-/// logical position still advances by what reached the file.
+/// `result_none` replaces it with `None` (`csv.writer.writerows()`,
+/// `json.dump`); the logical position still advances by what reached the file.
 ///
 /// As with [`apply_buffer_store`], the pending-file-effect pin on `file_id`
 /// is released by `defer_drop!` regardless of which path the function takes.
@@ -1155,7 +1247,7 @@ pub(crate) fn apply_write_position<H: RuntimeRef>(
     }
     let written = u64::try_from(written).map_err(|_| ExcType::overflow_c_ssize_t())?;
 
-    let HeapReadOutput::OpenFile(mut file) = vm.heap.read(file_id) else {
+    let HeapReadOutput::OpenFile(file) = vm.heap.read(file_id) else {
         return Err(RunError::internal(
             "apply_write_position: file_id does not point to an OpenFile",
         ));
@@ -1199,7 +1291,7 @@ pub(crate) fn apply_write_position<H: RuntimeRef>(
 /// result. All buffer reads go through the heap so the slice content is fully
 /// snapshot-safe.
 fn compute_slice<'h, H: RuntimeRef>(
-    file: &mut HeapRead<'h, OpenFile<H>>,
+    file: &HeapReadMut<'h, OpenFile<H>>,
     spec: ReadSpec,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1228,7 +1320,7 @@ fn compute_slice<'h, H: RuntimeRef>(
 
 /// Rebuilds the position cache when a loaded buffer has none: `buffer_meta`
 /// is not serialized, so this is every first slice after a snapshot restore.
-fn ensure_buffer_meta<'h, H: RuntimeRef>(file: &mut HeapRead<'h, OpenFile<H>>, vm: &mut VM<'h, H>) -> RunResult<()> {
+fn ensure_buffer_meta<'h, H: RuntimeRef>(file: &HeapReadMut<'h, OpenFile<H>>, vm: &mut VM<'h, H>) -> RunResult<()> {
     let needs_meta = {
         let f = file.get(vm.heap);
         f.buffer.is_some() && f.buffer_meta.is_none()
@@ -1254,7 +1346,7 @@ fn ensure_buffer_meta<'h, H: RuntimeRef>(file: &mut HeapRead<'h, OpenFile<H>>, v
 /// storage guarantees existing references stay valid across allocations, so
 /// the previous full-buffer `to_owned()` is gone.
 fn compute_slice_text<'h, H: RuntimeRef>(
-    file: &mut HeapRead<'h, OpenFile<H>>,
+    file: &HeapReadMut<'h, OpenFile<H>>,
     buffer_id: H,
     position: usize,
     byte_position: usize,
@@ -1349,7 +1441,7 @@ fn compute_slice_text<'h, H: RuntimeRef>(
 /// buffer was cloned on every call so the heap borrow could be released
 /// before `update_position_eof`).
 fn compute_slice_binary<'h, H: RuntimeRef>(
-    file: &mut HeapRead<'h, OpenFile<H>>,
+    file: &HeapReadMut<'h, OpenFile<H>>,
     buffer_id: H,
     position: usize,
     buffer_total: usize,
@@ -1488,7 +1580,7 @@ fn nth_char_byte_offset(s: &str, nth: usize) -> usize {
 /// to `u64` happens here at the single boundary so the slice code stays free
 /// of `as u64` casts that clippy would flag.
 fn update_file_state<'h, H: RuntimeRef>(
-    file: &mut HeapRead<'h, OpenFile<H>>,
+    file: &HeapReadMut<'h, OpenFile<H>>,
     new_position: usize,
     new_byte_position: usize,
     eof: bool,
@@ -1523,7 +1615,7 @@ fn update_file_state<'h, H: RuntimeRef>(
 /// values derived from `buffer.len()` and `position`. The walk is O(buffer)
 /// for text but happens exactly once per file (the cache is then maintained
 /// incrementally by [`update_file_state`]).
-fn populate_buffer_meta<'h, H: RuntimeRef>(file: &mut HeapRead<'h, OpenFile<H>>, vm: &mut VM<'h, H>) -> RunResult<()> {
+fn populate_buffer_meta<'h, H: RuntimeRef>(file: &HeapReadMut<'h, OpenFile<H>>, vm: &mut VM<'h, H>) -> RunResult<()> {
     // Pull what we need out of the file under a short scoped borrow
     let (buffer_id, position, binary, already_populated) = {
         let f = file.get(vm.heap);

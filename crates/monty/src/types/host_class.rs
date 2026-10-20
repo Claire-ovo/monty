@@ -16,7 +16,7 @@ use crate::{
     hash::HashValue,
     heap::{
         BorrowedHeapRead, BorrowedHeapReadMut, DropGuard, DropWithContext, Heap, HeapData, HeapItem, HeapObjectRead,
-        HeapRead, HeapReadOutput, HeapReader, Reference, RuntimeRef, heap_read_ref_as_field,
+        HeapRead, HeapReadMut, HeapReadOutput, HeapReader, Reference, RuntimeRef, heap_read_ref_as_field,
         heap_read_ref_as_field_mut,
     },
     intern::Interns,
@@ -108,23 +108,27 @@ pub(crate) fn host_class_type<H: RuntimeRef>(heap: &Heap<H>, class_id: H) -> &Ho
     }
 }
 
-impl<'h, H: RuntimeRef> HeapRead<'h, HostClass<H>> {
+impl<'h, H: RuntimeRef> HeapReadMut<'h, HostClass<H>> {
     /// Sets an attribute value on the sandbox copy (the host object is
     /// never touched).
     ///
     /// The caller transfers ownership of both `name` and `value`. Returns the
     /// old value if the attribute existed (caller must drop it), or None if this
     /// is a new attribute.
-    pub fn set_attr(&mut self, name: Value<H>, value: Value<H>, vm: &mut VM<'h, H>) -> RunResult<Option<Value<H>>> {
+    pub fn set_attr(&self, name: Value<H>, value: Value<H>, vm: &mut VM<'h, H>) -> RunResult<Option<Value<H>>> {
         self.attrs_mut().set(name, value, vm)
     }
 
+    /// Borrows the inline attribute dictionary for reader-gated mutation.
+    pub fn attrs_mut(&self) -> BorrowedHeapReadMut<'_, 'h, Dict<H>> {
+        heap_read_ref_as_field_mut!(self, HostClass<H>, attrs)
+    }
+}
+
+impl<'h, H: RuntimeRef> HeapRead<'h, HostClass<H>> {
+    /// Borrows the inline attribute dictionary for comparisons and lookups.
     pub fn attrs(&self) -> BorrowedHeapRead<'_, 'h, Dict<H>> {
         heap_read_ref_as_field!(self, HostClass<H>, attrs)
-    }
-
-    pub fn attrs_mut(&mut self) -> BorrowedHeapReadMut<'_, 'h, Dict<H>> {
-        heap_read_ref_as_field_mut!(self, HostClass<H>, attrs)
     }
 }
 
@@ -450,13 +454,13 @@ impl<H: RuntimeRef> HostClassType<H> {
     }
 }
 
-impl<'h, H: RuntimeRef> HeapRead<'h, HostClassType<H>> {
+impl<'h, H: RuntimeRef> HeapReadMut<'h, HostClassType<H>> {
     /// Applies a re-sent wire class type: `name` and `is_dataclass` are
     /// overwritten (the host is authoritative), and `attrs`, when `Some`,
     /// replaces the eager class attrs (a snapshot at send time). Returns the
     /// replaced dict, which the caller must drop.
     pub fn update_from_wire(
-        &mut self,
+        &self,
         name: EitherStr,
         is_dataclass: bool,
         attrs: Option<Dict<H>>,

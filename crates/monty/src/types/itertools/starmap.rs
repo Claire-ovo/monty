@@ -51,7 +51,7 @@ impl<H: RuntimeRef> StarMap<H> {
 
 /// Pulls one item, spreads it into an argument list, and calls the function.
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapRead<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let ItertoolsIter::StarMap(starmap) = iter.get(vm.heap) else {

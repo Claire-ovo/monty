@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     bytecode::VM,
-    heap::{HeapRead, Reference, RuntimeRef},
+    heap::{HeapReadMut, Reference, RuntimeRef},
     types::{
         TupleVec, allocate_tuple,
         itertools::{
@@ -98,7 +98,7 @@ impl<H: RuntimeRef> Product<H> {
 
 /// Steps the indices and gathers one item per slot from its pool.
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> Option<Value<H>> {
     let ItertoolsIter::Product(product) = iter.get_mut(vm.heap) else {

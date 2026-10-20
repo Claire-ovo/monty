@@ -69,6 +69,32 @@ fn reader_boundaries() {
     }
 }
 
+/// Protected and projected capabilities retain their source lifetime and access permissions.
+#[test]
+fn borrowed_boundaries() {
+    for name in [
+        "protected_get_escape",
+        "protected_mut_get_escape",
+        "protected_get_mut_escape",
+        "protected_get_alias",
+        "protected_mut_get_alias",
+        "protected_get_mut_alias",
+        "projected_get_escape",
+        "slice_get_escape",
+        "box_get_escape",
+        "mutable_inner_swap",
+        "shared_inner_swap",
+        "counted_inner_swap",
+        "readonly_mutation",
+        "readonly_mutable_projection",
+        "aliased_payload_borrows",
+        "projected_get_mut_escape",
+        "projection_live_borrow",
+    ] {
+        check_compile_fail(name, &format!("heap_reader_compile_fail_test_{name}"));
+    }
+}
+
 /// Covers escaping roots, independent arenas, persistence, constants and thread capabilities.
 #[test]
 fn owner_boundaries() {

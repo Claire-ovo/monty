@@ -6,7 +6,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::RunResult,
-    heap::{DropWithContext, HeapRead, Reference, RuntimeRef},
+    heap::{DropWithContext, HeapReadMut, Reference, RuntimeRef},
     types::itertools::{ItertoolsIter, step::next_source},
     value::Value,
 };
@@ -62,7 +62,7 @@ impl<H: RuntimeRef> Islice<H> {
 /// Discards items up to `next_index`, yields the one there, then advances by
 /// `step` — the shape of CPython's `islice_next`.
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let mut steps = 0usize;
@@ -120,7 +120,7 @@ pub(super) fn next<'h, H: RuntimeRef>(
 /// source holds be reclaimed now rather than at destruction.
 ///
 /// Idempotent, so the two exits in `next` can share it.
-fn finish<'h, H: RuntimeRef>(iter: &mut HeapRead<'h, ItertoolsIter<H>>, vm: &mut VM<'h, H>) {
+fn finish<'h, H: RuntimeRef>(iter: &HeapReadMut<'h, ItertoolsIter<H>>, vm: &mut VM<'h, H>) {
     let ItertoolsIter::Islice(islice) = iter.get_mut(vm.heap) else {
         unreachable!("dispatched on Kind::Islice")
     };

@@ -9,7 +9,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::RunResult,
-    heap::{ContainsHeap, DropWithContext, HeapRead, Reference, RuntimeRef},
+    heap::{ContainsHeap, DropWithContext, HeapReadMut, Reference, RuntimeRef},
     types::itertools::{ItertoolsIter, step::next_source},
     value::Value,
 };
@@ -103,7 +103,7 @@ impl<H: RuntimeRef> ChainSources<H> {
     }
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for ChainSources<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for ChainSources<H> {
     fn drop_with(self, ctx: &mut C) {
         match self {
             Self::Args { iterables, .. } => iterables.drop_with(ctx),
@@ -152,7 +152,7 @@ impl<H: RuntimeRef> Chain<H> {
 
 /// Drains the current source, then resolves the next one, until all are spent.
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let mut steps = 0usize;
@@ -213,7 +213,7 @@ pub(super) fn next<'h, H: RuntimeRef>(
 /// An outer iterator that raises ends the chain as well as propagating, as
 /// CPython clears its `source` on any failed `PyIter_Next`.
 fn next_raw_source<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let ItertoolsIter::Chain(chain) = iter.get(vm.heap) else {
@@ -246,7 +246,7 @@ fn next_raw_source<'h, H: RuntimeRef>(
 /// raised by a resolved source's `__next__` leaves the chain live, since
 /// CPython keeps that iterator in place.
 fn into_py_iter_tracking<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     raw: Value<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -268,7 +268,7 @@ fn into_py_iter_tracking<'h, H: RuntimeRef>(
 /// `current` is already `None` at every callsite — the chain only ends while
 /// taking the next source — but clearing it keeps this correct for any future
 /// path that ends a chain mid-source.
-fn finish<'h, H: RuntimeRef>(iter: &mut HeapRead<'h, ItertoolsIter<H>>, vm: &mut VM<'h, H>) {
+fn finish<'h, H: RuntimeRef>(iter: &HeapReadMut<'h, ItertoolsIter<H>>, vm: &mut VM<'h, H>) {
     let chain = chain_mut(iter, vm);
     chain.done = true;
     let sources = chain.sources.take();
@@ -285,7 +285,7 @@ fn finish<'h, H: RuntimeRef>(iter: &mut HeapRead<'h, ItertoolsIter<H>>, vm: &mut
 /// same match-or-`unreachable!` appeared at each one; naming it once keeps those
 /// steps readable.
 fn chain_mut<'r, 'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &'r HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &'r mut VM<'h, H>,
 ) -> &'r mut Chain<H> {
     let ItertoolsIter::Chain(chain) = iter.get_mut(vm.heap) else {

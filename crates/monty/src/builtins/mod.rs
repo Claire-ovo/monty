@@ -19,7 +19,7 @@ mod hasattr;
 mod hash;
 mod hex;
 mod id;
-mod isinstance;
+pub(crate) mod isinstance;
 mod len;
 mod locals;
 mod map;

@@ -21,8 +21,8 @@ use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{
-        ContainsHeap, DropGuard, DropWithContext, HeapData, HeapObjectRead, HeapRead, HeapReadOutput, HeapReader,
-        Reference, RuntimeRef,
+        ContainsHeap, DropGuard, DropWithContext, HeapData, HeapObjectRead, HeapRead, HeapReadMut, HeapReadOutput,
+        HeapReader, Reference, RuntimeRef,
     },
     intern::FunctionId,
     object_bridge::MontyObjectExt,
@@ -61,9 +61,9 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
             Value::Ref(heap_id) => {
                 let heap_id = *heap_id;
                 let poll = match this.heap.read(heap_id) {
-                    HeapReadOutput::Coroutine(coro) => return this.await_coroutine(coro),
+                    HeapReadOutput::Coroutine(coro) => return this.await_coroutine(&coro),
                     HeapReadOutput::GatherFuture(gather) => this.await_gather_future(gather, awaiter)?,
-                    HeapReadOutput::ExternalFuture(mut fut) => this.await_external_future(&mut fut, awaiter)?,
+                    HeapReadOutput::ExternalFuture(fut) => this.await_external_future(&fut, awaiter)?,
                     _ => return Err(ExcType::object_not_awaitable(&awaitable.py_type_name(this))),
                 };
                 match poll {
@@ -82,7 +82,7 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
     ///
     /// Validates the coroutine is in `New` state, extracts its captured namespace
     /// and cells, marks it as `Running`, and pushes a frame to execute the coroutine body.
-    fn await_coroutine(&mut self, mut coro: HeapObjectRead<'h, H, Coroutine<H>>) -> Result<AwaitResult<H>, RunError> {
+    fn await_coroutine(&mut self, coro: &HeapObjectRead<'h, H, Coroutine<H>>) -> Result<AwaitResult<H>, RunError> {
         // Check if coroutine can be awaited (must be New)
         if coro.get(self.heap).state != CoroutineState::New {
             return Err(ExcType::cannot_reuse_already_awaited_coroutine());
@@ -248,13 +248,13 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
                     }
                     Poll::Pending
                 }
-                HeapReadOutput::ExternalFuture(mut fut) => {
+                HeapReadOutput::ExternalFuture(fut) => {
                     self.heap.inc_ref(gather_id);
                     let sub_awaiter = Awaiter::GatherSlot {
                         gather: gather_id,
                         source: item_id,
                     };
-                    self.await_external_future(&mut fut, sub_awaiter)?
+                    self.await_external_future(&fut, sub_awaiter)?
                 }
                 HeapReadOutput::GatherFuture(child_gather) => {
                     if let Some(value) = poll_settled_gather(&child_gather, self.heap)? {
@@ -295,7 +295,7 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
     /// parks in `Awaited`, taking over the frame's bookkeeping, and later
     /// resolutions drive it from there.
     fn settle_gather_commit(&mut self, frame: GatherCommit<H>) -> Poll<Value<H>> {
-        let HeapReadOutput::GatherFuture(mut gather) = self.heap.read(frame.gather) else {
+        let HeapReadOutput::GatherFuture(gather) = self.heap.read(frame.gather) else {
             panic!("gather commit frame id is not a GatherFuture")
         };
 
@@ -325,10 +325,10 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
     /// error so re-awaits replay it, and drops the result slots and awaiter the
     /// frame was holding. The children it had already committed keep running and
     /// keep pointing at their now-`Failed` gather, as they do for a failure that
-    /// arrives after the commit pass (see [`HeapRead::fail`]).
+    /// arrives after the commit pass (see [`HeapReadMut::fail`]).
     fn unwind_gather_commits(&mut self, stack: Vec<GatherCommit<H>>, err: &RunError) {
         for frame in stack.into_iter().rev() {
-            let HeapReadOutput::GatherFuture(mut gather) = self.heap.read(frame.gather) else {
+            let HeapReadOutput::GatherFuture(gather) = self.heap.read(frame.gather) else {
                 panic!("gather commit frame id is not a GatherFuture")
             };
             gather.get_mut(self.heap).state = GatherState::Failed(err.clone());
@@ -349,7 +349,7 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
     ///   plumbing lands.
     fn await_external_future(
         &mut self,
-        fut: &mut HeapRead<'h, ExternalFuture<H>>,
+        fut: &HeapReadMut<'h, ExternalFuture<H>>,
         awaiter: Awaiter<H>,
     ) -> Result<Poll<Value<H>>, RunError> {
         let mut awaiter_guard = DropGuard::new(awaiter, self);
@@ -430,7 +430,7 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
             .expect("handle_task_completion: spawned task without a coroutine");
 
         // Re-awaiting the coroutine must see that its execution has ended.
-        let HeapReadOutput::Coroutine(mut coro) = self.heap.read(coroutine_id) else {
+        let HeapReadOutput::Coroutine(coro) = self.heap.read(coroutine_id) else {
             panic!("task coroutine_id doesn't point to a Coroutine")
         };
         coro.get_mut(self.heap).state = CoroutineState::Completed;
@@ -632,7 +632,7 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
     ///
     /// Similar to exec_get_awaitable's coroutine handling, but for task initialization.
     fn init_task_from_coroutine(&mut self, coroutine_id: H) -> Result<(), RunError> {
-        let HeapReadOutput::Coroutine(mut coro) = self.heap.read(coroutine_id) else {
+        let HeapReadOutput::Coroutine(coro) = self.heap.read(coroutine_id) else {
             panic!("task coroutine_id doesn't point to a Coroutine")
         };
 
@@ -697,7 +697,7 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
         let this = self;
         defer_drop!(fut_val, this);
 
-        let HeapReadOutput::ExternalFuture(mut fut) = this.heap.read(future_id) else {
+        let HeapReadOutput::ExternalFuture(fut) = this.heap.read(future_id) else {
             panic!("pending_externals entry doesn't point to an ExternalFuture")
         };
 
@@ -757,7 +757,7 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
                 Awaiter::GatherSlot { gather, source } => {
                     let gather_val = Value::Ref(gather);
                     defer_drop!(gather_val, this);
-                    let HeapReadOutput::GatherFuture(mut outer) = this.heap.read(gather) else {
+                    let HeapReadOutput::GatherFuture(outer) = this.heap.read(gather) else {
                         panic!("Awaiter::GatherSlot gather id is not a GatherFuture")
                     };
                     let success = outer.resolve_child(this, source, value)?;
@@ -778,7 +778,7 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
             let next = match awaiter {
                 Awaiter::Task(t) => break *t,
                 Awaiter::GatherSlot { gather, .. } => {
-                    let HeapReadOutput::GatherFuture(mut gather) = this.heap.read(*gather) else {
+                    let HeapReadOutput::GatherFuture(gather) = this.heap.read(*gather) else {
                         panic!("Awaiter::GatherSlot gather id is not a GatherFuture")
                     };
                     // A gather that already settled has handed its waiter on;
@@ -805,7 +805,7 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
         let this = self;
         defer_drop!(fut_val, this);
 
-        let HeapReadOutput::ExternalFuture(mut fut) = this.heap.read(future_id) else {
+        let HeapReadOutput::ExternalFuture(fut) = this.heap.read(future_id) else {
             panic!("pending_externals entry doesn't point to an ExternalFuture")
         };
         let awaiter = match mem::replace(
@@ -975,7 +975,7 @@ impl<H: RuntimeRef> GatherCommit<H> {
     ///
     /// A nested gather that settled synchronously fills its slot like any other
     /// ready item; one that parked joins `pending_children`, so a later
-    /// resolution reaches this gather through [`HeapRead::resolve_child`].
+    /// resolution reaches this gather through [`HeapReadMut::resolve_child`].
     fn resume_after_child(&mut self, child: H, slot: usize, poll: Poll<Value<H>>) {
         match poll {
             Poll::Ready(value) => self.results[slot] = Some(value),
@@ -987,7 +987,7 @@ impl<H: RuntimeRef> GatherCommit<H> {
     }
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for GatherCommit<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for GatherCommit<H> {
     fn drop_with(self, heap: &mut C) {
         self.results.drop_with(heap);
         self.awaiter.drop_with(heap);
@@ -1035,7 +1035,7 @@ fn poll_settled_gather<'h, H: RuntimeRef>(
     }
 }
 
-/// Outcome of [`HeapRead::resolve_child`] when a gather has finished driving
+/// Outcome of [`HeapReadMut::resolve_child`] when a gather has finished driving
 /// its children successfully.
 ///
 /// `list_id` is the cached result list to hand back; `waiter` is the
@@ -1045,7 +1045,7 @@ pub(crate) struct GatherSuccess<H: Reference> {
     pub awaiter: Awaiter<H>,
 }
 
-impl<'h, H: RuntimeRef> HeapRead<'h, GatherFuture<H>> {
+impl<'h, H: RuntimeRef> HeapReadMut<'h, GatherFuture<H>> {
     /// Caches `list_id` as the gather's successful result.
     ///
     /// Inc_refs `list_id` so the cached state and the caller both own a ref
@@ -1054,7 +1054,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, GatherFuture<H>> {
     /// [`VM::await_gather_future`] for the synchronous-completion paths
     /// (empty gather, all externals already resolved); on the async path the
     /// transition happens inside [`Self::resolve_child`].
-    pub(crate) fn cache_result(&mut self, heap: &mut HeapReader<'h, H>, list_id: H) {
+    pub(crate) fn cache_result(&self, heap: &mut HeapReader<'h, H>, list_id: H) {
         heap.inc_ref(list_id);
         self.get_mut(heap).state = GatherState::Completed(Value::Ref(list_id));
     }
@@ -1062,7 +1062,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, GatherFuture<H>> {
     /// Records a child's value in its result slots, completing the gather when no children remain.
     /// Returns the completed result and awaiter, or `None` while other children are pending.
     /// A gather that already failed discards later values while its siblings continue running.
-    fn resolve_child(&mut self, vm: &mut VM<'h, H>, child_id: H, value: Value<H>) -> Option<GatherSuccess<H>> {
+    fn resolve_child(&self, vm: &mut VM<'h, H>, child_id: H, value: Value<H>) -> Option<GatherSuccess<H>> {
         // A sibling failed (or the commit pass rolled back) while this child
         // was still running: it has a result, and nowhere for it to go.
         // `Pending` is not reachable — a child only exists once awaited.
@@ -1135,7 +1135,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, GatherFuture<H>> {
     /// Caches the first failure and transfers the gather's waiter to the caller.
     /// Returns `None` if already settled. Children keep running and retain their references
     /// to this gather, so none can free it while the caller holds this heap reader.
-    pub(crate) fn fail(&mut self, heap: &mut HeapReader<'h, H>, error: &RunError) -> Option<Awaiter<H>> {
+    pub(crate) fn fail(&self, heap: &mut HeapReader<'h, H>, error: &RunError) -> Option<Awaiter<H>> {
         // Take the Awaited bookkeeping. The state stays `Awaited` (with
         // placeholder fields) until the state replace below commits the
         // transition. The extracted `awaiter` is transferred to the caller

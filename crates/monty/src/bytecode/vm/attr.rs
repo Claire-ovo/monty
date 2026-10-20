@@ -28,6 +28,11 @@ pub(crate) enum PendingLookupEffect<H: Reference> {
     /// `getattr(obj, name, default)`: push `default` for `Undefined`. Owns
     /// the heap reference until the resume consumes it.
     Default(Value<H>),
+    /// A class-pattern attribute read (`MatchAttr`): pushes the served value
+    /// (or `None` for `Undefined`) itself and yields the match flag, so the
+    /// resumed instruction lands the same `[value, bool]` pair it pushes
+    /// when the attribute is answered synchronously.
+    MatchAttr,
 }
 
 impl<H: RuntimeRef> PendingLookupEffect<H> {
@@ -45,11 +50,19 @@ impl<H: RuntimeRef> PendingLookupEffect<H> {
                 value
             }
             (Self::Default(default), None) => default,
+            (Self::MatchAttr, Some(value)) => {
+                vm.push(value);
+                Value::Bool(true)
+            }
+            (Self::MatchAttr, None) => {
+                vm.push(Value::None);
+                Value::Bool(false)
+            }
         }
     }
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for PendingLookupEffect<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for PendingLookupEffect<H> {
     fn drop_with(self, heap: &mut C) {
         if let Self::Default(value) = self {
             value.drop_with(heap);

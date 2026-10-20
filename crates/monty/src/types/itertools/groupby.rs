@@ -14,7 +14,10 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::RunResult,
-    heap::{DropGuard, DropWithContext, HeapData, HeapObjectRead, HeapRead, HeapReadOutput, Reference, RuntimeRef},
+    heap::{
+        DropGuard, DropWithContext, HeapData, HeapObjectRead, HeapRead, HeapReadMut, HeapReadOutput, Reference,
+        RuntimeRef,
+    },
     types::{
         allocate_tuple,
         itertools::{ItertoolsIter, step::next_item},
@@ -203,7 +206,7 @@ pub(super) fn grouper_next<'h, H: RuntimeRef>(
     let Value::Ref(parent_id) = parent else {
         unreachable!("a grouper's parent is always a heap groupby")
     };
-    let HeapReadOutput::Itertools(mut parent) = vm.heap.read(*parent_id) else {
+    let HeapReadOutput::Itertools(parent) = vm.heap.read(*parent_id) else {
         unreachable!("a grouper's parent is always a groupby")
     };
 
@@ -215,7 +218,7 @@ pub(super) fn grouper_next<'h, H: RuntimeRef>(
     if groupby.current_grouper != Some(own_id) {
         return Ok(None);
     }
-    if groupby.current_value.is_none() && !step(&mut parent, vm)? {
+    if groupby.current_value.is_none() && !step(&parent, vm)? {
         return Ok(None);
     }
     let current = groupby_ref(&parent, vm)
@@ -229,7 +232,7 @@ pub(super) fn grouper_next<'h, H: RuntimeRef>(
     }
     // The item leaves with the grouper; its key is cleared so the parent reads
     // the next pair in rather than comparing a key whose item is gone.
-    let groupby = groupby_mut(&mut parent, vm);
+    let groupby = groupby_mut(&parent, vm);
     let value = groupby.current_value.take();
     let key = groupby.current_key.take();
     key.drop_with(vm);
@@ -240,7 +243,7 @@ pub(super) fn grouper_next<'h, H: RuntimeRef>(
 ///
 /// `false` means the source is spent; the pair already held is left as it was,
 /// as CPython's `groupby_step` leaves `currkey` and `currvalue`.
-fn step<'h, H: RuntimeRef>(iter: &mut HeapRead<'h, ItertoolsIter<H>>, vm: &mut VM<'h, H>) -> RunResult<bool> {
+fn step<'h, H: RuntimeRef>(iter: &HeapReadMut<'h, ItertoolsIter<H>>, vm: &mut VM<'h, H>) -> RunResult<bool> {
     let groupby = groupby_ref(iter, vm);
     let source = groupby.source.clone_with_heap(vm.heap);
     let keyfunc = groupby.keyfunc.clone_with_heap(vm.heap);
@@ -267,7 +270,7 @@ fn step<'h, H: RuntimeRef>(iter: &mut HeapRead<'h, ItertoolsIter<H>>, vm: &mut V
 }
 
 /// The `GroupBy` behind an iterator already dispatched as one.
-fn groupby_ref<'r, 'h, H: RuntimeRef>(iter: &HeapRead<'h, ItertoolsIter<H>>, vm: &'r VM<'h, H>) -> &'r GroupBy<H> {
+fn groupby_ref<'r, 'h, H: RuntimeRef>(iter: &'r HeapRead<'h, ItertoolsIter<H>>, vm: &'r VM<'h, H>) -> &'r GroupBy<H> {
     let ItertoolsIter::GroupBy(groupby) = iter.get(vm.heap) else {
         unreachable!("dispatched on Kind::GroupBy")
     };
@@ -276,7 +279,7 @@ fn groupby_ref<'r, 'h, H: RuntimeRef>(iter: &HeapRead<'h, ItertoolsIter<H>>, vm:
 
 /// Mutable counterpart of [`groupby_ref`].
 fn groupby_mut<'r, 'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &'r HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &'r mut VM<'h, H>,
 ) -> &'r mut GroupBy<H> {
     let ItertoolsIter::GroupBy(groupby) = iter.get_mut(vm.heap) else {

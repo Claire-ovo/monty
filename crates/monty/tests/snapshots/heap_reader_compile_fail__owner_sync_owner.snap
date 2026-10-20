@@ -11,9 +11,9 @@ error[E0277]: `std::cell::Cell<u32>` cannot be shared between threads safely
     = help: within `HeapOwner`, the trait `Sync` is not implemented for `std::cell::Cell<u32>`
     = note: if you want to do aliasing and mutation between multiple threads, use `std::sync::RwLock` or `std::sync::atomic::AtomicU32` instead
 note: required because it appears within the type `Heap<HeapObjectPtr<'static>>`
-   --> crates/monty/src/heap/mod.rs:908:19
+   --> crates/monty/src/heap/mod.rs:936:19
     |
-908 | pub(crate) struct Heap<H: RuntimeRef> {
+936 | pub(crate) struct Heap<H: RuntimeRef> {
     |                   ^^^^
 note: required because it appears within the type `OwnedState<HeapObjectPtr<'static>>`
    --> crates/monty/src/heap/owner.rs:18:19
@@ -44,9 +44,9 @@ note: required because it appears within the type `HeapEntries<HeapObjectPtr<'st
  83 | pub(super) struct HeapEntries<H: Reference> {
     |                   ^^^^^^^^^^^
 note: required because it appears within the type `Heap<HeapObjectPtr<'static>>`
-   --> crates/monty/src/heap/mod.rs:908:19
+   --> crates/monty/src/heap/mod.rs:936:19
     |
-908 | pub(crate) struct Heap<H: RuntimeRef> {
+936 | pub(crate) struct Heap<H: RuntimeRef> {
     |                   ^^^^
 note: required because it appears within the type `OwnedState<HeapObjectPtr<'static>>`
    --> crates/monty/src/heap/owner.rs:18:19
@@ -78,9 +78,9 @@ note: required because it appears within the type `HeapEntries<HeapObjectPtr<'st
  83 | pub(super) struct HeapEntries<H: Reference> {
     |                   ^^^^^^^^^^^
 note: required because it appears within the type `Heap<HeapObjectPtr<'static>>`
-   --> crates/monty/src/heap/mod.rs:908:19
+   --> crates/monty/src/heap/mod.rs:936:19
     |
-908 | pub(crate) struct Heap<H: RuntimeRef> {
+936 | pub(crate) struct Heap<H: RuntimeRef> {
     |                   ^^^^
 note: required because it appears within the type `OwnedState<HeapObjectPtr<'static>>`
    --> crates/monty/src/heap/owner.rs:18:19
@@ -112,9 +112,9 @@ note: required because it appears within the type `ResourceTracker`
 281 | pub struct ResourceTracker {
     |            ^^^^^^^^^^^^^^^
 note: required because it appears within the type `Heap<HeapObjectPtr<'static>>`
-   --> crates/monty/src/heap/mod.rs:908:19
+   --> crates/monty/src/heap/mod.rs:936:19
     |
-908 | pub(crate) struct Heap<H: RuntimeRef> {
+936 | pub(crate) struct Heap<H: RuntimeRef> {
     |                   ^^^^
 note: required because it appears within the type `OwnedState<HeapObjectPtr<'static>>`
    --> crates/monty/src/heap/owner.rs:18:19
@@ -146,9 +146,9 @@ note: required because it appears within the type `ResourceTracker`
 281 | pub struct ResourceTracker {
     |            ^^^^^^^^^^^^^^^
 note: required because it appears within the type `Heap<HeapObjectPtr<'static>>`
-   --> crates/monty/src/heap/mod.rs:908:19
+   --> crates/monty/src/heap/mod.rs:936:19
     |
-908 | pub(crate) struct Heap<H: RuntimeRef> {
+936 | pub(crate) struct Heap<H: RuntimeRef> {
     |                   ^^^^
 note: required because it appears within the type `OwnedState<HeapObjectPtr<'static>>`
    --> crates/monty/src/heap/owner.rs:18:19
@@ -180,9 +180,9 @@ note: required because it appears within the type `ResourceTracker`
 281 | pub struct ResourceTracker {
     |            ^^^^^^^^^^^^^^^
 note: required because it appears within the type `Heap<HeapObjectPtr<'static>>`
-   --> crates/monty/src/heap/mod.rs:908:19
+   --> crates/monty/src/heap/mod.rs:936:19
     |
-908 | pub(crate) struct Heap<H: RuntimeRef> {
+936 | pub(crate) struct Heap<H: RuntimeRef> {
     |                   ^^^^
 note: required because it appears within the type `OwnedState<HeapObjectPtr<'static>>`
    --> crates/monty/src/heap/owner.rs:18:19
@@ -218,9 +218,9 @@ note: required because it appears within the type `HeapEntries<HeapObjectPtr<'st
  83 | pub(super) struct HeapEntries<H: Reference> {
     |                   ^^^^^^^^^^^
 note: required because it appears within the type `Heap<HeapObjectPtr<'static>>`
-   --> crates/monty/src/heap/mod.rs:908:19
+   --> crates/monty/src/heap/mod.rs:936:19
     |
-908 | pub(crate) struct Heap<H: RuntimeRef> {
+936 | pub(crate) struct Heap<H: RuntimeRef> {
     |                   ^^^^
 note: required because it appears within the type `OwnedState<HeapObjectPtr<'static>>`
    --> crates/monty/src/heap/owner.rs:18:19
@@ -253,9 +253,9 @@ note: required because it appears within the type `HeapObjectPtr<'static>`
 note: required because it appears within the type `std::option::Option<HeapObjectPtr<'static>>`
    --> /rustc/b940084d7eb6a299eb4bfeb8e34901bc051e7ac4/library/core/src/option.rs:598:9
 note: required because it appears within the type `Heap<HeapObjectPtr<'static>>`
-   --> crates/monty/src/heap/mod.rs:908:19
+   --> crates/monty/src/heap/mod.rs:936:19
     |
-908 | pub(crate) struct Heap<H: RuntimeRef> {
+936 | pub(crate) struct Heap<H: RuntimeRef> {
     |                   ^^^^
 note: required because it appears within the type `OwnedState<HeapObjectPtr<'static>>`
    --> crates/monty/src/heap/owner.rs:18:19

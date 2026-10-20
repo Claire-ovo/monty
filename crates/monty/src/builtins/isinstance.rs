@@ -32,7 +32,11 @@ pub fn builtin_isinstance<H: RuntimeRef>(vm: &mut VM<'_, H>, args: ArgValues<H>)
 /// - Host classes: `isinstance(obj, Point)` for a `HostClassType` (exact class
 ///   id; the host sends no bases)
 /// - Tuples (possibly nested) of the above
-fn isinstance_check<H: RuntimeRef>(obj: &Value<H>, classinfo: &Value<H>, vm: &mut VM<'_, H>) -> RunResult<bool> {
+pub(crate) fn isinstance_check<H: RuntimeRef>(
+    obj: &Value<H>,
+    classinfo: &Value<H>,
+    vm: &mut VM<'_, H>,
+) -> RunResult<bool> {
     match classinfo {
         Value::Builtin(Builtins::Type(t)) => Ok(obj.py_type(vm).is_instance_of(*t)),
         Value::Builtin(Builtins::ExcType(handler_type)) => {

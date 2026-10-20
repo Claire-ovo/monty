@@ -8,7 +8,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::RunResult,
-    heap::{HeapRead, Reference, RuntimeRef},
+    heap::{HeapRead, HeapReadMut, Reference, RuntimeRef},
     types::{LazyHeapSet, PyTrait, itertools::ItertoolsIter},
     value::Value,
 };
@@ -58,7 +58,7 @@ impl<H: RuntimeRef> Repeat<H> {
 /// but keeps the fallible signature for a uniform dispatch shape.
 #[expect(clippy::unnecessary_wraps, reason = "uniform per-adaptor dispatch signature")]
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let ItertoolsIter::Repeat(repeat) = iter.get(vm.heap) else {

@@ -176,7 +176,7 @@ pub(crate) struct RandomRetry<H: Reference> {
     args: ArgValues<H>,
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for RandomRetry<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for RandomRetry<H> {
     fn drop_with(self, ctx: &mut C) {
         self.args.drop_with(ctx);
     }
@@ -774,7 +774,7 @@ fn shuffle<H: RuntimeRef>(target: RandomTarget<H>, args: ArgValues<H>, vm: &mut 
     defer_drop_mut!(x, vm);
     let len = len_of(x, vm)?;
     if let Value::Ref(id) = x
-        && let HeapReadOutput::List(mut list) = vm.heap.read(*id)
+        && let HeapReadOutput::List(list) = vm.heap.read(*id)
     {
         return target.with_generator(vm, |random, vm| {
             for i in (1..len).rev() {

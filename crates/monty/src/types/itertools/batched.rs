@@ -6,7 +6,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunResult},
-    heap::{DropGuard, DropWithContext, HeapRead, Reference, RuntimeRef},
+    heap::{DropGuard, DropWithContext, HeapReadMut, Reference, RuntimeRef},
     resource_checks::check_estimated_size,
     types::{
         TupleVec, allocate_tuple,
@@ -58,7 +58,7 @@ impl<H: RuntimeRef> Batched<H> {
 
 /// Fills one batch, latching only when it comes back empty or `strict` rejects it.
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let ItertoolsIter::Batched(batched) = iter.get(vm.heap) else {
@@ -118,7 +118,7 @@ pub(super) fn next<'h, H: RuntimeRef>(
 }
 
 /// Latches the adaptor, releasing the source as soon as it stops being reachable.
-fn finish<'h, H: RuntimeRef>(iter: &mut HeapRead<'h, ItertoolsIter<H>>, vm: &mut VM<'h, H>) {
+fn finish<'h, H: RuntimeRef>(iter: &HeapReadMut<'h, ItertoolsIter<H>>, vm: &mut VM<'h, H>) {
     let ItertoolsIter::Batched(batched) = iter.get_mut(vm.heap) else {
         unreachable!("dispatched on Kind::Batched")
     };

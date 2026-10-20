@@ -7,8 +7,8 @@ use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
     heap::{
-        DropGuard, DropWithContext, Heap, HeapData, HeapItem, HeapObjectRead, HeapRead, HeapReadOutput, Reference,
-        RuntimeRef,
+        DropGuard, DropWithContext, Heap, HeapData, HeapItem, HeapObjectRead, HeapRead, HeapReadMut, HeapReadOutput,
+        Reference, RuntimeRef,
     },
     intern::StaticStrings,
     modules::copy::{Memo, PyDeepCopy, deep_copy},
@@ -274,13 +274,15 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Deque<H>> {
         evicted.drop_with(vm);
         Value::Ref(vm.heap.allocate(HeapData::Deque(deque)))
     }
+}
 
+impl<'h, H: RuntimeRef> HeapReadMut<'h, Deque<H>> {
     /// Appends to the right, evicting from the left if `maxlen` is reached.
     ///
     /// Ownership of `item` transfers to the deque (refcount already handled by
     /// the caller); any evicted item is released here. A push that would grow the
     /// ring past the memory limit fails with `MemoryError`, dropping `item`.
-    pub fn append(&mut self, vm: &mut VM<'h, H>, item: Value<H>) -> RunResult<()> {
+    pub fn append(&self, vm: &mut VM<'h, H>, item: Value<H>) -> RunResult<()> {
         let item = self.check_push(vm, item)?;
         if matches!(item, Value::Ref(_)) {
             self.get_mut(vm.heap).contains_refs = true;
@@ -296,7 +298,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Deque<H>> {
     }
 
     /// Appends to the left, evicting from the right if `maxlen` is reached.
-    pub fn appendleft(&mut self, vm: &mut VM<'h, H>, item: Value<H>) -> RunResult<()> {
+    pub fn appendleft(&self, vm: &mut VM<'h, H>, item: Value<H>) -> RunResult<()> {
         let item = self.check_push(vm, item)?;
         if matches!(item, Value::Ref(_)) {
             self.get_mut(vm.heap).contains_refs = true;
@@ -325,7 +327,9 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Deque<H>> {
             check_value_buffer_growth(vm, len, capacity, item)
         }
     }
+}
 
+impl<'h, H: RuntimeRef> HeapRead<'h, Deque<H>> {
     /// Clones every item, incrementing refcounts — used by `copy`, `+` and `*`.
     fn clone_all_items(&self, vm: &mut VM<'h, H>) -> RunResult<Vec<Value<H>>> {
         let len = self.get(vm.heap).len();
@@ -864,7 +868,7 @@ fn call_deque_method<'h, H: RuntimeRef>(
 
 /// `deque.rotate([n=1])` — rotates right by `n` (left if negative), wrapping.
 fn rotate<'h, H: RuntimeRef>(
-    deque: &mut HeapRead<'h, Deque<H>>,
+    deque: &HeapReadMut<'h, Deque<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -894,7 +898,7 @@ fn rotate<'h, H: RuntimeRef>(
 
 /// `deque.insert(i, x)` — raises if the deque is already at `maxlen`.
 fn insert<'h, H: RuntimeRef>(
-    deque: &mut HeapRead<'h, Deque<H>>,
+    deque: &HeapReadMut<'h, Deque<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -941,7 +945,7 @@ fn insert<'h, H: RuntimeRef>(
 
 /// `deque.remove(x)` — removes the first item equal to `x`.
 fn remove<'h, H: RuntimeRef>(
-    deque: &mut HeapRead<'h, Deque<H>>,
+    deque: &HeapReadMut<'h, Deque<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -976,7 +980,7 @@ fn remove<'h, H: RuntimeRef>(
 
 /// `deque.index(x[, start[, stop]])` — index of the first item equal to `x`.
 fn index<'h, H: RuntimeRef>(
-    deque: &mut HeapRead<'h, Deque<H>>,
+    deque: &HeapRead<'h, Deque<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1018,7 +1022,7 @@ fn index<'h, H: RuntimeRef>(
 
 /// `deque.count(x)` — number of items equal to `x`.
 fn count<'h, H: RuntimeRef>(
-    deque: &mut HeapRead<'h, Deque<H>>,
+    deque: &HeapRead<'h, Deque<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1117,7 +1121,7 @@ pub(crate) fn deque_extend<'h, H: RuntimeRef>(
 
 /// Appends one item to whichever end the extension targets.
 fn deque_push<'h, H: RuntimeRef>(
-    deque: &mut HeapRead<'h, Deque<H>>,
+    deque: &HeapReadMut<'h, Deque<H>>,
     item: Value<H>,
     end: ExtendEnd,
     vm: &mut VM<'h, H>,
@@ -1209,7 +1213,7 @@ impl<'h, H: RuntimeRef> PyDeepCopy<'h, H> for HeapRead<'h, Deque<H>> {
             let copied = deep_copy(&item, memo, vm);
             item.drop_with(vm);
             let copied = copied?;
-            let HeapReadOutput::Deque(mut dest) = vm.heap.read(copy_id) else {
+            let HeapReadOutput::Deque(dest) = vm.heap.read(copy_id) else {
                 unreachable!("copy was allocated as a deque")
             };
             dest.append(vm, copied)?;

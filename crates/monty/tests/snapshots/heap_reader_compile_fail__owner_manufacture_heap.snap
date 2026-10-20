@@ -8,7 +8,7 @@ error[E0624]: associated function `new` is private
  104 |     let _heap: Heap<HeapId<'static>> = Heap::new(0, ResourceTracker::default());
      |                                              ^^^ private associated function
      |
-    ::: crates/monty/src/heap/mod.rs:1103:5
+    ::: crates/monty/src/heap/mod.rs:1131:5
      |
-1103 |     unsafe fn new(capacity: usize, tracker: ResourceTracker) -> Self {
+1131 |     unsafe fn new(capacity: usize, tracker: ResourceTracker) -> Self {
      |     ---------------------------------------------------------------- private associated function defined here

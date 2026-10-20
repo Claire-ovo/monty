@@ -11,7 +11,7 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunResult},
     hash::{HashValue, identity_hash},
     heap::{
-        BorrowedHeapReadMut, DropGuard, DropWithContext, HeapItem, HeapObjectRead, HeapRead, Reference, RuntimeRef,
+        BorrowedHeapReadMut, DropGuard, DropWithContext, HeapItem, HeapObjectRead, HeapReadMut, Reference, RuntimeRef,
         heap_read_ref_as_field_mut,
     },
     types::{Union, str::allocate_string},
@@ -82,8 +82,9 @@ impl<H: RuntimeRef> Class<H> {
     }
 }
 
-impl<'h, H: RuntimeRef> HeapRead<'h, Class<H>> {
-    fn namespace_mut(&mut self) -> BorrowedHeapReadMut<'_, 'h, Dict<H>> {
+impl<'h, H: RuntimeRef> HeapReadMut<'h, Class<H>> {
+    /// Borrows the inline namespace for reader-gated attribute mutation.
+    fn namespace_mut(&self) -> BorrowedHeapReadMut<'_, 'h, Dict<H>> {
         heap_read_ref_as_field_mut!(self, Class<H>, namespace)
     }
 
@@ -92,7 +93,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Class<H>> {
     ///
     /// Existing instances observe the change immediately: instance attribute reads
     /// fall through to this namespace.
-    pub fn set_attr(&mut self, name: Value<H>, value: Value<H>, vm: &mut VM<'h, H>) -> RunResult<Option<Value<H>>> {
+    pub fn set_attr(&self, name: Value<H>, value: Value<H>, vm: &mut VM<'h, H>) -> RunResult<Option<Value<H>>> {
         self.namespace_mut().set(name, value, vm)
     }
 
@@ -100,7 +101,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Class<H>> {
     ///
     /// Only `@dataclass` needs this, to clear the `field()` object a class body
     /// bound for a factory-only field — CPython's decorator `delattr`s it.
-    pub fn pop_attr(&mut self, name: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<Option<Value<H>>> {
+    pub fn pop_attr(&self, name: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<Option<Value<H>>> {
         Ok(self.namespace_mut().pop(name, vm)?.map(|(key, value)| {
             key.drop_with(vm);
             value

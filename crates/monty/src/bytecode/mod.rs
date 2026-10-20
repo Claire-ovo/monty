@@ -17,6 +17,7 @@ mod code;
 mod compiler;
 mod constant;
 mod op;
+mod pattern;
 mod vm;
 
 pub(crate) use builder::CodeBuilder;

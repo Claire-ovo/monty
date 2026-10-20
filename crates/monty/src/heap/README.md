@@ -14,7 +14,9 @@ Slot metadata remains allocated after a payload is destroyed, so numeric identit
 Payload access checks the live flag, and destruction checks the reader count before taking exclusive access.
 
 `HeapReader` creates a second invariant lifetime for scoped reads.
-`HeapRead::get` and `get_mut` borrow that reader, excluding conflicting access even when several handles exist.
+`HeapRead::get` and `HeapReadMut::get_mut` borrow both the capability and that reader, keeping the source alive and excluding conflicting access.
+`HeapObjectRead` owns the reader count and exposes its capability only through shared references.
+Protected and projected capabilities retain their source borrow; vector and box projections resolve the current allocation on each access.
 A scoped `HeapPtr` erases its payload type; its matching reader supplies the arena reference type when dereferencing it.
 
 Each page contains permanent `UnsafeCell<MaybeUninit<HeapEntry>>` slots.

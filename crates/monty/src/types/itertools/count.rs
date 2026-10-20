@@ -8,7 +8,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::RunResult,
-    heap::{DropGuard, HeapRead, Reference, RuntimeRef},
+    heap::{DropGuard, HeapRead, HeapReadMut, Reference, RuntimeRef},
     types::{LazyHeapSet, PyTrait, itertools::ItertoolsIter},
     value::Value,
 };
@@ -57,7 +57,7 @@ impl<H: RuntimeRef> Count<H> {
 /// a host-configured limit. The addition promotes to `LongInt` on overflow, as
 /// CPython switches off its `ssize_t` fast path.
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     // Resolve to owned clones and release the borrow before `py_add`, which

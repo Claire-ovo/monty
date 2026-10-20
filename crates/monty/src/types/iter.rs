@@ -24,7 +24,7 @@ pub(crate) fn init<H: RuntimeRef>(vm: &mut VM<'_, H>, args: ArgValues<H>) -> Run
     let IterArgs { object, sentinel } = IterArgs::from_args(args, vm)?;
 
     if let Some(sentinel) = sentinel {
-        if object.is_callable(vm.heap) {
+        if object.is_callable(vm) {
             let iter = CallableIterator::new(object, sentinel);
             Ok(Value::Ref(vm.heap.allocate(HeapData::CallableIterator(iter))))
         } else {

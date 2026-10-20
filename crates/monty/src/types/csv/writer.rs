@@ -57,7 +57,7 @@ impl<H: RuntimeRef> Writer<H> {
     }
 
     /// An owned clone of the bound `write` (`None` for a file target).
-    pub(crate) fn write_method(&self, heap: &impl ContainsHeap<Ref = H>) -> Value<H> {
+    pub(crate) fn write_method(&self, heap: &impl ContainsHeap<Ref = H, Ref = H>) -> Value<H> {
         self.write.clone_with_heap(heap)
     }
 
@@ -86,7 +86,7 @@ pub(crate) fn write_method<H: RuntimeRef>(target: &Value<H>, vm: &mut VM<'_, H>)
     }
     let name = EitherStr::Interned(vm.interns.intern_static(StaticStrings::Write));
     match target.py_getattr(&name, vm) {
-        Ok(CallResult::Value(method)) if method.is_callable(vm.heap) => Ok(Some(method)),
+        Ok(CallResult::Value(method)) if method.is_callable(vm) => Ok(Some(method)),
         Ok(result) => {
             result.drop_with(vm);
             Ok(None)
@@ -98,7 +98,7 @@ pub(crate) fn write_method<H: RuntimeRef>(target: &Value<H>, vm: &mut VM<'_, H>)
 
 /// `writer.writerow(row)`: formats `row` and returns whatever the target's `write()` returns.
 pub(super) fn writerow<'h, H: RuntimeRef>(
-    obj: &mut HeapRead<'h, CsvObject<H>>,
+    obj: &HeapRead<'h, CsvObject<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<CallResult<H>> {
@@ -112,7 +112,7 @@ pub(super) fn writerow<'h, H: RuntimeRef>(
 /// Formats `items` as one record and writes it, returning whatever `write()` returns: the
 /// tail of `writerow`, and of the `DictWriter` methods once they have flattened their dict.
 pub(super) fn write_fields<'h, H: RuntimeRef>(
-    obj: &mut HeapRead<'h, CsvObject<H>>,
+    obj: &HeapRead<'h, CsvObject<H>>,
     items: &[Value<H>],
     vm: &mut VM<'h, H>,
 ) -> RunResult<CallResult<H>> {
@@ -129,7 +129,7 @@ pub(super) fn write_fields<'h, H: RuntimeRef>(
 /// A file target receives all the lines in one host write, since a Rust loop cannot suspend
 /// once per row; any other target's `write()` is called synchronously as each row arrives.
 pub(super) fn writerows<'h, H: RuntimeRef>(
-    obj: &mut HeapRead<'h, CsvObject<H>>,
+    obj: &HeapRead<'h, CsvObject<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<CallResult<H>> {

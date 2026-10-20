@@ -617,6 +617,10 @@ impl<'h, H: RuntimeRef> PyTrait<'h, H> for HeapObjectRead<'h, H, Complex> {
         Ok(allocate_string(text, vm.heap))
     }
 
+    fn py_abs_impl(&self, vm: &mut VM<'h, H>) -> RunResult<Option<Value<H>>> {
+        Ok(Some(Value::Float(self.get(vm.heap).abs()?)))
+    }
+
     fn py_neg_impl(&self, vm: &mut VM<'h, H>) -> RunResult<Option<Value<H>>> {
         Ok(Some(self.get(vm.heap).neg().into_value(vm.heap)))
     }

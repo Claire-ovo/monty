@@ -144,7 +144,7 @@ pub(crate) fn defaultdict_init<H: RuntimeRef>(vm: &mut VM<'_, H>, args: ArgValue
 
     let factory = match factory_arg {
         None | Some(Value::None) => None,
-        Some(value) if value.is_callable(vm.heap) => Some(value),
+        Some(value) if value.is_callable(vm) => Some(value),
         Some(value) => {
             value.drop_with(vm);
             pos.drop_with(vm);
@@ -174,7 +174,7 @@ pub(crate) fn defaultdict_init<H: RuntimeRef>(vm: &mut VM<'_, H>, args: ArgValue
     let Value::Ref(dict_id) = dict_value else {
         unreachable!("Dict::init returns a dict ref");
     };
-    let HeapReadOutput::Dict(mut dict) = vm.heap.read(dict_id) else {
+    let HeapReadOutput::Dict(dict) = vm.heap.read(dict_id) else {
         unreachable!("Dict::init returns a dict");
     };
     dict.get_mut(vm.heap).make_defaultdict(factory);

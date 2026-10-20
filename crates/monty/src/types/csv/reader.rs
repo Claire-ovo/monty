@@ -13,7 +13,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
-    heap::{DropGuard, Heap, HeapData, HeapRead, Reference, RuntimeRef},
+    heap::{DropGuard, Heap, HeapData, HeapReadMut, Reference, RuntimeRef},
     types::{
         CsvObject, List,
         csv::dialect::{Dialect, Quoting},
@@ -66,7 +66,7 @@ impl<H: RuntimeRef> Reader<H> {
 
 /// One record as a `list` of fields, or `None` once the source is exhausted.
 pub(super) fn next<'h, H: RuntimeRef>(
-    obj: &mut HeapRead<'h, CsvObject<H>>,
+    obj: &HeapReadMut<'h, CsvObject<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let fields = next_fields(obj, vm)?;
@@ -76,7 +76,7 @@ pub(super) fn next<'h, H: RuntimeRef>(
 /// The fields of the next record, or `None` once the source is exhausted. `DictReader`
 /// takes the fields this way, so its rows never pass through a list.
 pub(super) fn next_fields<'h, H: RuntimeRef>(
-    obj: &mut HeapRead<'h, CsvObject<H>>,
+    obj: &HeapReadMut<'h, CsvObject<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Vec<Value<H>>>> {
     let (source, dialect, field_hint) = {

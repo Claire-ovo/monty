@@ -12,7 +12,7 @@ use crate::{
     hash::HashValue,
     heap::{
         BorrowedHeapRead, BorrowedHeapReadMut, ContainsHeap, DropGuard, DropWithContext, Heap, HeapData, HeapItem,
-        HeapObjectRead, HeapRead, HeapReadOutput, Reference, RuntimeRef, heap_read_ref_as_field,
+        HeapObjectRead, HeapRead, HeapReadMut, HeapReadOutput, Reference, RuntimeRef, heap_read_ref_as_field,
         heap_read_ref_as_field_mut,
     },
     intern::StaticStrings,
@@ -119,7 +119,7 @@ impl<H: RuntimeRef> SetStorage<H> {
     ///
     /// The returned entries are owned: they implement [`DropWithContext`], so
     /// a caller that may abandon them partway must hold them in a guard.
-    fn clone_entries(&self, heap: &impl ContainsHeap<Ref = H>) -> Vec<SetEntry<H>> {
+    fn clone_entries(&self, heap: &impl ContainsHeap<Ref = H, Ref = H>) -> Vec<SetEntry<H>> {
         self.live()
             .map(|e| SetEntry {
                 value: e.value.clone_with_heap(heap),
@@ -164,7 +164,7 @@ impl<H: RuntimeRef> SetStorage<H> {
     /// Only for storages guest code cannot reach — a set still being built, or
     /// the fresh result of an algebra op. Those cannot be mutated mid-probe,
     /// so unlike [`TableProbe::find_index`] this needs no revalidation. Use the
-    /// `HeapRead` twin for a published set.
+    /// `HeapReadMut` twin for a published set.
     fn add_with_hash(&mut self, value: Value<H>, hash: u64, vm: &mut VM<'_, H>) -> RunResult<bool> {
         let mut value_guard = DropGuard::new(value, vm);
         let (value, vm) = value_guard.as_parts_mut();
@@ -190,12 +190,12 @@ impl<H: RuntimeRef> SetStorage<H> {
     }
 }
 
-impl<'h, H: RuntimeRef> HeapRead<'h, SetStorage<H>> {
+impl<'h, H: RuntimeRef> HeapReadMut<'h, SetStorage<H>> {
     /// Removes an element from the set.
     ///
     /// Returns `Ok(true)` if the element was removed, `Ok(false)` if not found.
     /// Returns `Err` if the key is unhashable.
-    fn remove(&mut self, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<bool> {
+    fn remove(&self, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<bool> {
         let hash = set_element_hash(value, vm)?;
 
         let Some(slot) = self.find_index(value, hash, vm)? else {
@@ -211,7 +211,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, SetStorage<H>> {
     /// Removes an element from the set without raising an error if not found.
     ///
     /// Returns `Ok(())` always (unless the key is unhashable).
-    fn discard(&mut self, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<()> {
+    fn discard(&self, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<()> {
         self.remove(value, vm)?;
         Ok(())
     }
@@ -219,7 +219,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, SetStorage<H>> {
     /// Removes and returns an arbitrary element from the set.
     ///
     /// Returns `Err(KeyError)` if the set is empty.
-    fn pop(&mut self, vm: &mut VM<'h, H>) -> RunResult<Value<H>> {
+    fn pop(&self, vm: &mut VM<'h, H>) -> RunResult<Value<H>> {
         if self.get(vm.heap).is_empty() {
             return Err(ExcType::key_error_pop_empty_set());
         }
@@ -230,7 +230,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, SetStorage<H>> {
     }
 
     /// Removes all elements from the set.
-    fn clear(&mut self, vm: &mut VM<'h, H>) {
+    fn clear(&self, vm: &mut VM<'h, H>) {
         let entries = self.get_mut(vm.heap).table.take_entries();
         entries.drop_with(vm);
     }
@@ -241,7 +241,7 @@ impl<H: RuntimeRef> SetStorage<H> {
     ///
     /// Indexed from scratch rather than cloning `indices`, which `HashTable`
     /// would reproduce at the source's bucket count — see [`Self::from_entry_vec`].
-    fn clone_with_heap(&self, heap: &impl ContainsHeap<Ref = H>) -> Self {
+    fn clone_with_heap(&self, heap: &impl ContainsHeap<Ref = H, Ref = H>) -> Self {
         Self::from_entry_vec(
             self.live()
                 .map(|entry| SetEntry {
@@ -276,10 +276,9 @@ impl<'h, H: RuntimeRef> HeapRead<'h, SetStorage<H>> {
 /// copy of the dict probe.
 impl<'h, H: RuntimeRef> TableSource<'h> for HeapRead<'h, SetStorage<H>> {
     type Ref = H;
-
     type Entry = SetEntry<H>;
 
-    fn table<'r>(&self, vm: &'r VM<'h, H>) -> &'r PyHashTable<SetEntry<H>> {
+    fn table<'r>(&'r self, vm: &'r VM<'h, H>) -> &'r PyHashTable<SetEntry<H>> {
         &self.get(vm.heap).table
     }
 }
@@ -421,8 +420,8 @@ impl<'h, H: RuntimeRef> HeapRead<'h, SetStorage<H>> {
 /// Stack-borrowed lending iterator over a heap-allocated set's elements in
 /// insertion order.
 ///
-/// Borrows a [`HeapRead`] for its lifetime, so the heap entry is pinned by
-/// the reader count for the duration of iteration.
+/// Borrows a [`HeapRead`] for its lifetime, retaining its object guard or
+/// protected source for the duration of iteration.
 ///
 /// **Lending shape.** [`next`](Self::next) returns `Option<&Value>`. The
 /// iterator itself owns the most-recently-yielded element (using
@@ -720,11 +719,11 @@ impl<H: RuntimeRef> Set<H> {
     }
 }
 
-impl<'h, H: RuntimeRef> HeapRead<'h, Set<H>> {
+impl<'h, H: RuntimeRef> HeapReadMut<'h, Set<H>> {
     /// Removes an element from the set.
     ///
     /// Returns `Err(KeyError)` if the element is not present.
-    pub fn remove(&mut self, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<()> {
+    pub fn remove(&self, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<()> {
         if self.storage_mut().remove(value, vm)? {
             Ok(())
         } else {
@@ -735,34 +734,38 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Set<H>> {
     /// Removes an element from the set if present.
     ///
     /// Does not raise an error if the element is not found.
-    pub fn discard(&mut self, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<()> {
+    pub fn discard(&self, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<()> {
         self.storage_mut().discard(value, vm)
     }
 
     /// Removes and returns an arbitrary element from the set.
     ///
     /// Returns `Err(KeyError)` if the set is empty.
-    pub fn pop(&mut self, vm: &mut VM<'h, H>) -> RunResult<Value<H>> {
+    pub fn pop(&self, vm: &mut VM<'h, H>) -> RunResult<Value<H>> {
         self.storage_mut().pop(vm)
     }
 
     /// Removes all elements from the set.
-    pub fn clear(&mut self, vm: &mut VM<'h, H>) {
+    pub fn clear(&self, vm: &mut VM<'h, H>) {
         self.storage_mut().clear(vm);
     }
 
+    /// Borrows the inline storage for reader-gated mutation.
+    fn storage_mut(&self) -> BorrowedHeapReadMut<'_, 'h, SetStorage<H>> {
+        heap_read_ref_as_field_mut!(self, Set<H>, 0)
+    }
+}
+
+impl<'h, H: RuntimeRef> HeapRead<'h, Set<H>> {
     /// Returns a shallow copy of the set.
     #[must_use]
     pub fn copy(&self, vm: &VM<'h, H>) -> Set<H> {
         Set(self.get(vm.heap).0.clone_with_heap(vm.heap))
     }
 
+    /// Borrows the inline storage for mutation-safe lookups and iteration.
     fn storage(&self) -> BorrowedHeapRead<'_, 'h, SetStorage<H>> {
         heap_read_ref_as_field!(self, Set<H>, 0)
-    }
-
-    fn storage_mut(&mut self) -> BorrowedHeapReadMut<'_, 'h, SetStorage<H>> {
-        heap_read_ref_as_field_mut!(self, Set<H>, 0)
     }
 }
 
@@ -853,7 +856,7 @@ fn clone_storage_checked<H: RuntimeRef>(storage: &SetStorage<H>, vm: &VM<'_, H>)
     Ok(storage.clone_with_heap(vm.heap))
 }
 
-impl<'h, H: RuntimeRef> HeapRead<'h, Set<H>> {
+impl<'h, H: RuntimeRef> HeapReadMut<'h, Set<H>> {
     /// Adds an element to the set, transferring ownership.
     ///
     /// Returns `Ok(true)` if the element was added (not already present),
@@ -863,7 +866,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Set<H>> {
     /// Uses the mutation-safe storage lookup ([`TableProbe::find_index`]) to
     /// detect duplicates, so a user `__eq__` mutating the set mid-add cannot
     /// leave the probe holding stale indices.
-    pub fn add(&mut self, value: Value<H>, vm: &mut VM<'h, H>) -> RunResult<bool> {
+    pub fn add(&self, value: Value<H>, vm: &mut VM<'h, H>) -> RunResult<bool> {
         let mut value_guard = DropGuard::new(value, vm);
         let (value, vm) = value_guard.as_parts();
         let hash = set_element_hash(value, vm)?;
@@ -873,9 +876,9 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Set<H>> {
 
     /// Adds an element whose hash the caller already knows.
     ///
-    /// The `HeapRead` twin of [`SetStorage::add_with_hash`], carrying the same
+    /// The `HeapReadMut` twin of [`SetStorage::add_with_hash`], carrying the same
     /// obligation: the hash must be the one stored for this value.
-    pub(crate) fn add_with_hash(&mut self, value: Value<H>, hash: u64, vm: &mut VM<'h, H>) -> RunResult<bool> {
+    pub(crate) fn add_with_hash(&self, value: Value<H>, hash: u64, vm: &mut VM<'h, H>) -> RunResult<bool> {
         let mut value_guard = DropGuard::new(value, vm);
         let (value, vm) = value_guard.as_parts();
 
@@ -893,12 +896,8 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Set<H>> {
         Ok(true)
     }
 
-    pub(crate) fn contains(&self, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<bool> {
-        self.storage().contains(value, vm)
-    }
-
-    /// `set.update(iterable)` via HeapRead.
-    fn hr_update(&mut self, other: Value<H>, vm: &mut VM<'h, H>) -> RunResult<()> {
+    /// Updates from a snapshotted set or an arbitrary iterable.
+    fn hr_update(&self, other: Value<H>, vm: &mut VM<'h, H>) -> RunResult<()> {
         // Try direct extraction from Set/FrozenSet
         let entries_opt = {
             match &other {
@@ -927,7 +926,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Set<H>> {
     /// rest of the entries holding references nobody drops — a plain `for` loop
     /// over the `Vec` would leak them. The guard on the source iterator settles
     /// whatever the loop did not reach.
-    fn extend_from_entries(&mut self, entries: Vec<SetEntry<H>>, vm: &mut VM<'h, H>) -> RunResult<()> {
+    fn extend_from_entries(&self, entries: Vec<SetEntry<H>>, vm: &mut VM<'h, H>) -> RunResult<()> {
         let entries = entries.into_iter();
         defer_drop_mut!(entries, vm);
         loop {
@@ -936,6 +935,13 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Set<H>> {
             };
             self.add_with_hash(entry.value, entry.hash, vm)?;
         }
+    }
+}
+
+impl<'h, H: RuntimeRef> HeapRead<'h, Set<H>> {
+    /// Checks membership through the live storage's guarded probe.
+    pub(crate) fn contains(&self, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<bool> {
+        self.storage().contains(value, vm)
     }
 
     /// Set algebra operations (union, intersection, difference, symmetric_difference)
@@ -1009,19 +1015,19 @@ enum SetComparison {
     Disjoint,
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for Set<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for Set<H> {
     fn drop_with(self, heap: &mut C) {
         self.0.drop_with(heap);
     }
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for SetStorage<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for SetStorage<H> {
     fn drop_with(mut self, heap: &mut C) {
         self.table.take_entries().drop_with(heap);
     }
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for FrozenSet<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for FrozenSet<H> {
     fn drop_with(self, heap: &mut C) {
         self.storage.drop_with(heap);
     }
@@ -1134,7 +1140,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, FrozenSet<H>> {
     }
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for SetEntry<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for SetEntry<H> {
     fn drop_with(self, heap: &mut C) {
         self.value.drop_with(heap);
     }
@@ -1807,7 +1813,9 @@ impl<'h, H: RuntimeRef> PyTrait<'h, H> for HeapObjectRead<'h, H, SetIterator<H>>
     }
 }
 
-fn set_element_hash<H: RuntimeRef>(value: &Value<H>, vm: &mut VM<'_, H>) -> RunResult<u64> {
+/// Hashes a value about to become a set element, raising CPython's
+/// `cannot use 'T' as a set element (unhashable type: 'U')` when it cannot be.
+pub(crate) fn set_element_hash<H: RuntimeRef>(value: &Value<H>, vm: &mut VM<'_, H>) -> RunResult<u64> {
     if let Some(hash) = value.py_hash(vm)? {
         Ok(hash.raw())
     } else {
@@ -1871,7 +1879,7 @@ impl<'h, H: RuntimeRef> PyDeepCopy<'h, H> for HeapRead<'h, Set<H>> {
             let (members, vm) = members.as_parts_mut();
             vm.heap.tracker.check_time_every(index)?;
             let copied = deep_copy(&members[index], memo, vm)?;
-            let HeapReadOutput::Set(mut dest) = vm.heap.read(copy_id) else {
+            let HeapReadOutput::Set(dest) = vm.heap.read(copy_id) else {
                 unreachable!("copy was allocated as a set")
             };
             dest.add(copied, vm)?;

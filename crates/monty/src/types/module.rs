@@ -132,12 +132,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, Module<H>> {
     ///
     /// Returns `CallResult` because module functions may need OS operations
     /// (e.g., `os.getenv()`) that require host involvement.
-    pub fn py_call_attr(
-        &mut self,
-        vm: &mut VM<'h, H>,
-        attr: &EitherStr,
-        args: ArgValues<H>,
-    ) -> RunResult<CallResult<H>> {
+    pub fn py_call_attr(&self, vm: &mut VM<'h, H>, attr: &EitherStr, args: ArgValues<H>) -> RunResult<CallResult<H>> {
         let mut args_guard = DropGuard::new(args, vm);
         let vm = args_guard.ctx();
 

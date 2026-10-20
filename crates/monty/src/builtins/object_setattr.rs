@@ -55,7 +55,7 @@ pub fn builtin_object_setattr<H: RuntimeRef>(vm: &mut VM<'_, H>, args: ArgValues
     let Value::Ref(heap_id) = object else {
         return Err(no_dict_error(object, &name, vm));
     };
-    let HeapReadOutput::Instance(mut instance) = vm.heap.read(*heap_id) else {
+    let HeapReadOutput::Instance(instance) = vm.heap.read(*heap_id) else {
         return Err(no_dict_error(object, &name, vm));
     };
 

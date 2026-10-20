@@ -393,7 +393,7 @@ pub(crate) fn deep_copy_attrs<H: RuntimeRef>(
             break;
         };
         let (key_copy, value_copy) = deep_copy_pair(key, value, memo, vm)?;
-        let HeapReadOutput::Instance(mut instance) = vm.heap.read(copy_id) else {
+        let HeapReadOutput::Instance(instance) = vm.heap.read(copy_id) else {
             unreachable!("caller allocated an instance")
         };
         let replaced = instance.attrs_mut().set(key_copy, value_copy, vm)?;
@@ -525,7 +525,7 @@ impl<H: RuntimeRef> Memo<H> {
     pub(crate) fn insert(&mut self, source: &Value<H>, copy: &Value<H>, vm: &mut VM<'_, H>) -> RunResult<()> {
         let key = source.id().into_value(vm.heap);
         let value = copy.clone_with_heap(vm.heap);
-        let HeapReadOutput::Dict(mut dict) = vm.heap.read(self.dict_id()) else {
+        let HeapReadOutput::Dict(dict) = vm.heap.read(self.dict_id()) else {
             unreachable!("memo is a dict")
         };
         if let Some(replaced) = dict.set(key, value, vm)? {
@@ -546,7 +546,7 @@ impl<H: RuntimeRef> Memo<H> {
     }
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for Memo<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for Memo<H> {
     fn drop_with(self, context: &mut C) {
         self.dict.drop_with(context);
         self.keep_alive.drop_with(context);
@@ -623,7 +623,7 @@ fn insert_pairs<H: RuntimeRef>(dict_id: H, pairs: Vec<(Value<H>, Value<H>)>, vm:
         let Some((key, value)) = pairs.next() else {
             break;
         };
-        let HeapReadOutput::Dict(mut dest) = vm.heap.read(dict_id) else {
+        let HeapReadOutput::Dict(dest) = vm.heap.read(dict_id) else {
             unreachable!("copy was allocated as a dict")
         };
         // `set` takes ownership of the pair and releases it on failure.
@@ -645,7 +645,7 @@ fn insert_attrs<H: RuntimeRef>(id: H, pairs: Vec<(Value<H>, Value<H>)>, vm: &mut
         let Some((key, value)) = pairs.next() else {
             break;
         };
-        let HeapReadOutput::Instance(mut instance) = vm.heap.read(id) else {
+        let HeapReadOutput::Instance(instance) = vm.heap.read(id) else {
             unreachable!("caller allocated an instance")
         };
         let replaced = instance.attrs_mut().set(key, value, vm)?;

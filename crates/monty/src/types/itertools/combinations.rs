@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     bytecode::VM,
-    heap::{HeapRead, Reference, RuntimeRef},
+    heap::{HeapReadMut, Reference, RuntimeRef},
     types::{
         Type,
         itertools::{
@@ -118,7 +118,7 @@ impl<H: RuntimeRef> Combinations<H> {
 
 /// Steps the indices and gathers the pool items they select.
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> Option<Value<H>> {
     let ItertoolsIter::Combinations(combinations) = iter.get_mut(vm.heap) else {

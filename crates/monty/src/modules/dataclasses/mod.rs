@@ -31,11 +31,11 @@ use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     hash::HashValue,
-    heap::{ContainsHeap, DropGuard, DropWithContext, HeapData, HeapRead, HeapReadOutput},
+    heap::{ContainsHeap, DropGuard, DropWithContext, HeapData, HeapRead, HeapReadMut, HeapReadOutput},
     intern::{StaticStrings, StringId},
     modules::ModuleFunctions,
     types::{
-        Class, Dict, Instance, LazyHeapSet, Module, PyTrait,
+        Class, Dict, Instance, LazyHeapSet, Module, PyTrait, TupleVec, allocate_tuple,
         host_class::{host_class_type, write_dataclass_repr},
         instance::{class_defines, class_dunder, class_name, instance_attr},
     },
@@ -256,7 +256,7 @@ fn apply_dataclass<H: RuntimeRef>(vm: &mut VM<'_, H>, cls: Value<H>, options: Da
     let Value::Ref(class_id) = cls else {
         return Err(non_class_error(cls, vm));
     };
-    let HeapReadOutput::Class(mut class) = vm.heap.read(*class_id) else {
+    let HeapReadOutput::Class(class) = vm.heap.read(*class_id) else {
         return Err(non_class_error(cls, vm));
     };
     let fields = build_dataclass_fields(&class, vm)?;
@@ -265,11 +265,12 @@ fn apply_dataclass<H: RuntimeRef>(vm: &mut VM<'_, H>, cls: Value<H>, options: Da
     };
     // Fields first, so nothing owns the mapping while the params allocation
     // can still fail; a class left with fields alone acts as a default one.
-    store_dataclass_fields(&mut class, fields, vm)?;
+    store_dataclass_fields(&class, fields, vm)?;
     // Now that the mapping owns them, the `field()` objects the class body left
     // as attributes can be rewritten to what CPython leaves behind.
-    rewrite_field_attributes(&mut class, fields_id, vm)?;
-    store_dataclass_params(&mut class, options, vm)?;
+    rewrite_field_attributes(&class, fields_id, vm)?;
+    store_dataclass_params(&class, options, vm)?;
+    store_match_args(&class, vm)?;
     Ok(guard.into_inner())
 }
 
@@ -337,7 +338,7 @@ fn allocate_fields_dict<H: RuntimeRef>(vm: &mut VM<'_, H>, fields: Vec<Value<H>>
 /// `fields`. Re-decorating replaces the previous mapping, which nothing else
 /// owns once it is out of the namespace.
 fn store_dataclass_fields<'h, H: RuntimeRef>(
-    class: &mut HeapRead<'h, Class<H>>,
+    class: &HeapReadMut<'h, Class<H>>,
     fields: Value<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<()> {
@@ -353,7 +354,7 @@ fn store_dataclass_fields<'h, H: RuntimeRef>(
 /// The synthesized dunders read the options back from here (see
 /// [`dataclass_options`]), so this entry is the class's only copy of them.
 fn store_dataclass_params<'h, H: RuntimeRef>(
-    class: &mut HeapRead<'h, Class<H>>,
+    class: &HeapReadMut<'h, Class<H>>,
     options: DataclassOptions,
     vm: &mut VM<'h, H>,
 ) -> RunResult<()> {
@@ -364,13 +365,34 @@ fn store_dataclass_params<'h, H: RuntimeRef>(
     Ok(())
 }
 
+/// Writes `__match_args__` into the class namespace: the field names in
+/// definition order, so `case Point(x, y):` binds positionally. A class that
+/// defines its own `__match_args__` keeps it, as in CPython.
+fn store_match_args<'h, H: RuntimeRef>(class: &HeapReadMut<'h, Class<H>>, vm: &mut VM<'h, H>) -> RunResult<()> {
+    let name_id = vm.interns.intern_static(StaticStrings::MatchArgsDunder);
+    let namespace = class.get(vm.heap).namespace();
+    if namespace.get_by_str("__match_args__", vm.heap, vm.interns).is_some() {
+        return Ok(());
+    }
+    let names: TupleVec<H> = fields_dict_id(namespace, vm)
+        .map(|fields_id| field_specs(fields_id, vm))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, _)| Value::InternString(name))
+        .collect();
+    let match_args = allocate_tuple(names, vm.heap);
+    let replaced = class.set_attr(Value::InternString(name_id), match_args, vm)?;
+    replaced.drop_with(vm);
+    Ok(())
+}
+
 /// Rewrites the class attribute each `field()` left behind, as CPython does:
 /// a plain default becomes the attribute, and a field with only a factory —
 /// which has no single value to expose — loses it.
 ///
 /// Runs once the fields are stored, so the mapping is the list of names to fix.
 fn rewrite_field_attributes<'h, H: RuntimeRef>(
-    class: &mut HeapRead<'h, Class<H>>,
+    class: &HeapReadMut<'h, Class<H>>,
     fields_id: H,
     vm: &mut VM<'h, H>,
 ) -> RunResult<()> {
@@ -436,7 +458,7 @@ fn collect_annotated_fields<'h, H: RuntimeRef>(class: &HeapRead<'h, Class<H>>, v
         // takes the name and annotation and the list keeps that reference.
         // Anything else is a plain default, wrapped in a field of its own.
         if let Some(field_id) = adoptable_field(bound.as_ref(), vm) {
-            let HeapReadOutput::DataclassField(mut field) = vm.heap.read(field_id) else {
+            let HeapReadOutput::DataclassField(field) = vm.heap.read(field_id) else {
                 unreachable!("adoptable_field matched the variant")
             };
             let replaced = field.get_mut(vm.heap).adopt(name_id, annotation);
@@ -771,11 +793,11 @@ pub(crate) fn dataclass_init<'h, H: RuntimeRef>(
     let Value::Ref(instance_id) = instance else {
         unreachable!("the caller just allocated the instance")
     };
-    let HeapReadOutput::Instance(mut instance) = vm.heap.read(*instance_id) else {
+    let HeapReadOutput::Instance(instance) = vm.heap.read(*instance_id) else {
         unreachable!("the caller just allocated the instance")
     };
     let values = bind_dataclass_fields(vm, class, fields_id, &fields, args)?;
-    store_bound_fields(&mut instance, &fields, values, vm)?;
+    store_bound_fields(&instance, &fields, values, vm)?;
     run_post_init(*instance_id, class, vm)?;
     Ok(CallResult::Value(guard.into_inner()))
 }
@@ -814,7 +836,7 @@ fn run_post_init<'h, H: RuntimeRef>(
 /// `values`. A set failure (a resource limit) leaves the untouched tail to the
 /// guard; the caller owns the instance.
 fn store_bound_fields<'h, H: RuntimeRef>(
-    instance: &mut HeapRead<'h, Instance<H>>,
+    instance: &HeapReadMut<'h, Instance<H>>,
     fields: &[(StringId, bool)],
     values: Vec<Value<H>>,
     vm: &mut VM<'h, H>,
@@ -988,7 +1010,7 @@ enum FieldInit<H: Reference> {
     Factory(Value<H>),
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for FieldInit<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for FieldInit<H> {
     fn drop_with(self, ctx: &mut C) {
         match self {
             Self::Unsupplied => {}

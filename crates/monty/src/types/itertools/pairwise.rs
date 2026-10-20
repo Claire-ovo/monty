@@ -6,7 +6,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::RunResult,
-    heap::{DropGuard, DropWithContext, HeapRead, Reference, RuntimeRef},
+    heap::{DropGuard, DropWithContext, HeapReadMut, Reference, RuntimeRef},
     types::{
         itertools::{ItertoolsIter, step::next_source},
         tuple::allocate_tuple,
@@ -63,7 +63,7 @@ impl<H: RuntimeRef> Pairwise<H> {
 /// Pulls one item and pairs it with the one before, priming `previous` on the
 /// first step so a source of fewer than two items yields nothing.
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let ItertoolsIter::Pairwise(pairwise) = iter.get(vm.heap) else {
@@ -136,7 +136,7 @@ pub(super) fn next<'h, H: RuntimeRef>(
 
 /// Advances the source, releasing it and `previous` once it stops.
 fn drive_source<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let source = {

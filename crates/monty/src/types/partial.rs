@@ -79,7 +79,7 @@ impl<H: RuntimeRef> Partial<H> {
         defer_drop_mut!(keywords, vm);
 
         let func = positional.remove(0);
-        if !func.is_callable(vm.heap) {
+        if !func.is_callable(vm) {
             func.drop_with(vm);
             return Err(ExcType::partial_not_callable());
         }
@@ -153,7 +153,7 @@ impl<H: RuntimeRef> Partial<H> {
     /// lift its contents out and then release the borrow.
     ///
     /// Preflights both vectors through [`check_clone_slots`].
-    pub(crate) fn clone_parts(&self, heap: &impl ContainsHeap<Ref = H>) -> RunResult<PartialParts<H>> {
+    pub(crate) fn clone_parts(&self, heap: &impl ContainsHeap<Ref = H, Ref = H>) -> RunResult<PartialParts<H>> {
         check_clone_slots(
             self.args.len().saturating_add(self.keywords.len().saturating_mul(2)),
             heap,
@@ -282,7 +282,7 @@ fn keyword_index_map<H: RuntimeRef>(bound: &[(Value<H>, Value<H>)], vm: &VM<'_, 
 
 /// Releases the refs a partial owns, for one abandoned before it reaches the
 /// heap; a heap-stored partial is freed through [`HeapItem::py_dec_ref_ids`].
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for Partial<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for Partial<H> {
     fn drop_with(self, ctx: &mut C) {
         self.func.drop_with(ctx);
         self.args.drop_with(ctx);
@@ -490,7 +490,7 @@ impl<'h, H: RuntimeRef> PyDeepCopy<'h, H> for HeapRead<'h, Partial<H>> {
         let copied = copied?;
         // CPython's `partial.__setstate__` rejects a non-callable too, which is
         // reachable through a `__deepcopy__` that returns something else.
-        if !copied.is_callable(vm.heap) {
+        if !copied.is_callable(vm) {
             copied.drop_with(vm);
             return Err(ExcType::partial_not_callable());
         }
@@ -535,7 +535,7 @@ fn deep_copy_args<'h, H: RuntimeRef>(
         let copied = deep_copy(&arg, memo, vm);
         arg.drop_with(vm);
         let copied = copied?;
-        let HeapReadOutput::Partial(mut dest) = vm.heap.read(copy_id) else {
+        let HeapReadOutput::Partial(dest) = vm.heap.read(copy_id) else {
             unreachable!("copy was allocated as a partial")
         };
         dest.get_mut(vm.heap).args.push(copied);
@@ -562,7 +562,7 @@ fn deep_copy_keywords<'h, H: RuntimeRef>(
         let (name, value) = &source.get(vm.heap).keywords[index];
         let (name, value) = (name.clone_with_heap(vm.heap), value.clone_with_heap(vm.heap));
         let pair = deep_copy_pair(name, value, memo, vm)?;
-        let HeapReadOutput::Partial(mut dest) = vm.heap.read(copy_id) else {
+        let HeapReadOutput::Partial(dest) = vm.heap.read(copy_id) else {
             unreachable!("copy was allocated as a partial")
         };
         dest.get_mut(vm.heap).keywords.push(pair);

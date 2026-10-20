@@ -9,9 +9,9 @@ error[E0277]: the trait bound `Heap<HeapObjectPtr<'de>>: serde::Deserialize<'de>
     |                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
     |
 help: the trait `heap::_::_serde::Deserialize<'_>` is not implemented for `Heap<HeapObjectPtr<'de>>`
-   --> crates/monty/src/heap/mod.rs:908:1
+   --> crates/monty/src/heap/mod.rs:936:1
     |
-908 | pub(crate) struct Heap<H: RuntimeRef> {
+936 | pub(crate) struct Heap<H: RuntimeRef> {
     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
     = note: for local types consider adding `#[derive(serde::Deserialize)]` to your `Heap<HeapObjectPtr<'de>>` type
     = note: for types from other crates check whether the crate offers a `serde` feature flag
@@ -24,4 +24,4 @@ help: the trait `heap::_::_serde::Deserialize<'_>` is not implemented for `Heap<
               ()
               (T,)
               (T0, T1)
-            and 484 others
+            and 487 others

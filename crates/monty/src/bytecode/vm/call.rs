@@ -102,7 +102,7 @@ pub(crate) enum CallResult<H: Reference> {
     },
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for CallResult<H> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for CallResult<H> {
     fn drop_with(self, heap: &mut C) {
         match self {
             Self::Value(value) | Self::AwaitValue(value) => value.drop_with(heap),
@@ -576,7 +576,7 @@ impl<'h, H: RuntimeRef> VM<'h, H> {
                 // Coupling check: reaching here means dispatch rejected the value,
                 // so `Value::is_callable` must agree it is not callable.
                 debug_assert!(
-                    !callable.is_callable(self.heap),
+                    !callable.is_callable(self),
                     "Value::is_callable accepts a value call_function rejects — the two drifted"
                 );
                 args.drop_with(self);

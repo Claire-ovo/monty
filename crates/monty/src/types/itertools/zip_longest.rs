@@ -6,7 +6,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::RunResult,
-    heap::{DropGuard, DropWithContext, HeapRead, Reference, RuntimeRef},
+    heap::{DropGuard, DropWithContext, HeapReadMut, Reference, RuntimeRef},
     types::{
         TupleVec, allocate_tuple,
         itertools::{ItertoolsIter, step::next_source},
@@ -64,7 +64,7 @@ impl<H: RuntimeRef> ZipLongest<H> {
 
 /// Draws one item per slot, padding the spent ones, and stops once none are live.
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let ItertoolsIter::ZipLongest(zip) = iter.get(vm.heap) else {

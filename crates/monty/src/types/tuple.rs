@@ -519,7 +519,14 @@ impl<'h, H: RuntimeRef> PyTrait<'h, H> for HeapObjectRead<'h, H, Tuple<H>> {
             return Ok(());
         }
 
-        repr_sequence_fmt('(', ')', |heap, i| self.get(heap).as_slice().get(i), f, vm, heap_ids)
+        repr_sequence_fmt(
+            '(',
+            ')',
+            |heap, i| self.get(heap).as_slice().get(i).map(|item| item.clone_with_heap(heap)),
+            f,
+            vm,
+            heap_ids,
+        )
     }
 }
 

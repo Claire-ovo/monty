@@ -88,7 +88,7 @@ pub(crate) fn function_namespace<H: RuntimeRef>(
     })
 }
 
-impl<H: RuntimeRef, C: ContainsHeap<Ref = H>> DropWithContext<C> for Box<FrameNamespace<H>> {
+impl<H: RuntimeRef, C: ContainsHeap<Ref = H, Ref = H>> DropWithContext<C> for Box<FrameNamespace<H>> {
     fn drop_with(self, ctx: &mut C) {
         match *self {
             FrameNamespace::Function { globals } => ctx.heap_mut().dec_ref(globals),
@@ -386,7 +386,7 @@ impl<H: RuntimeRef> VM<'_, H> {
 
     /// Binds `name_id` to `value` in a namespace dict, releasing any old value.
     fn namespace_set(&mut self, dict_id: H, name_id: StringId, value: Value<H>) -> RunResult<()> {
-        let HeapReadOutput::Dict(mut dict) = self.heap.read(dict_id) else {
+        let HeapReadOutput::Dict(dict) = self.heap.read(dict_id) else {
             value.drop_with(self);
             return Err(RunError::internal("namespace is not a dict"));
         };
@@ -397,7 +397,7 @@ impl<H: RuntimeRef> VM<'_, H> {
 
     /// Removes `name_id` from a namespace dict; `false` if it was not bound.
     fn namespace_pop(&mut self, dict_id: H, name_id: StringId) -> RunResult<bool> {
-        let HeapReadOutput::Dict(mut dict) = self.heap.read(dict_id) else {
+        let HeapReadOutput::Dict(dict) = self.heap.read(dict_id) else {
             return Err(RunError::internal("namespace is not a dict"));
         };
         match dict.pop(&Value::InternString(name_id), self)? {

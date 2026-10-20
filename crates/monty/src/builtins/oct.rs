@@ -4,13 +4,8 @@ use num_bigint::BigInt;
 use num_traits::Signed;
 
 use crate::{
-    args::ArgValues,
-    bytecode::VM,
-    defer_drop,
-    exception_private::{ExcType, ExcTypeExt, RunResult},
-    heap::{HeapData, RuntimeRef},
-    types::str::allocate_string_no_interning,
-    value::Value,
+    args::ArgValues, bytecode::VM, defer_drop, exception_private::RunResult, heap::RuntimeRef,
+    types::str::allocate_string_no_interning, value::Value,
 };
 
 /// Implementation of the oct() builtin function.
@@ -20,22 +15,20 @@ use crate::{
 pub fn builtin_oct<H: RuntimeRef>(vm: &mut VM<'_, H>, args: ArgValues<H>) -> RunResult<Value<H>> {
     let value = args.get_one_arg("oct", vm.heap)?;
     defer_drop!(value, vm);
+    let index = value.py_index(vm)?;
+    defer_drop!(index, vm);
 
-    match value {
+    match index {
         Value::Int(n) => {
             let abs_digits = format!("{:o}", n.unsigned_abs());
             let prefix = if *n < 0 { "-0o" } else { "0o" };
             Ok(allocate_string_no_interning(format!("{prefix}{abs_digits}"), vm.heap))
         }
-        Value::Bool(b) => {
-            let s = if *b { "0o1" } else { "0o0" };
-            Ok(allocate_string_no_interning(s.to_string(), vm.heap))
-        }
-        Value::Ref(id) if let HeapData::LongInt(li) = vm.heap.get(*id) => {
-            let oct_str = format_bigint_oct(li.inner());
+        _ if let Some(n) = index.as_long_int(vm) => {
+            let oct_str = format_bigint_oct(n);
             Ok(allocate_string_no_interning(oct_str, vm.heap))
         }
-        _ => Err(ExcType::type_error_not_integer(&value.py_type_name(vm))),
+        _ => unreachable!("py_index returned an integer"),
     }
 }
 

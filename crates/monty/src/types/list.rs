@@ -13,8 +13,8 @@ use crate::{
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
     heap::{
-        DropGuard, DropWithContext, Heap, HeapData, HeapItem, HeapObjectRead, HeapRead, HeapReadOutput, HeapReader,
-        Reference, RuntimeRef,
+        DropGuard, DropWithContext, Heap, HeapData, HeapItem, HeapObjectRead, HeapRead, HeapReadMut, HeapReadOutput,
+        HeapReader, Reference, RuntimeRef,
     },
     intern::StaticStrings,
     modules::copy::{Memo, PyDeepCopy, deep_copy},
@@ -141,11 +141,11 @@ impl<H: RuntimeRef> List<H> {
     }
 }
 
-impl<'h, H: RuntimeRef> HeapRead<'h, List<H>> {
+impl<'h, H: RuntimeRef> HeapReadMut<'h, List<H>> {
     /// Collects replacements before assignment to support self-assignment and avoid
     /// partial writes on iterator failure. Bounds are normalized after collection
     /// because the iterator may have resized the target.
-    fn setitem_slice(&mut self, slice: &super::Slice, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<()> {
+    fn setitem_slice(&self, slice: &super::Slice, value: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<()> {
         // Reject a zero step before executing the replacement iterator.
         slice.indices(self.get(vm.heap).len())?;
 
@@ -225,7 +225,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, List<H>> {
     ///
     /// A push that would grow the buffer past the memory limit fails with
     /// `MemoryError` and drops `item`, so the ownership transfer holds either way.
-    pub fn append(&mut self, vm: &mut VM<'h, H>, item: Value<H>) -> RunResult<()> {
+    pub fn append(&self, vm: &mut VM<'h, H>, item: Value<H>) -> RunResult<()> {
         // Track whether the list now contains heap refs so child-walk fast paths
         // can short-circuit; cycle-collector seeding is handled by `dec_ref`,
         // not at mutation time.
@@ -258,7 +258,7 @@ impl<'h, H: RuntimeRef> HeapRead<'h, List<H>> {
     /// # Arguments
     /// * `index` - The position to insert at (0-based). If index >= len(),
     ///   the item is appended to the end (matching Python semantics).
-    pub fn insert(&mut self, vm: &mut VM<'h, H>, index: usize, item: Value<H>) -> RunResult<()> {
+    pub fn insert(&self, vm: &mut VM<'h, H>, index: usize, item: Value<H>) -> RunResult<()> {
         let items = &self.get(vm.heap).items;
         let (len, capacity) = (items.len(), items.capacity());
         let item = if len < capacity {
@@ -415,9 +415,8 @@ impl<'h, H: RuntimeRef> HeapRead<'h, List<H>> {
 
 /// Stack-borrowed lending iterator over a [`List`]'s items.
 ///
-/// Borrows a [`HeapRead`] for its lifetime, so the heap entry is pinned by the
-/// reader count for the duration of iteration — no extra refcount on the
-/// container is needed.
+/// Borrows a [`HeapRead`] for its lifetime, retaining its object guard or
+/// protected source — no extra refcount on the container is needed.
 ///
 /// **Lending shape.** [`next`](Self::next) returns `Option<&Value>` rather
 /// than `Option<Value>`. The iterator itself owns the most-recently-yielded
@@ -652,7 +651,14 @@ impl<'h, H: RuntimeRef> PyTrait<'h, H> for HeapObjectRead<'h, H, List<H>> {
     }
 
     fn py_repr_fmt(&self, f: &mut impl Write, vm: &mut VM<'h, H>, heap_ids: &mut LazyHeapSet<H>) -> RunResult<()> {
-        repr_sequence_fmt('[', ']', |heap, i| self.get(heap).as_slice().get(i), f, vm, heap_ids)
+        repr_sequence_fmt(
+            '[',
+            ']',
+            |heap, i| self.get(heap).as_slice().get(i).map(|item| item.clone_with_heap(heap)),
+            f,
+            vm,
+            heap_ids,
+        )
     }
 
     fn py_add_impl(&self, other: &Value<H>, vm: &mut VM<'h, H>) -> RunResult<Option<Value<H>>> {
@@ -771,7 +777,7 @@ impl<H: RuntimeRef> HeapItem<H> for List<H> {
 /// * `args` - The method arguments
 /// * `heap` - The heap for allocation and reference counting
 fn call_list_method<'h, H: RuntimeRef>(
-    list: &mut HeapRead<'h, List<H>>,
+    list: &HeapReadMut<'h, List<H>>,
     method: StaticStrings,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
@@ -813,7 +819,7 @@ fn call_list_method<'h, H: RuntimeRef>(
 
 /// Implements Python's `list.insert(index, item)` method.
 fn list_insert<'h, H: RuntimeRef>(
-    list: &mut HeapRead<'h, List<H>>,
+    list: &HeapReadMut<'h, List<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -845,7 +851,7 @@ fn list_insert<'h, H: RuntimeRef>(
 /// Removes the item at the given index (default: -1) and returns it.
 /// Raises IndexError if the list is empty or the index is out of range.
 fn list_pop<'h, H: RuntimeRef>(
-    list: &mut HeapRead<'h, List<H>>,
+    list: &HeapReadMut<'h, List<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -885,7 +891,7 @@ fn list_pop<'h, H: RuntimeRef>(
 ///
 /// Removes the first occurrence of value. Raises ValueError if not found.
 fn list_remove<'h, H: RuntimeRef>(
-    list: &mut HeapRead<'h, List<H>>,
+    list: &HeapReadMut<'h, List<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -923,7 +929,7 @@ fn list_remove<'h, H: RuntimeRef>(
 /// Implements Python's `list.clear()` method.
 ///
 /// Removes all items from the list.
-fn list_clear<'h, H: RuntimeRef>(list: &mut HeapRead<'h, List<H>>, vm: &mut VM<'h, H>) {
+fn list_clear<'h, H: RuntimeRef>(list: &HeapReadMut<'h, List<H>>, vm: &mut VM<'h, H>) {
     mem::take(&mut list.get_mut(vm.heap).items).drop_with(vm);
     // Note: contains_refs stays true even if all refs removed, per conservative GC strategy
 }
@@ -944,7 +950,7 @@ fn list_copy<H: RuntimeRef>(list: &List<H>, heap: &Heap<H>) -> RunResult<Value<H
 ///
 /// Extends the list by appending all items from the iterable.
 fn list_extend<'h, H: RuntimeRef>(
-    list: &mut HeapRead<'h, List<H>>,
+    list: &HeapReadMut<'h, List<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1043,7 +1049,7 @@ fn list_count<'h, H: RuntimeRef>(
 /// sort, we additionally raise `ValueError: list modified during sort`,
 /// matching CPython exactly.
 fn do_list_sort<'h, H: RuntimeRef>(
-    list: &mut HeapRead<'h, List<H>>,
+    list: &HeapReadMut<'h, List<H>>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> Result<(), RunError> {
@@ -1087,17 +1093,16 @@ fn do_list_sort<'h, H: RuntimeRef>(
 /// # Arguments
 /// * `start` - The opening character (e.g., '[' for lists, '(' for tuples)
 /// * `end` - The closing character (e.g., ']' for lists, ')' for tuples)
-/// * `get_item` - Returns the i-th value via brief immutable heap access, or
-///   `None` once `i` is out of range. The `for<'r>` bound means only
-///   heap-derived borrows fit — containers whose repr snapshots up front
-///   (deque, set, dict) own their clones already and use [`repr_items_fmt`].
+/// * `get_item` - Returns an owned clone of the i-th value via brief heap access,
+///   or `None` once `i` is out of range. The clone keeps the item alive across
+///   user `__repr__` calls that may remove it from the container.
 /// * `f` - The formatter to write to
 /// * `vm` - The VM for resolving value references and looking up interned strings
 /// * `heap_ids` - Set of heap IDs being repr'd (for cycle detection)
 pub(crate) fn repr_sequence_fmt<'h, H: RuntimeRef>(
     start: char,
     end: char,
-    get_item: impl for<'r> Fn(&'r HeapReader<'h, H>, usize) -> Option<&'r Value<H>>,
+    get_item: impl Fn(&HeapReader<'h, H>, usize) -> Option<Value<H>>,
     f: &mut impl Write,
     vm: &mut VM<'h, H>,
     heap_ids: &mut LazyHeapSet<H>,
@@ -1114,11 +1119,6 @@ pub(crate) fn repr_sequence_fmt<'h, H: RuntimeRef>(
     // reprs that keep growing the sequence from inside a user `__repr__`.
     for i in 0.. {
         let Some(item) = get_item(vm.heap, i) else { break };
-        // The clone (a refcount bump, not a deep copy) is load-bearing: the
-        // recursion below runs user `__repr__` code that may drop the
-        // container's reference to this very item — CPython incref's the same
-        // way. It also releases the heap borrow the getter's reference holds.
-        let item = item.clone_with_heap(vm.heap);
         defer_drop!(item, vm);
         if i > 0 {
             if repr_check_time(i, vm) {
@@ -1268,7 +1268,7 @@ impl<'h, H: RuntimeRef> PyDeepCopy<'h, H> for HeapRead<'h, List<H>> {
             let copied = deep_copy(&item, memo, vm);
             item.drop_with(vm);
             let copied = copied?;
-            let HeapReadOutput::List(mut dest) = vm.heap.read(copy_id) else {
+            let HeapReadOutput::List(dest) = vm.heap.read(copy_id) else {
                 unreachable!("copy was allocated as a list")
             };
             dest.append(vm, copied)?;

@@ -81,7 +81,7 @@ use crate::{
     exception_private::{ExcType, ExcTypeExt, RunResult, SimpleException},
     hash::{HashValue, hash_python_bytes},
     heap::{
-        DropGuard, DropWithContext, Heap, HeapData, HeapItem, HeapObjectRead, HeapRead, Reference, RuntimeRef,
+        DropGuard, DropWithContext, Heap, HeapData, HeapItem, HeapObjectRead, HeapView, Reference, RuntimeRef,
         heap_read_ref_as_field,
     },
     intern::{BytesId, StaticStrings, StringId},
@@ -401,7 +401,7 @@ impl<'h, H: RuntimeRef> PyTrait<'h, H> for HeapObjectRead<'h, H, Bytes> {
         };
 
         let field = heap_read_ref_as_field!(self, Bytes, 0);
-        let bytes = field.as_slice(vm.heap);
+        let bytes = field.as_slice();
         call_bytes_method_impl(&bytes, method, args, vm).map(CallResult::Value)
     }
 }
@@ -429,7 +429,7 @@ pub fn call_bytes_method<H: RuntimeRef>(
             vm.interns.get_str(method_id),
         ));
     };
-    call_bytes_method_impl(&vm.heap.protect(bytes), method, args, vm)
+    call_bytes_method_impl(&*vm.heap.protect(bytes), method, args, vm)
 }
 
 /// Calls a bytes method on a byte slice.
@@ -438,7 +438,7 @@ pub fn call_bytes_method<H: RuntimeRef>(
 /// heap-allocated `Bytes` (via `py_call_attr`) and interned bytes literals
 /// (`Value::InternBytes`).
 fn call_bytes_method_impl<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     method: StaticStrings,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
@@ -551,7 +551,7 @@ fn call_bytes_method_impl<'h, H: RuntimeRef>(
 /// `limitations/encoding.md` for the handful of decode divergences (the
 /// surrogate-producing handlers raise `NotImplementedError`).
 fn bytes_decode<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -721,7 +721,7 @@ fn count_non_overlapping<H: RuntimeRef>(
 ///
 /// Returns the number of non-overlapping occurrences of the subsequence.
 fn bytes_count<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -744,7 +744,7 @@ fn bytes_count<'h, H: RuntimeRef>(
 ///
 /// Returns the lowest index where the subsequence is found, or -1 if not found.
 fn bytes_find<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -770,7 +770,7 @@ fn bytes_find<'h, H: RuntimeRef>(
 ///
 /// Like find(), but raises ValueError if the subsequence is not found.
 fn bytes_index<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -800,7 +800,7 @@ fn bytes_index<'h, H: RuntimeRef>(
 /// Accepts bytes or a tuple of bytes as prefix. If a tuple is given, returns True
 /// if any of the prefixes match.
 fn bytes_startswith<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -821,7 +821,7 @@ fn bytes_startswith<'h, H: RuntimeRef>(
 /// Accepts bytes or a tuple of bytes as suffix. If a tuple is given, returns True
 /// if any of the suffixes match.
 fn bytes_endswith<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1009,7 +1009,7 @@ fn parse_bytes_sub_args<H: RuntimeRef>(
 /// Implements Python's `bytes.lower()` method.
 ///
 /// Returns a copy of the bytes with all ASCII uppercase characters converted to lowercase.
-fn bytes_lower<'h, H: RuntimeRef>(bytes: &HeapRead<'h, [u8]>, vm: &mut VM<'h, H>) -> Value<H> {
+fn bytes_lower<'h, H: RuntimeRef>(bytes: &impl HeapView<'h, [u8]>, vm: &mut VM<'h, H>) -> Value<H> {
     let result: Vec<u8> = bytes.get(vm.heap).iter().map(|&b| b.to_ascii_lowercase()).collect();
     allocate_bytes(result, vm.heap)
 }
@@ -1017,7 +1017,7 @@ fn bytes_lower<'h, H: RuntimeRef>(bytes: &HeapRead<'h, [u8]>, vm: &mut VM<'h, H>
 /// Implements Python's `bytes.upper()` method.
 ///
 /// Returns a copy of the bytes with all ASCII lowercase characters converted to uppercase.
-fn bytes_upper<'h, H: RuntimeRef>(bytes: &HeapRead<'h, [u8]>, vm: &mut VM<'h, H>) -> Value<H> {
+fn bytes_upper<'h, H: RuntimeRef>(bytes: &impl HeapView<'h, [u8]>, vm: &mut VM<'h, H>) -> Value<H> {
     let result: Vec<u8> = bytes.get(vm.heap).iter().map(|&b| b.to_ascii_uppercase()).collect();
     allocate_bytes(result, vm.heap)
 }
@@ -1026,7 +1026,7 @@ fn bytes_upper<'h, H: RuntimeRef>(bytes: &HeapRead<'h, [u8]>, vm: &mut VM<'h, H>
 ///
 /// Returns a copy of the bytes with the first byte capitalized (if ASCII) and
 /// the rest lowercased.
-fn bytes_capitalize<'h, H: RuntimeRef>(bytes: &HeapRead<'h, [u8]>, vm: &mut VM<'h, H>) -> Value<H> {
+fn bytes_capitalize<'h, H: RuntimeRef>(bytes: &impl HeapView<'h, [u8]>, vm: &mut VM<'h, H>) -> Value<H> {
     let bytes = bytes.get(vm.heap);
     let mut result = Vec::with_capacity(bytes.len());
     if let Some((&first, rest)) = bytes.split_first() {
@@ -1042,7 +1042,7 @@ fn bytes_capitalize<'h, H: RuntimeRef>(bytes: &HeapRead<'h, [u8]>, vm: &mut VM<'
 ///
 /// Returns a titlecased version of the bytes where words start with an uppercase
 /// ASCII character and the remaining characters are lowercase.
-fn bytes_title<'h, H: RuntimeRef>(bytes: &HeapRead<'h, [u8]>, vm: &mut VM<'h, H>) -> Value<H> {
+fn bytes_title<'h, H: RuntimeRef>(bytes: &impl HeapView<'h, [u8]>, vm: &mut VM<'h, H>) -> Value<H> {
     let bytes = bytes.get(vm.heap);
     let mut result = Vec::with_capacity(bytes.len());
     let mut prev_is_cased = false;
@@ -1063,7 +1063,7 @@ fn bytes_title<'h, H: RuntimeRef>(bytes: &HeapRead<'h, [u8]>, vm: &mut VM<'h, H>
 ///
 /// Returns a copy of the bytes with ASCII uppercase characters converted to
 /// lowercase and vice versa.
-fn bytes_swapcase<'h, H: RuntimeRef>(bytes: &HeapRead<'h, [u8]>, vm: &mut VM<'h, H>) -> Value<H> {
+fn bytes_swapcase<'h, H: RuntimeRef>(bytes: &impl HeapView<'h, [u8]>, vm: &mut VM<'h, H>) -> Value<H> {
     let result: Vec<u8> = bytes
         .get(vm.heap)
         .iter()
@@ -1185,7 +1185,7 @@ fn bytes_istitle(bytes: &[u8]) -> bool {
 ///
 /// Returns the highest index where the subsequence is found, or -1 if not found.
 fn bytes_rfind<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1211,7 +1211,7 @@ fn bytes_rfind<'h, H: RuntimeRef>(
 ///
 /// Like rfind(), but raises ValueError if the subsequence is not found.
 fn bytes_rindex<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1243,7 +1243,7 @@ fn bytes_rindex<'h, H: RuntimeRef>(
 /// Returns a copy of the bytes with leading and trailing bytes removed.
 /// If chars is not specified, ASCII whitespace bytes are removed.
 fn bytes_strip<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1260,7 +1260,7 @@ fn bytes_strip<'h, H: RuntimeRef>(
 ///
 /// Returns a copy of the bytes with leading bytes removed.
 fn bytes_lstrip<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1277,7 +1277,7 @@ fn bytes_lstrip<'h, H: RuntimeRef>(
 ///
 /// Returns a copy of the bytes with trailing bytes removed.
 fn bytes_rstrip<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1342,7 +1342,7 @@ fn bytes_strip_whitespace_end(bytes: &[u8]) -> &[u8] {
 /// If the bytes start with the prefix, return bytes[len(prefix):].
 /// Otherwise, return a copy of the original bytes.
 fn bytes_removeprefix<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1364,7 +1364,7 @@ fn bytes_removeprefix<'h, H: RuntimeRef>(
 /// If the bytes end with the suffix, return bytes[:-len(suffix)].
 /// Otherwise, return a copy of the original bytes.
 fn bytes_removesuffix<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1389,7 +1389,7 @@ fn bytes_removesuffix<'h, H: RuntimeRef>(
 ///
 /// Returns a list of the bytes split by the separator.
 fn bytes_split<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1434,7 +1434,7 @@ fn bytes_split<'h, H: RuntimeRef>(
 ///
 /// Returns a list of the bytes split by the separator, splitting from the right.
 fn bytes_rsplit<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1695,7 +1695,7 @@ fn bytes_rsplitn_whitespace(bytes: &[u8], maxsplit: usize) -> Vec<&[u8]> {
 ///
 /// Returns a list of the lines in the bytes, breaking at line boundaries.
 fn bytes_splitlines<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1779,7 +1779,7 @@ struct BytesSplitlinesArgs<H: Reference> {
 ///
 /// Splits the bytes at the first occurrence of sep, and returns a 3-tuple.
 fn bytes_partition<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1811,7 +1811,7 @@ fn bytes_partition<'h, H: RuntimeRef>(
 ///
 /// Splits the bytes at the last occurrence of sep, and returns a 3-tuple.
 fn bytes_rpartition<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -1847,7 +1847,7 @@ fn bytes_rpartition<'h, H: RuntimeRef>(
 ///
 /// Returns a copy with all occurrences of old replaced by new.
 fn bytes_replace<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -2000,7 +2000,7 @@ fn bytes_replace_n<H: RuntimeRef>(
 ///
 /// Returns centered in a bytes of length width.
 fn bytes_center<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -2034,7 +2034,7 @@ fn bytes_center<'h, H: RuntimeRef>(
 ///
 /// Returns left-justified in a bytes of length width.
 fn bytes_ljust<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -2063,7 +2063,7 @@ fn bytes_ljust<'h, H: RuntimeRef>(
 ///
 /// Returns right-justified in a bytes of length width.
 fn bytes_rjust<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -2139,7 +2139,7 @@ fn extract_justify_fill<H: RuntimeRef>(method: &str, value: &Value<H>, vm: &VM<'
 ///
 /// Returns a copy of the bytes left filled with ASCII '0' digits.
 fn bytes_zfill<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -2186,7 +2186,7 @@ fn bytes_zfill<'h, H: RuntimeRef>(
 ///
 /// Joins elements of the iterable with the separator bytes.
 fn bytes_join<'h, H: RuntimeRef>(
-    separator: &HeapRead<'h, [u8]>,
+    separator: &impl HeapView<'h, [u8]>,
     iterable: Value<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {
@@ -2246,7 +2246,7 @@ fn bytes_join<'h, H: RuntimeRef>(
 ///
 /// Returns a string containing the hexadecimal representation of the bytes.
 fn bytes_hex<'h, H: RuntimeRef>(
-    bytes: &HeapRead<'h, [u8]>,
+    bytes: &impl HeapView<'h, [u8]>,
     args: ArgValues<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Value<H>> {

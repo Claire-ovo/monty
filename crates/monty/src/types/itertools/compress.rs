@@ -6,7 +6,7 @@ use crate::{
     bytecode::VM,
     defer_drop,
     exception_private::RunResult,
-    heap::{DropGuard, HeapRead, Reference, RuntimeRef},
+    heap::{DropGuard, HeapReadMut, Reference, RuntimeRef},
     types::{
         PyTrait,
         itertools::{ItertoolsIter, step::next_source},
@@ -56,7 +56,7 @@ impl<H: RuntimeRef> Compress<H> {
 /// Pulls one item from each side per step, yielding the datum when its selector
 /// is truthy and stopping as soon as *either* side runs out.
 pub(super) fn next<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
     let mut steps = 0usize;
@@ -103,7 +103,7 @@ pub(super) fn next<'h, H: RuntimeRef>(
 /// Advances one side, latching `done` when it runs out so a `None` outcome
 /// means the whole adaptor is spent rather than just this step.
 fn step<'h, H: RuntimeRef>(
-    iter: &mut HeapRead<'h, ItertoolsIter<H>>,
+    iter: &HeapReadMut<'h, ItertoolsIter<H>>,
     source: &Value<H>,
     vm: &mut VM<'h, H>,
 ) -> RunResult<Option<Value<H>>> {
