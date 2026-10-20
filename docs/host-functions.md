@@ -230,7 +230,11 @@ sandbox, so sandboxed code can catch it:
 If the sandbox does not catch it, `feed_run` raises [`MontyRuntimeError`][pydantic_monty.MontyRuntimeError] with the sandbox traceback.
 Only [the exception types Monty implements](limitations/index.md) can cross; the type name is what carries over, not your
 exception class.
-JavaScript uses `error.name`; an unrecognised name becomes `RuntimeError`.
+JavaScript uses `error.name`; an unrecognised name becomes `RuntimeError`, as does a JavaScript error class (`Error`,
+`RangeError`, …) thrown into a Python sandbox.
+In a [JavaScript or TypeScript sandbox](javascript-sandbox.md) the JavaScript error classes carry over as themselves,
+and a Python-only name arrives as a plain `Error` (`NameError` as `ReferenceError`, `RecursionError` and
+`MemoryError` as `RangeError`).
 Host tracebacks are not preserved.
 
 ## Async host functions

@@ -2562,8 +2562,15 @@ impl fmt::Display for SimpleException {
 }
 impl From<MontyException> for SimpleException {
     fn from(mut exc: MontyException) -> Self {
+        // a host may answer with a JavaScript error class (a JavaScript host's
+        // plain `Error`); Python has no such builtin, so it raises as the
+        // closest Python exception
+        let exc_type = match exc.exc_type() {
+            exc_type if exc_type.is_javascript() => ExcType::RuntimeError,
+            exc_type => exc_type,
+        };
         Self {
-            exc_type: exc.exc_type(),
+            exc_type,
             data: exc.take_data(),
             arg: exc.into_message(),
         }
