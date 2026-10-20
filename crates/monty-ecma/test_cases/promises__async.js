@@ -1,8 +1,11 @@
 // === Ordering: synchronous code, microtasks, then timers ===
 console.log('start');
+// these fire after every timer the sections below create: Node clocks a timer
+// from its creation, so an earlier long timer must not be due before a later
+// short one even when a slow (debug, leak-checking) build runs the body slowly
 setTimeout(() => console.log('timeout 0'), 0);
-setTimeout(() => console.log('timeout 10'), 10);
-setTimeout((a, b) => console.log('timeout args', a, b), 5, 'x', 'y');
+setTimeout(() => console.log('timeout 220'), 220);
+setTimeout((a, b) => console.log('timeout args', a, b), 200, 'x', 'y');
 Promise.resolve().then(() => console.log('micro 1'));
 queueMicrotask(() => console.log('micro 2'));
 Promise.resolve()

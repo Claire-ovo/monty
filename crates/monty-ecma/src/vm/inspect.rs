@@ -195,7 +195,9 @@ impl Vm<'_> {
         if bare_regexp {
             return Ok(base);
         }
-        if depth > ctx.max_depth {
+        // Node returns an empty object, array or collection whole before it
+        // considers the depth: `{}` at depth 3 is `{}`, not `[Object]`
+        if depth > ctx.max_depth && !self.nothing_to_show(id, is_array, ctx.show_hidden) {
             return Ok(if is_array {
                 "[Array]".to_owned()
             } else if base.is_empty() {
@@ -524,6 +526,23 @@ impl Vm<'_> {
 
     /// Objects whose prototype is not `Object.prototype` show their
     /// constructor's name: `Foo { … }` or `[Object: null prototype] { … }`.
+    /// Whether formatting `id` would print no entries: no shown property, no
+    /// element and no collection entry.
+    fn nothing_to_show(&self, id: HeapId, is_array: bool, show_hidden: bool) -> bool {
+        let Some(object) = self.object(id) else {
+            return true;
+        };
+        let entries = match &object.class {
+            ObjectClass::Map(data) | ObjectClass::Set(data) => data.live,
+            _ if is_array => object.elements.len(),
+            _ => 0,
+        };
+        entries == 0
+            && object.props.iter().all(|(key, slot)| {
+                (matches!(key, PropertyKey::Index(_)) && is_array) || !(show_hidden || slot.flags().enumerable())
+            })
+    }
+
     fn ordinary_prefix(&self, id: HeapId) -> String {
         let Some(object) = self.object(id) else {
             return String::new();
