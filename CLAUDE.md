@@ -216,14 +216,20 @@ Pool and protocol design belong in their crate READMEs; host-API contracts belon
 
 Monty runs JavaScript as a second language behind the same wire protocol and pool, in its own worker binary:
 
-- `crates/monty-ecma` — the engine: oxc parses each feed as a strict ES module and `oxc_semantic` binds its scopes
-    (`parse.rs`); `resolve.rs` derives which bindings closures capture; `compile/` emits the engine's own bytecode
+- `crates/monty-ecma` — the engine: oxc parses each feed as a strict ES module in the dialect the session's script
+    name implies (`dialect.rs`: `.ts`, `.tsx`, `.jsx`) and `oxc_semantic` binds its scopes; a TypeScript or JSX feed
+    then goes through `oxc_transformer`, which erases types and lowers every JSX element to a call of `__monty_jsx`
+    that the compiler binds to the realm's `jsx` intrinsic (`parse.rs`), after `typescript.rs` has refused the
+    constructs Node's strip-only mode refuses, with Node's messages; `resolve.rs` derives which bindings closures
+    capture; `compile/` emits the engine's own bytecode
     (`bytecode/op.rs`) with heap cells for captured bindings, fresh cells per `for (let …)` iteration and `finally`
     blocks inlined on every exit path; `vm/` is the dispatch loop (`mod.rs`) plus the object model (`property.rs`),
     conversions and operators (`ops.rs`), calls and closures (`call.rs`), number formatting (`number.rs`) and a port of
     Node's `util.inspect` for `console.log` (`inspect.rs`); `builtins/` registers every native as a `NativeFn` variant
-    (a stable id, so function objects serialize without addresses) and builds the realm; `object_bridge.rs` maps values
-    to and from `MontyObject` graphs; `JsRepl` (`repl.rs`) is the session API. It instantiates `monty-heap` with
+    (a stable id, so function objects serialize without addresses) and builds the realm, `builtins/jsx.rs` being the
+    `jsx` factory, `Fragment` and `renderToString` that make JSX a templating language producing plain
+    `{ type, props, children }` trees; `object_bridge.rs` maps values to and from `MontyObject` graphs; `JsRepl`
+    (`repl.rs`) is the session API. It instantiates `monty-heap` with
     `JsHeapData` (`heap.rs`) and depends on `monty-types`, never on `monty`. Abstract-operation methods on `Vm` are
     named `coerce_*` (`coerce_number`, `coerce_string`, `coerce_key`) because they take `&mut self` (they may call
     back into JavaScript).
@@ -233,15 +239,19 @@ Monty runs JavaScript as a second language behind the same wire protocol and poo
     `NameLookup` and `ResolveFutures` (`vm/host.rs`: the interpreter parks without its print sink), the clock under
     `DateTimeSource::CallHost` as an `OsCall`, and idle or suspended sessions dump through `dump.rs` (CBOR behind a
     `MONTYJS` header with its own `DUMP_VERSION`); other OS calls and type checking are refused until the engine
-    grows them (`TODO(ts-typecheck)`, `TODO(ts-syntax)`).
-- Bindings: `Monty(language='javascript')` / `AsyncMonty(language='javascript')` in Python and
-    `Monty.create({ language: 'javascript' })` in the JS client select the `monty-js` binary (`MONTY_JS_BIN`, the
-    `pydantic-monty-js-runtime` wheel from `crates/monty-js-runtime/pyproject.toml` behind the `pydantic-monty[js]`
-    extra, or the npm platform package, which ships both binaries); sessions default to `main.js`. The WASM worker
-    runs Python only. `docs/javascript-sandbox.md` is the user-facing page.
-- `crates/monty-js-datatest` — the differential harness: every `crates/monty-ecma/test_cases/*.js` runs through
-    `monty-ecma` and through `node --input-type=module` (so both sides are strict modules), and stdout plus the
-    uncaught `Name: message` must match. Cases follow the Python conventions (one consolidated file per feature,
+    grows them (`TODO(ts-typecheck)`). TypeScript is erased, never checked.
+- Bindings: `Monty(language='javascript' | 'typescript')` / `AsyncMonty(...)` in Python and
+    `Monty.create({ language: 'javascript' | 'typescript' })` in the JS client select the `monty-js` binary
+    (`MONTY_JS_BIN`, the `pydantic-monty-js-runtime` wheel from `crates/monty-js-runtime/pyproject.toml` behind the
+    `pydantic-monty[js]` extra, or the npm platform package, which ships both binaries); sessions default to `main.js`
+    or `main.ts`, and the script name's extension is what picks the dialect on the worker (`page.tsx` enables JSX), so
+    the wire protocol carries no language. The WASM worker runs Python only. `docs/javascript-sandbox.md` is the
+    user-facing page.
+- `crates/monty-js-datatest` — the differential harness: every `crates/monty-ecma/test_cases/*.{js,ts,jsx,tsx}` runs
+    through `monty-ecma` and through Node (`--input-type=module`, or `module-typescript` for `.ts`; a `.jsx` / `.tsx`
+    case is lowered with oxc's classic JSX transform and run with the reference `jsx` / `renderToString` in
+    `crates/monty-js-datatest/jsx_runtime.js`, which the natives in `builtins/jsx.rs` must match line for line), and
+    stdout plus the uncaught `Name: message` must match. Cases follow the Python conventions (one consolidated file per feature,
     `// === Section ===` comments, `console.log` of the values under test, errors caught and their
     `constructor.name` and `message` printed; a `// /// monty` header configures a case). Run with `make test-js-cases`;
     `make test-ref-count-return` runs them again with `monty-ecma`'s `ref-count-return` feature, failing any case whose

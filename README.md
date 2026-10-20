@@ -37,7 +37,7 @@ npm install @pydantic/monty  # JavaScript / TypeScript
 cargo add monty              # Rust
 ```
 
-Monty runs Python by default, and JavaScript with `Monty(language='javascript')` / `Monty.create({ language: 'javascript' })`
+Monty runs Python by default, and JavaScript or TypeScript with `Monty(language='javascript')` / `Monty.create({ language: 'typescript' })`
 (Python needs the `pydantic-monty[js]` extra); see the
 [JavaScript sandbox](https://pydantic.dev/docs/monty/javascript-sandbox/) page.
 

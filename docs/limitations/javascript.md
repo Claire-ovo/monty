@@ -45,7 +45,6 @@ Each of these is a `SyntaxError` at compile time naming the feature (`generators
 - `BigInt` literals; the `BigInt` global exists so feature checks work, but calling it throws a `TypeError`
 - Tagged templates
 - `using` declarations
-- TypeScript and JSX syntax
 
 Generators (`function*`, `yield`, `yield*`, generator methods) and async functions (`async function`, async
 arrows and methods, `await`, top-level `await`) work as in Node, with these differences:
@@ -72,6 +71,42 @@ Within classes:
 - `Symbol.hasInstance` is not consulted by `instanceof`.
 
 `eval` and `new Function` are not available (`Function()` throws an `EvalError`).
+
+## TypeScript and JSX
+
+The script name's extension selects the dialect for the whole session: `.ts`, `.mts` and `.cts` are TypeScript,
+`.tsx` TypeScript with JSX, `.jsx` JavaScript with JSX, and anything else JavaScript (a `language='typescript'` pool
+defaults to `main.ts`).
+The reference for `.ts` is Node's own type stripping (`node --input-type=module-typescript`), and for JSX the
+reference `jsx` / `renderToString` in `crates/monty-js-datatest/jsx_runtime.js`, which the differential cases run
+under Node.
+
+- Types are erased, never checked: a snippet with a type error runs like its JavaScript.
+- The constructs strip-only mode cannot erase are a `SyntaxError` with Node's message: `enum` ("TypeScript enum is
+    not supported in strip-only mode"), a `namespace` or `module` with values, parameter properties
+    (`constructor(private x: number)`), `import x = require()`, `export =`, and the angle-bracket assertion `<T>expr`.
+    A namespace holding only types, a `declare`d declaration and a type-only import or export are erased.
+- `export as namespace X` is reported as `SyntaxError: Unexpected token 'export'`, as Node does.
+- A value `import` or `export` remains unsupported ("module declarations is not supported"), as in JavaScript.
+- Decorators and `accessor` fields are unsupported in both dialects; Node reports them as a plain `SyntaxError`.
+- JSX elements lower to calls of the realm's `jsx` function with the classic shape `jsx(type, props, ...children)`;
+    the `jsx`, `Fragment` and `renderToString` globals are also callable directly. A script-level `jsx` binding does
+    not change how elements compile, and `/** @jsx */` pragma comments are ignored. `jsx` is not a constructor.
+- JSX text follows the usual whitespace rules (lines trimmed and joined with a space, blank lines dropped) and
+    decodes HTML entities; spread children (`{...xs}`) are not supported.
+- An element is a plain object `{ type, props, children }` with `Object.prototype`; `children` is flattened, drops
+    `null`, `undefined` and booleans, and holds numbers as strings. A component receives `children` the way React
+    passes them: absent, the single child, or an array. `key` is an ordinary prop. A non-node object or a symbol as a
+    child is a `TypeError` ("Objects are not valid as a JSX child"), and a type that is neither a string nor a
+    function is `TypeError: Element type is invalid: expected a string or a function but got: <typeof>`.
+- A thenable child (an `async` component's result, a promise) makes the element a promise of its node, settled with
+    `Promise.all` semantics once every child has; a component receives settled values, never promises.
+- `renderToString` serialises HTML5: void elements (`br`, `img`, `input`, …) have no closing tag; `className` and
+    `htmlFor` become `class` and `for`; `true` is a bare attribute and `false` is omitted except for `aria-*` and
+    `data-*`, which render `"false"`; nullish values and functions are skipped; `style` objects render
+    `name:value` pairs joined with `;` with camelCase names converted to kebab-case and numbers kept unitless;
+    `dangerouslySetInnerHTML={{ __html }}` replaces the children; `key`, `ref` and `children` never render. Text and
+    attribute values escape `&`, `<`, `>`, `"` and `'`. A pending tree returns a promise of the string.
 
 ## Builtins
 

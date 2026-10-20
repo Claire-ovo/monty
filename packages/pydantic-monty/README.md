@@ -31,7 +31,7 @@ point `pydantic_monty` at it via `MONTY_BIN`, `binary_path=`, or `PATH`.
 
 The `js` extra (`pip install "pydantic-monty[js]"`) adds
 [`pydantic-monty-js-runtime`](https://pypi.org/project/pydantic-monty-js-runtime/),
-the `monty-js` worker that `Monty(language='javascript')` spawns to run
+the `monty-js` worker that `Monty(language='javascript')` or `Monty(language='typescript')` spawns to run
 JavaScript in the sandbox instead of Python; see the
 [JavaScript sandbox](https://pydantic.dev/docs/monty/javascript-sandbox/) page.
 

@@ -10,7 +10,7 @@ Under Node, `@pydantic/monty` is a native (napi) binding over the same Rust work
 The binding and the `monty` worker binary ship as platform-specific packages selected through `optionalDependencies`,
 so a plain `npm install` gets you everything.
 Execution happens in `monty` worker subprocesses, so a crash triggered by adversarial code kills only the worker.
-The same package also runs JavaScript inside the sandbox, with `Monty.create({ language: 'javascript' })`; see the
+The same package also runs JavaScript or TypeScript inside the sandbox, with `Monty.create({ language: 'javascript' })` or `'typescript'`; see the
 [JavaScript sandbox](../javascript-sandbox.md).
 
 For browsers, or anywhere subprocesses are impossible, the same package exposes a WebAssembly build under the

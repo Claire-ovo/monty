@@ -33,7 +33,7 @@ If you are running untrusted code, pin `binary_path` explicitly rather than rely
 The same binary is also a REPL and a file runner; see [command line](../cli.md).
 
 `pip install "pydantic-monty[js]"` adds `pydantic-monty-js-runtime`, the `monty-js` worker that
-`Monty(language='javascript')` spawns to run JavaScript instead of Python; see the
+`Monty(language='javascript')` or `Monty(language='typescript')` spawns to run JavaScript or TypeScript instead of Python; see the
 [JavaScript sandbox](../javascript-sandbox.md).
 
 ## First run
