@@ -14,7 +14,7 @@ use crate::{
     heap::{DropWithContext, HeapData, HeapRead},
     intern::{Interns, StaticStrings, StringId},
     parse::CodeRange,
-    source_map::{SourceMap, StackFrameExt},
+    source_map::{ResolvedLocation, SourceMap, StackFrameExt},
     types::{
         PyTrait, Type, allocate_tuple,
         long_int::INT_MAX_STR_DIGITS,
@@ -2653,7 +2653,7 @@ impl SimpleException {
     pub(crate) fn with_position(self, position: CodeRange) -> ExceptionRaise {
         ExceptionRaise {
             exc: self,
-            frame: Some(RawStackFrame::from_position(position)),
+            frame: Some(Box::new(RawStackFrame::from_position(position))),
             snippet_frame: None,
             hide_caret: false,
         }
@@ -2701,8 +2701,9 @@ impl<'h> HeapRead<'h, SimpleException> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ExceptionRaise {
     pub exc: SimpleException,
-    /// Innermost executed frame, with callers linked as parents.
-    pub frame: Option<RawStackFrame>,
+    /// Innermost frame, with callers linked as parents. Boxing keeps diagnostic metadata
+    /// out of the `RunResult` layout used on every instruction's success path.
+    pub frame: Option<Box<RawStackFrame>>,
     /// Resolved innermost location of a rejected snippet, independent of its discarded intern IDs.
     pub snippet_frame: Option<Box<StackFrame>>,
     /// Whether to hide the caret marker when creating the stack frame.
@@ -2736,27 +2737,15 @@ impl From<MontyException> for ExceptionRaise {
 }
 
 impl ExceptionRaise {
-    /// Adds a caller's frame as the outermost frame in the traceback chain.
-    ///
-    /// This is used when an exception propagates up through call frames.
-    /// The new frame becomes the ultimate parent (displayed first in traceback,
-    /// since tracebacks show "most recent call last").
-    ///
-    /// Special case: If the innermost frame has no name yet (created with `with_position`),
-    /// this sets its name instead of creating a new parent. This happens when the error
-    /// is raised from a namespace lookup - the initial frame has the position but not
-    /// the function name, which gets filled in as the error propagates.
-    pub(crate) fn add_caller_frame(&mut self, position: CodeRange, name: StringId) {
-        self.add_caller_frame_inner(position, name, false);
-    }
-
-    fn add_caller_frame_inner(&mut self, position: CodeRange, name: StringId, hide_caret: bool) {
+    /// Adds the outermost caller during unwinding, retaining its resolved diagnostic data.
+    /// An unnamed definition-site frame from argument binding receives the caller's name
+    /// instead of another parent, preserving the existing binding-error traceback.
+    pub(crate) fn add_caller_frame(&mut self, caller: RawStackFrame) {
         if let Some(ref mut frame) = self.frame {
-            // If innermost frame has no name, set it instead of adding a parent
-            // This handles errors from namespace lookups which create nameless frames
+            // Binding errors already carry a position, but not a frame name.
             if frame.frame_name.is_none() {
-                frame.frame_name = Some(name);
-                frame.hide_caret = hide_caret;
+                frame.frame_name = caller.frame_name;
+                frame.hide_caret = caller.hide_caret;
                 return;
             }
             // Find the outermost frame (the one with no parent) and add the new frame as its parent
@@ -2764,34 +2753,16 @@ impl ExceptionRaise {
             while current.parent.is_some() {
                 current = current.parent.as_mut().unwrap();
             }
-            let mut new_frame = RawStackFrame::new(position, name, None);
-            new_frame.hide_caret = hide_caret;
-            current.parent = Some(Box::new(new_frame));
+            current.parent = Some(Box::new(caller));
         } else {
-            // No frame yet - create one
-            let mut new_frame = RawStackFrame::new(position, name, None);
-            new_frame.hide_caret = hide_caret;
-            self.frame = Some(new_frame);
+            self.frame = Some(Box::new(caller));
         }
     }
 
-    /// Converts this exception to a `MontyException` for the public API.
-    ///
-    /// Uses `Interns` to resolve `StringId` references to actual strings.
-    /// Extracts preview lines from the source code for traceback display.
-    /// Converts this exception into a public `MontyException`, expanding each
-    /// stack frame's raw byte offsets into lines/columns/preview text via a
-    /// caller-provided source lookup.
-    ///
-    /// The caller must supply `source_for` so that frames whose `CodeRange`
-    /// points into a *different* source than the one currently executing can
-    /// still be resolved. In particular, REPL tracebacks can interleave
-    /// frames from multiple snippets (e.g. calling into a function defined
-    /// in an earlier feed); resolving those byte offsets against only the
-    /// current snippet's source would produce wrong line/column/caret
-    /// information. `source_for` is called per unique filename encountered
-    /// in the traceback and its result is cached, so each source is scanned
-    /// at most once regardless of how many frames share it.
+    /// Converts an exception for the public API, using saved diagnostics when available.
+    /// `source_for` must resolve every source-backed frame, including earlier REPL feeds.
+    /// Legacy dynamic frames use the dump's interned source table instead.
+    /// Each source-backed filename is scanned at most once per traceback.
     #[must_use]
     pub fn into_python_exception<'s>(
         self,
@@ -2806,12 +2777,16 @@ impl ExceptionRaise {
             .frame
             .map(|frame| {
                 let mut frames = Vec::new();
-                let mut current = Some(&frame);
+                let mut current = Some(frame.as_ref());
                 while let Some(f) = current {
+                    if let Some(location) = &f.resolved {
+                        frames.push(StackFrame::from_resolved(f, interns, location));
+                        current = f.parent.as_deref();
+                        continue;
+                    }
                     let fname_id = f.position.filename;
-                    // An `eval()` / `exec()` snippet resolves against its own
-                    // recorded source, never the host's, and prints no source
-                    // line: CPython has nothing to read back for `<string>`.
+                    // Legacy dynamic frames still need their recorded source. Like new dynamic
+                    // diagnostics, they omit previews: CPython cannot read back `<string>`.
                     let eval_source = interns.eval_source(fname_id);
                     let sm_idx = if let Some(i) = cache.iter().position(|(k, _)| *k == fname_id) {
                         i
@@ -2843,11 +2818,14 @@ impl ExceptionRaise {
 
 /// A stack frame for traceback information.
 ///
-/// Stores position information and optional function name as StringId.
-/// The actual name string must be looked up externally when formatting the traceback.
+/// Dynamic code copies resolved coordinates here before its frame is released.
+/// Source-backed code retains byte offsets; interned names are resolved when formatting.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawStackFrame {
     pub position: CodeRange,
+    /// Owned diagnostic data, allowing dynamically compiled code to be released on unwind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) resolved: Option<ResolvedLocation>,
     /// The name of the frame (function name StringId, or None for module-level code).
     pub frame_name: Option<StringId>,
     pub parent: Option<Box<Self>>,
@@ -2863,6 +2841,7 @@ impl RawStackFrame {
     pub(crate) fn new(position: CodeRange, frame_name: StringId, parent: Option<&Self>) -> Self {
         Self {
             position,
+            resolved: None,
             frame_name: Some(frame_name),
             parent: parent.map(|p| Box::new(p.clone())),
             hide_caret: false,
@@ -2872,19 +2851,10 @@ impl RawStackFrame {
     fn from_position(position: CodeRange) -> Self {
         Self {
             position,
+            resolved: None,
             frame_name: None,
             parent: None,
             hide_caret: false,
-        }
-    }
-
-    /// Creates a new frame for a raise statement (no caret will be shown).
-    pub(crate) fn from_raise(position: CodeRange, frame_name: StringId) -> Self {
-        Self {
-            position,
-            frame_name: Some(frame_name),
-            parent: None,
-            hide_caret: true,
         }
     }
 }

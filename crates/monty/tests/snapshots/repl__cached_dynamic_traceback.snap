@@ -1,0 +1,8 @@
+---
+source: crates/monty/tests/repl.rs
+expression: error.error.to_string()
+---
+Traceback (most recent call last):
+  File "<string>", line 2, in worker
+  File "<string>", line 1, in <module>
+ZeroDivisionError: division by zero

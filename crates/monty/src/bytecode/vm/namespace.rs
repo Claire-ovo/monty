@@ -11,10 +11,10 @@ use ahash::AHashSet;
 
 use super::{CallFrame, VM};
 use crate::{
-    bytecode::{FrameExit, NAME_CALLABLE, NAME_GLOBAL_ONLY},
+    bytecode::{Code, FrameExit, NAME_CALLABLE, NAME_GLOBAL_ONLY},
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
     heap::{ContainsHeap, DropGuard, DropWithContext, HeapData, HeapId, HeapReadOutput},
-    intern::{CompileInterns, FunctionId, StringId},
+    intern::{CompileInterns, StringId},
     prepare::SnippetNames,
     types::Dict,
     value::Value,
@@ -166,7 +166,7 @@ impl VM<'_> {
     /// A recursion-limit rejection discards both the overlay and the owned namespace.
     pub(crate) fn push_snippet_frame(
         &mut self,
-        func_id: FunctionId,
+        code: Code,
         overlay: CompileInterns<'_>,
         namespace: Box<FrameNamespace>,
     ) -> RunResult<()> {
@@ -174,19 +174,16 @@ impl VM<'_> {
         let (_, vm) = namespace_guard.as_parts_mut();
         debug_assert!(!vm.current_frame.is_parked, "snippet needs an executing caller");
         vm.incr_recursion()?;
-        // Publication makes the code borrowable for the run. Nothing fallible or
-        // re-entrant may intervene between admission and installing the frame.
+        // Nothing fallible or re-entrant may intervene between publication and
+        // installing the frame: its definitions may become reachable once it runs.
         overlay.commit();
         let (namespace, vm) = namespace_guard.into_parts();
-        let code = &vm.interns.get_function(func_id).code;
-        let frame = CallFrame::new_function(
+        let frame = CallFrame::new_snippet(
             code,
             vm.stack.len(),
-            0,
             vm.exception_stack.len(),
-            func_id,
             vm.current_offset(),
-            Some(namespace),
+            namespace,
         );
         vm.push_admitted_frame(frame);
         Ok(())
@@ -313,9 +310,12 @@ impl VM<'_> {
         let mut dict_guard = DropGuard::new(Value::Ref(dict_id), self);
         let (_, this) = dict_guard.as_parts_mut();
         let base = this.current_frame.stack_base();
-        let code = this.current_frame.code;
+        // Only function frames have local slots; their code remains borrowed from Interns.
+        let function = this.current_frame.function_id.map(|id| this.interns.get_function(id));
         let names = (0..this.current_frame.locals_count).filter_map(|slot| {
-            code.local_name(slot)
+            function?
+                .code
+                .local_name(slot)
                 .filter(|name_id| *name_id != StringId::default())
                 .map(|name_id| (usize::from(slot), name_id))
         });

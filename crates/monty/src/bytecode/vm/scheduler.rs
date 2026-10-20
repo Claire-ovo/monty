@@ -5,7 +5,7 @@
 //! The current task's context lives in the VM; all other contexts live in their tasks.
 //! Task 0 is the main task. Spawned tasks (1+) deliver results to their gather.
 
-use std::{collections::VecDeque, mem};
+use std::{collections::VecDeque, mem, sync::Arc};
 
 use ahash::AHashMap;
 use smallvec::{SmallVec, smallvec};
@@ -13,6 +13,7 @@ use smallvec::{SmallVec, smallvec};
 use super::FrameNamespace;
 use crate::{
     asyncio::{Awaiter, CallId, TaskId},
+    bytecode::Code,
     exception_private::RunResult,
     heap::{ContainsHeap, DropWithContext, Heap, HeapId, HeapReadOutput, HeapReader},
     intern::{FunctionId, StringId},
@@ -80,11 +81,14 @@ impl<C: ContainsHeap> DropWithContext<C> for Task {
 /// Serialized call frame for task storage.
 ///
 /// Similar to `SerializedFrame` but used within the scheduler for task context.
-/// Cannot store `&Code` references - uses `FunctionId` to look up code on resume.
+/// Committed code is restored by ID; transient snippet bodies travel with the frame.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SerializedTaskFrame {
-    /// Which function's code this frame executes (None = module-level).
+    /// Which function's code this frame executes (None = module-level or owned snippet).
     pub function_id: Option<FunctionId>,
+    /// Owned snippet code, absent in legacy dumps and ordinary function frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_code: Option<Arc<Code>>,
     /// Instruction pointer within this frame's bytecode.
     pub ip: usize,
     /// Base index into the VM stack for this frame's locals region.

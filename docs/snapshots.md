@@ -378,12 +378,12 @@ Calling a loader after a feed or a previous load is rejected before restoration,
     load only dumps this host produced.
 - **Dumps carry a format version.** The bytes are Monty's own dump format, a `MONTY\0` magic followed by a dump-format
     version, then the state encoded as CBOR with every field and variant named.
-    A release that only changes the layout of stored data, adding fields that default when absent or removing and
-    reordering named fields, keeps the version, so its builds still load dumps written by earlier releases at that
-    version.
-    A release that changes what stored data means, such as the bytecode, bumps the version and says so in its release
-    notes; a build then refuses dumps from before the bump as too old, and the session has to be rebuilt by replaying
-    its feeds.
+    The writer version increases when new dumps require behavior that older readers lack.
+    This includes added fields that an older reader would ignore but that are needed to restore the session correctly.
+    Each build accepts an inclusive range from its minimum supported version to its writer version.
+    Raising the writer version does not by itself drop support for older dumps.
+    A dump below the minimum is rejected as too old; rebuild that session by replaying its feeds.
+    A dump above the writer version is rejected as too new and requires a newer reader.
     The same bytes load in-process, in a subprocess and over WebSocket.
 
 ## Async

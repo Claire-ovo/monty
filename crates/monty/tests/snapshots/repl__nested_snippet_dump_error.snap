@@ -1,0 +1,11 @@
+---
+source: crates/monty/tests/repl.rs
+expression: error.error.to_string()
+---
+Traceback (most recent call last):
+  File "<python-input-0>", line 1, in <module>
+    exec("answer = eval('ext_fn(41) + 1')\nassert answer == 42")
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  File "<string>", line 1, in <module>
+  File "<string>", line 1, in <module>
+ValueError: host failed

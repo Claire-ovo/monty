@@ -1,19 +1,19 @@
 //! Dump compatibility across builds.
 //!
-//! The dump codec names every field and variant, so a data-layout change made
-//! after a dump was written must still load it. Two tests pin that property:
-//! a checked-in dump written by an earlier build of the current
-//! `DUMP_VERSION`, and a synthetic old/new type pair round-tripped through the
-//! codec itself.
+//! Checked-in fixtures cover every supported dump version, including legacy
+//! interned snippets and current owned bodies. A synthetic old/new type pair
+//! also verifies that named fields preserve compatible layout changes.
 
 use std::{env, fs, path::PathBuf};
 
 use insta::assert_snapshot;
-use monty::{DUMP_VERSION, Dump, MontyRepl, ReplProgress, Session, SessionRef, dump};
-use monty_types::{CompileOptions, MontyObject, NameLookupResult, PrintWriter, ResourceTracker};
+use monty::{DUMP_VERSION, Dump, MIN_SUPPORTED_DUMP_VERSION, MontyRepl, ReplProgress, Session, SessionRef, dump};
+use monty_types::{
+    CompileOptions, ExcType, MontyException, MontyObject, NameLookupResult, PrintWriter, ResourceTracker,
+};
 use serde::{Deserialize, Serialize};
 
-/// Environment variable that rewrites the fixture instead of checking it.
+/// Environment variable that regenerates only the current-version fixture before checking all versions.
 const UPDATE_FIXTURE: &str = "UPDATE_DUMP_FIXTURE";
 
 /// Builds the state the fixture holds: the common heap types, live iterators,
@@ -196,13 +196,11 @@ assert with_default(1) == 2
 (result, c.value)
 ";
 
-/// A dump written by an earlier build at this `DUMP_VERSION` still loads and
-/// runs. Failing here means a data-layout change broke older dumps: add a
-/// `#[serde(alias)]` or `#[serde(default)]`, or bump `DUMP_VERSION` and
-/// regenerate with `UPDATE_DUMP_FIXTURE=1 cargo test -p monty --test dump_compat`.
+/// Every supported version still loads and runs; a writer-version bump must not erase old coverage.
+/// Regenerate only the current fixture with `UPDATE_DUMP_FIXTURE=1 cargo test -p monty --test dump_compat`.
 #[test]
 fn fixture_dump_loads_and_resumes() {
-    let path = fixture_path();
+    let path = fixture_path(DUMP_VERSION);
     if env::var_os(UPDATE_FIXTURE).is_some() {
         let mut repl = MontyRepl::new("fixture.py", ResourceTracker::default(), CompileOptions::default());
         repl.feed_run(FIXTURE_STATE, vec![], PrintWriter::Stdout).unwrap();
@@ -222,53 +220,61 @@ fn fixture_dump_loads_and_resumes() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, bytes).unwrap();
         eprintln!("updated {}", path.display());
-        return;
     }
-    let bytes = fs::read(&path).unwrap_or_else(|err| {
-        panic!(
-            "failed to read {}: {err}; regenerate with {UPDATE_FIXTURE}=1 cargo test -p monty --test dump_compat",
-            path.display()
-        )
-    });
-    let loaded = Dump::load(&bytes).expect("a fixture at the current DUMP_VERSION loads");
-    assert_eq!(loaded.script_name, "fixture.py");
-    assert!(loaded.type_check.is_none());
-    let Session::Suspended(progress) = loaded.state else {
-        panic!("fixture was dumped suspended on a host call");
-    };
-    let call = progress.into_function_call().expect("suspended on host_call");
-    assert_eq!(call.function_name, "host_call");
-    // the call arguments are a value graph of their own inside the dump
-    assert_eq!(
-        call.args.args().collect::<Vec<_>>(),
-        vec![
-            MontyObject::list([
-                MontyObject::int(1),
-                MontyObject::float(2.5),
-                MontyObject::string("three"),
-                MontyObject::none(),
-                MontyObject::bool(true),
-            ]),
-            MontyObject::dict([
-                (MontyObject::string("a"), MontyObject::int(1)),
-                (
-                    MontyObject::string("b"),
-                    MontyObject::list([MontyObject::int(2), MontyObject::int(3)]),
-                ),
-                (MontyObject::int(3), MontyObject::string("int key")),
-            ]),
-            MontyObject::bytes(b"\x00\x01bytes".as_slice()),
-        ]
-    );
-    let progress = call.resume(MontyObject::int(41), PrintWriter::Stdout).unwrap();
-    let (mut repl, value) = progress.into_complete().expect("host_call resumed to completion");
-    assert_eq!(value, MontyObject::int(42));
-    repl.feed_run("result = 42", vec![], PrintWriter::Stdout).unwrap();
-    let checked = repl.feed_run(FIXTURE_CHECK, vec![], PrintWriter::Stdout).unwrap();
-    assert_eq!(
-        checked,
-        MontyObject::tuple(vec![MontyObject::int(42), MontyObject::int(13)])
-    );
+    for version in MIN_SUPPORTED_DUMP_VERSION..=DUMP_VERSION {
+        let bytes = read_fixture(version);
+        let loaded = Dump::load(&bytes).unwrap_or_else(|error| panic!("dump version {version} must load: {error}"));
+        assert_eq!(loaded.script_name, "fixture.py");
+        assert!(loaded.type_check.is_none());
+        let Session::Suspended(progress) = loaded.state else {
+            panic!("fixture was dumped suspended on a host call");
+        };
+        let call = progress.into_function_call().expect("suspended on host_call");
+        assert_eq!(call.function_name, "host_call");
+        // the call arguments are a value graph of their own inside the dump
+        assert_eq!(
+            call.args.args().collect::<Vec<_>>(),
+            vec![
+                MontyObject::list([
+                    MontyObject::int(1),
+                    MontyObject::float(2.5),
+                    MontyObject::string("three"),
+                    MontyObject::none(),
+                    MontyObject::bool(true),
+                ]),
+                MontyObject::dict([
+                    (MontyObject::string("a"), MontyObject::int(1)),
+                    (
+                        MontyObject::string("b"),
+                        MontyObject::list([MontyObject::int(2), MontyObject::int(3)]),
+                    ),
+                    (MontyObject::int(3), MontyObject::string("int key")),
+                ]),
+                MontyObject::bytes(b"\x00\x01bytes".as_slice()),
+            ]
+        );
+        let progress = call.resume(MontyObject::int(41), PrintWriter::Stdout).unwrap();
+        let (mut repl, value) = progress.into_complete().expect("host_call resumed to completion");
+        assert_eq!(value, MontyObject::int(42));
+        repl.feed_run("result = 42", vec![], PrintWriter::Stdout).unwrap();
+        let checked = repl.feed_run(FIXTURE_CHECK, vec![], PrintWriter::Stdout).unwrap();
+        assert_eq!(
+            checked,
+            MontyObject::tuple(vec![MontyObject::int(42), MontyObject::int(13)])
+        );
+    }
+}
+
+/// Legacy exec frames still resolve their traceback from the source table in the old dump.
+#[test]
+fn fixture_dynamic_traceback_uses_legacy_source() {
+    assert_snapshot!("legacy_dynamic_traceback", fixture_error(13).to_string());
+}
+
+/// Current exec frames restore their owned code and source-independent traceback positions.
+#[test]
+fn fixture_dynamic_traceback_uses_owned_code() {
+    assert_snapshot!("owned_dynamic_traceback", fixture_error(DUMP_VERSION).to_string());
 }
 
 /// Dict and set entries persist their hash, so the hash of every kind of key
@@ -288,12 +294,36 @@ fn persisted_key_hashes_are_stable() {
     assert_snapshot!(hashes.py_repr(), @"(-7376904247260835724, -8418895208483869890, -7578619387304540654, -6751866591645121981, -8097107109803033201, 2456456309100923238, -5014982954702616963, 2858064283329581446)");
 }
 
-/// The fixture for the current `DUMP_VERSION`; the name carries the version so
-/// a bump leaves the old file behind to delete rather than silently reuse.
-fn fixture_path() -> PathBuf {
+/// Names fixtures independently of the current writer so supported older files stay unchanged.
+fn fixture_path(version: u16) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
-        .join(format!("dump_v{DUMP_VERSION}.bin"))
+        .join(format!("dump_v{version}.bin"))
+}
+
+/// Checks that a fixture still contains its original format, rather than a regenerated newer dump.
+fn read_fixture(version: u16) -> Vec<u8> {
+    let path = fixture_path(version);
+    let bytes = fs::read(&path).unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    assert_eq!(u16::from_le_bytes(bytes[6..8].try_into().unwrap()), version);
+    bytes
+}
+
+/// Resumes a persisted host call with an exception to exercise its saved traceback state.
+fn fixture_error(version: u16) -> MontyException {
+    let bytes = read_fixture(version);
+    let Session::Suspended(progress) = Dump::load(&bytes).unwrap().state else {
+        panic!("fixture was dumped suspended on a host call");
+    };
+    progress
+        .into_function_call()
+        .unwrap()
+        .resume(
+            MontyException::new(ExcType::ValueError, Some("host failed".to_owned())),
+            PrintWriter::Stdout,
+        )
+        .unwrap_err()
+        .error
 }
 
 /// A record as an older build wrote it.

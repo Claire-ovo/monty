@@ -210,8 +210,8 @@ caps the dump's, so a worker cannot report a looser one.
     outside the allocator's accounting; see [source nesting depth](limitations/language.md#source-nesting-depth).
     A host accepting untrusted source should still isolate compilation, as the subprocess and WebAssembly runtimes do.
     Source compiled at runtime by `eval()` / `exec()` is charged against the duration budget.
-    Once a snippet starts executing, its compilation products stay allocated for the rest of the session;
-    snippets rejected before execution retain none of them (see [eval_exec.md](limitations/eval_exec.md)).
+    Its top-level bytecode is released when the frame finishes, but some compilation products remain for the session;
+    see [eval_exec.md](limitations/eval_exec.md#resource-use) for the retained allocations.
 - **Protocol decoding.** Protobuf frames have a separate cumulative allocation budget, covering generated messages
     and decoded values before allocation; see [message limits](limitations/host-values.md#message-size).
     It applies per frame, not to total host memory or subsequent host conversions.

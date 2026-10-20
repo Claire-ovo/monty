@@ -5,6 +5,7 @@ use std::fmt::{self, Write};
 use super::VM;
 use crate::{
     builtins::Builtins,
+    bytecode::code::LocationEntry,
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, ExceptionRaise, RawStackFrame, RunError, RunResult, SimpleException},
     expressions::CmpOperator,
@@ -37,7 +38,19 @@ impl VM<'_> {
     ///
     /// Used when raising exceptions to capture traceback information.
     fn make_stack_frame(&self) -> RawStackFrame {
-        RawStackFrame::new(self.current_position(), self.current_frame_name(), None)
+        self.stack_frame_at(self.instruction_ip)
+    }
+
+    /// Captures diagnostics before the current frame's owned code can be released.
+    fn stack_frame_at(&self, offset: usize) -> RawStackFrame {
+        let code = &self.current_frame.code;
+        let position = code
+            .location_for_offset(offset)
+            .map(LocationEntry::range)
+            .unwrap_or_default();
+        let mut frame = RawStackFrame::new(position, self.current_frame_name(), None);
+        frame.resolved = code.diagnostic_for_offset(offset).cloned();
+        frame
     }
 
     /// Attaches initial frame information to an error if it doesn't have any.
@@ -55,7 +68,7 @@ impl VM<'_> {
                     let mut frame = self.make_stack_frame();
                     // Use the hide_caret flag from the error (set by error creators)
                     frame.hide_caret = exc.hide_caret;
-                    exc.frame = Some(frame);
+                    exc.frame = Some(Box::new(frame));
                 }
                 RunError::Exc(exc)
             }
@@ -63,7 +76,7 @@ impl VM<'_> {
                 if exc.frame.is_none() {
                     let mut frame = self.make_stack_frame();
                     frame.hide_caret = exc.hide_caret;
-                    exc.frame = Some(frame);
+                    exc.frame = Some(Box::new(frame));
                 }
                 RunError::UncatchableExc(exc)
             }
@@ -94,16 +107,12 @@ impl VM<'_> {
             _ => SimpleException::new_msg(ExcType::TypeError, "exceptions must derive from BaseException"),
         };
 
-        // Create frame with appropriate hide_caret setting
-        let frame = if is_raise {
-            RawStackFrame::from_raise(self.current_position(), self.current_frame_name())
-        } else {
-            self.make_stack_frame()
-        };
+        let mut frame = self.make_stack_frame();
+        frame.hide_caret = is_raise;
 
         RunError::Exc(ExceptionRaise {
             exc: simple_exc,
-            frame: Some(frame),
+            frame: Some(Box::new(frame)),
             snippet_frame: None,
             hide_caret: false,
         })
@@ -219,10 +228,11 @@ impl VM<'_> {
 
     /// Creates an `AssertionError` raised at the current source position.
     fn assertion_error(&self, msg: Option<String>) -> RunError {
-        let frame = RawStackFrame::from_raise(self.current_position(), self.current_frame_name());
+        let mut frame = self.make_stack_frame();
+        frame.hide_caret = true;
         RunError::Exc(ExceptionRaise {
             exc: SimpleException::new(ExcType::AssertionError, msg),
-            frame: Some(frame),
+            frame: Some(Box::new(frame)),
             snippet_frame: None,
             hide_caret: false,
         })
@@ -293,7 +303,7 @@ impl VM<'_> {
         loop {
             let (exc_value, this) = exc_guard.as_parts();
             let frame = this.current_frame();
-            let code = frame.code;
+            let code = &frame.code;
             let ip = u32::try_from(this.instruction_ip).unwrap_or(u32::MAX);
 
             // Search exception table for a handler covering this IP
@@ -373,11 +383,9 @@ impl VM<'_> {
             // Resolve the offset now — against the caller, which is the current
             // frame after the pop above.
             if let Some(off) = call_offset {
-                let pos = this.resolve_offset(off);
-                let frame_name = this.current_frame_name();
+                let frame = this.stack_frame_at(off as usize);
                 match &mut error {
-                    RunError::Exc(exc) => exc.add_caller_frame(pos, frame_name),
-                    RunError::UncatchableExc(exc) => exc.add_caller_frame(pos, frame_name),
+                    RunError::Exc(exc) | RunError::UncatchableExc(exc) => exc.add_caller_frame(frame),
                     RunError::Internal(_) => {}
                 }
             }
@@ -403,11 +411,9 @@ impl VM<'_> {
             // Add caller frame info to traceback. Resolve the offset against the
             // caller, which is the current frame after the pop above.
             if let Some(off) = call_offset {
-                let pos = self.resolve_offset(off);
-                let frame_name = self.current_frame_name();
+                let frame = self.stack_frame_at(off as usize);
                 match &mut error {
-                    RunError::Exc(exc) => exc.add_caller_frame(pos, frame_name),
-                    RunError::UncatchableExc(exc) => exc.add_caller_frame(pos, frame_name),
+                    RunError::Exc(exc) | RunError::UncatchableExc(exc) => exc.add_caller_frame(frame),
                     RunError::Internal(_) => {}
                 }
             }

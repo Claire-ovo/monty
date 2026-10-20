@@ -11,7 +11,7 @@ use std::{mem, task::Poll};
 use monty_types::{InvalidInputError, MontyException, ResourceError, ResourceTracker};
 use smallvec::{SmallVec, smallvec};
 
-use super::{AwaitResult, CallFrame, FrameExit, Opcode, VM, frame_code, function_namespace, stack_index};
+use super::{AwaitResult, CallFrame, FrameCode, FrameExit, Opcode, VM, function_namespace, stack_index};
 use crate::{
     asyncio::{
         AwaitedGather, Awaiter, CallId, Coroutine, CoroutineState, ExternalFuture, ExternalFutureState, GatherFuture,
@@ -34,7 +34,7 @@ use crate::{
 impl<'h> VM<'h> {
     /// Allows eager host resolution only for an immediate await with no competing work.
     pub(crate) fn allow_eager_await(&self) -> bool {
-        let next = self.current_frame.bytecode.get(self.current_frame.ip);
+        let next = self.current_frame.code.bytecode().get(self.current_frame.ip);
         next == Some(&(Opcode::Await as u8)) && self.scheduler.can_await_eagerly()
     }
 
@@ -507,6 +507,7 @@ impl<'h> VM<'h> {
             .drain(..)
             .map(|f| SerializedTaskFrame {
                 function_id: f.function_id,
+                owned_code: f.code.owned(),
                 ip: f.ip,
                 stack_base: f.stack_base(),
                 locals_count: f.locals_count,
@@ -521,6 +522,7 @@ impl<'h> VM<'h> {
         let current = &mut self.current_frame;
         frames.push(SerializedTaskFrame {
             function_id: current.function_id,
+            owned_code: current.code.owned(),
             ip: current.ip,
             stack_base: current.stack_base(),
             locals_count: current.locals_count,
@@ -581,23 +583,19 @@ impl<'h> VM<'h> {
             // Reconstruct the suspended callers and current frame.
             let mut frames: Vec<_> = frames
                 .into_iter()
-                .map(|sf| {
-                    let code = frame_code(self.interns, self.module_code, sf.function_id);
-                    CallFrame {
-                        code,
-                        bytecode: code.bytecode(),
-                        ip: sf.ip,
-                        stack_base: stack_index(sf.stack_base),
-                        locals_count: sf.locals_count,
-                        exception_stack_base: stack_index(sf.exception_stack_base),
-                        function_id: sf.function_id,
-                        call_offset: sf.call_offset,
-                        should_return: false,
-                        is_parked: false,
-                        namespace: sf.namespace,
-                        is_initializer: sf.is_initializer,
-                        import_from_module: sf.import_from_module,
-                    }
+                .map(|sf| CallFrame {
+                    code: FrameCode::restore(self.interns, self.module_code, sf.function_id, sf.owned_code),
+                    ip: sf.ip,
+                    stack_base: stack_index(sf.stack_base),
+                    locals_count: sf.locals_count,
+                    exception_stack_base: stack_index(sf.exception_stack_base),
+                    function_id: sf.function_id,
+                    call_offset: sf.call_offset,
+                    should_return: false,
+                    is_parked: false,
+                    namespace: sf.namespace,
+                    is_initializer: sf.is_initializer,
+                    import_from_module: sf.import_from_module,
                 })
                 .collect();
             self.current_frame = frames.pop().expect("task context contains no active frame");

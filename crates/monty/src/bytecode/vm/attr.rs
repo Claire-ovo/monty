@@ -135,7 +135,7 @@ impl VM<'_> {
     /// Returns the suspended `LoadSubmodule` path for errors from lazy attribute lookups.
     pub(crate) fn suspended_submodule(&self) -> Option<StringId> {
         let ip = self.instruction_ip;
-        let bytecode = self.current_frame.bytecode;
+        let bytecode = self.current_frame.code.bytecode();
         (bytecode.get(ip) == Some(&(Opcode::LoadSubmodule as u8))).then(|| {
             // operands: u16 attribute name_id, then u16 path name_id, little-endian
             StringId::from_index(u16::from_le_bytes([bytecode[ip + 3], bytecode[ip + 4]]))
@@ -145,7 +145,7 @@ impl VM<'_> {
     /// Returns the suspended `LoadAttrImport` module for errors from lazy attribute lookups.
     pub(crate) fn suspended_import_from(&self) -> Option<StringId> {
         let frame = &self.current_frame;
-        (frame.bytecode.get(self.instruction_ip) == Some(&(Opcode::LoadAttrImport as u8)))
+        (frame.code.bytecode().get(self.instruction_ip) == Some(&(Opcode::LoadAttrImport as u8)))
             .then_some(frame.import_from_module)
             .flatten()
     }
@@ -153,7 +153,7 @@ impl VM<'_> {
     /// Returns the suspended `LoadModule` name, distinguishing imports from calls to `__import__`.
     pub(crate) fn suspended_import(&self) -> Option<StringId> {
         let ip = self.instruction_ip;
-        let bytecode = self.current_frame.bytecode;
+        let bytecode = self.current_frame.code.bytecode();
         (bytecode.get(ip) == Some(&(Opcode::LoadModule as u8))).then(|| {
             // operand: u16 module name_id, little-endian
             StringId::from_index(u16::from_le_bytes([bytecode[ip + 1], bytecode[ip + 2]]))

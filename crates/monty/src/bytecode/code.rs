@@ -4,7 +4,12 @@
 //! bytecode instructions, a constant pool, source location information for tracebacks,
 //! and an exception handler table.
 
-use crate::{intern::StringId, parse::CodeRange, value::Value};
+use crate::{
+    intern::StringId,
+    parse::CodeRange,
+    source_map::{ResolvedLocation, SourcePositions},
+    value::Value,
+};
 
 /// Compiled bytecode for a function or module.
 ///
@@ -42,6 +47,11 @@ pub struct Code {
     /// messages when accessing undefined local variables (e.g., "name 'x' is not defined").
     #[serde(rename = "N")]
     local_names: Vec<StringId>,
+
+    /// Source-independent positions parallel to `location_table`, for runtime-compiled code.
+    /// Absent in older dumps and source-backed programs, which resolve locations lazily.
+    #[serde(default, rename = "D", skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<Box<[ResolvedLocation]>>,
 }
 
 impl Code {
@@ -68,7 +78,28 @@ impl Code {
             location_table,
             exception_table,
             local_names,
+            diagnostics: None,
         }
+    }
+
+    /// Resolves this body's diagnostics before a runtime compilation releases its source.
+    pub(crate) fn resolve_locations(&mut self, source: &SourcePositions) {
+        self.diagnostics = Some(
+            self.location_table
+                .iter()
+                .map(|entry| source.resolve(entry.range))
+                .collect(),
+        );
+    }
+
+    /// The saved diagnostic position at an instruction, if this body no longer owns source text.
+    pub(crate) fn diagnostic_for_offset(&self, offset: usize) -> Option<&ResolvedLocation> {
+        let diagnostics = self.diagnostics.as_ref()?;
+        let offset = u32::try_from(offset).ok()?;
+        let after = self
+            .location_table
+            .partition_point(|entry| entry.bytecode_offset <= offset);
+        after.checked_sub(1).map(|index| &diagnostics[index])
     }
 
     /// Returns the raw bytecode bytes.
@@ -133,6 +164,7 @@ impl Clone for Code {
             location_table: self.location_table.clone(),
             exception_table: self.exception_table.clone(),
             local_names: self.local_names.clone(),
+            diagnostics: self.diagnostics.clone(),
         }
     }
 }

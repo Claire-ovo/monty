@@ -12,16 +12,18 @@ mod compare;
 mod context_manager;
 mod exceptions;
 mod format;
+mod frame_code;
 mod namespace;
 mod pattern;
 mod recursion;
 mod scheduler;
 
-use std::{borrow::Cow, mem};
+use std::{borrow::Cow, mem, sync::Arc};
 
 pub(crate) use attr::PendingLookupEffect;
 pub(crate) use call::CallResult;
 pub(crate) use collections::unpack_exact;
+use frame_code::FrameCode;
 use monty_types::{InvalidInputError, MontyObject, MontyUuid, OsFunctionCall, PrintWriter, SourceRange};
 pub(crate) use namespace::{FrameNamespace, function_namespace};
 pub(crate) use recursion::{ContainsVM, RecursionToken, RunReentryGuard};
@@ -32,7 +34,7 @@ use crate::{
     asyncio::{CallId, TaskId},
     builtins::Builtins,
     bytecode::{
-        code::{Code, LocationEntry},
+        code::Code,
         op::{MATCH_KEYS_REST, Opcode, decode_assert_flags},
     },
     defer_drop_mut,
@@ -53,7 +55,6 @@ use crate::{
         PendingEffect, PostConversionEffect, PreConversionEffect, Reshaped, release_pending_effect, resolve_call_paths,
         urandom_reply_error,
     },
-    parse::CodeRange,
     run::{Program, SessionTables, VmEnv},
     types::{
         Dict, LongInt, PyTrait, SessionRandom,
@@ -300,11 +301,8 @@ impl<C: ContainsHeap> DropWithContext<C> for FrameExit {
 /// instruction pointer. This design avoids sync bugs on call/return.
 #[derive(Debug)]
 pub struct CallFrame<'code> {
-    /// Compiled body, stable even when runtime compilation publishes more functions.
-    code: &'code Code,
-
-    /// Hoisted instruction slice, avoiding a `Code` dereference on every fetch.
-    bytecode: &'code [u8],
+    /// Borrows committed code or owns a transient eval/exec body.
+    code: FrameCode<'code>,
 
     /// Instruction pointer within this frame's bytecode.
     ip: usize,
@@ -327,11 +325,11 @@ pub struct CallFrame<'code> {
     /// exceptions intact when abandoned handlers are unwound.
     exception_stack_base: u32,
 
-    /// Function ID (for tracebacks). None for module-level code.
+    /// Function ID (for tracebacks). None for module-level code and owned snippets.
     function_id: Option<FunctionId>,
 
     /// Caller's bytecode offset at the call site (for tracebacks). Stored raw
-    /// and resolved to a `CodeRange` lazily on unwind (see `resolve_offset`) to
+    /// and resolved to a source location lazily on unwind to
     /// skip the location-table scan unless the call raises. `None` at the root.
     call_offset: Option<u32>,
 
@@ -371,16 +369,6 @@ pub(super) fn stack_index(index: usize) -> u32 {
     u32::try_from(index).expect("VM stack index exceeds u32")
 }
 
-/// The code a saved frame runs: its function's, or `module_code` for the
-/// module-level frame, which has no function ID.
-pub(super) fn frame_code<'code>(
-    interns: &'code Interns,
-    module_code: &'code Code,
-    function_id: Option<FunctionId>,
-) -> &'code Code {
-    function_id.map_or(module_code, |id| &interns.get_function(id).code)
-}
-
 impl<'code> CallFrame<'code> {
     /// Creates a new call frame for module-level code.
     ///
@@ -388,8 +376,7 @@ impl<'code> CallFrame<'code> {
     /// are stored in the VM's `globals` vec, not in the stack.
     pub fn new_module(code: &'code Code, exception_stack_base: usize) -> Self {
         Self {
-            code,
-            bytecode: code.bytecode(),
+            code: FrameCode::borrowed(code),
             ip: 0,
             stack_base: 0,
             locals_count: 0,
@@ -404,6 +391,30 @@ impl<'code> CallFrame<'code> {
         }
     }
 
+    /// Owns a runtime-compiled body without consuming a permanent function ID.
+    fn new_snippet(
+        code: Code,
+        stack_base: usize,
+        exception_stack_base: usize,
+        call_offset: Option<u32>,
+        namespace: Box<FrameNamespace>,
+    ) -> Self {
+        Self {
+            code: FrameCode::Owned(Arc::new(code)),
+            ip: 0,
+            stack_base: stack_index(stack_base),
+            locals_count: 0,
+            exception_stack_base: stack_index(exception_stack_base),
+            function_id: None,
+            call_offset,
+            should_return: false,
+            is_parked: false,
+            namespace: Some(namespace),
+            is_initializer: false,
+            import_from_module: None,
+        }
+    }
+
     /// Creates a non-executing frame for a VM with no active Python task.
     fn new_parked(code: &'code Code) -> Self {
         let mut frame = Self::new_module(code, 0);
@@ -413,8 +424,7 @@ impl<'code> CallFrame<'code> {
 
     /// Parks this finished frame between tasks; its namespace must already be released.
     fn park(&mut self, module_code: &'code Code) {
-        self.code = module_code;
-        self.bytecode = module_code.bytecode();
+        self.code = FrameCode::borrowed(module_code);
         self.ip = 0;
         self.stack_base = 0;
         self.locals_count = 0;
@@ -445,8 +455,7 @@ impl<'code> CallFrame<'code> {
         namespace: Option<Box<FrameNamespace>>,
     ) -> Self {
         Self {
-            code,
-            bytecode: code.bytecode(),
+            code: FrameCode::borrowed(code),
             ip: 0,
             stack_base: stack_index(stack_base),
             locals_count,
@@ -462,15 +471,21 @@ impl<'code> CallFrame<'code> {
     }
 }
 
-impl CallFrame<'_> {
+/// Borrows one instruction's bytes and IP independently, without retaining a view across execution.
+struct InstructionReader<'a> {
+    bytecode: &'a [u8],
+    ip: &'a mut usize,
+}
+
+impl InstructionReader<'_> {
     /// Fetches `N` operand bytes with a single bounds check and advances the frame IP.
     #[inline]
     fn fetch_array<const N: usize>(&mut self) -> [u8; N] {
-        let Some(bytes) = self.bytecode.get(self.ip..).and_then(<[u8]>::first_chunk::<N>) else {
+        let Some(&bytes) = self.bytecode.get(*self.ip..).and_then(<[u8]>::first_chunk::<N>) else {
             unreachable!("instruction IP is out of bounds of the bytecode")
         };
-        self.ip += N;
-        *bytes
+        *self.ip += N;
+        bytes
     }
 
     /// Fetches a `u8` operand at the current IP.
@@ -545,7 +560,9 @@ impl CallFrame<'_> {
             flags,
         )
     }
+}
 
+impl CallFrame<'_> {
     /// Start of this frame's locals region on the VM stack.
     #[inline]
     pub(super) fn stack_base(&self) -> usize {
@@ -561,13 +578,17 @@ impl CallFrame<'_> {
 
 /// Serializable representation of a call frame.
 ///
-/// Cannot store `&Code` (a reference) — instead stores `FunctionId` to look up
-/// the pre-compiled Code object on resume. Module-level code uses `None`.
+/// Borrows are reconstructed from function IDs or module code on resume;
+/// transient snippets carry their owned code instead.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SerializedFrame {
-    /// Which function's code this frame executes (None = module-level).
+    /// Which function's code this frame executes (None = module-level or owned snippet).
     #[serde(rename = "F")]
     function_id: Option<FunctionId>,
+
+    /// Transient snippet body; legacy dumps use an interned function ID instead.
+    #[serde(default, rename = "B", skip_serializing_if = "Option::is_none")]
+    owned_code: Option<Arc<Code>>,
 
     /// Instruction pointer within this frame's bytecode.
     #[serde(rename = "P")]
@@ -621,6 +642,7 @@ impl CallFrame<'_> {
         );
         SerializedFrame {
             function_id: self.function_id,
+            owned_code: self.code.owned(),
             ip: self.ip,
             stack_base: self.stack_base(),
             locals_count: self.locals_count,
@@ -655,7 +677,7 @@ pub struct VMSnapshot {
     /// Module-level (global) variable storage.
     pub(crate) globals: Vec<Value>,
 
-    /// Call frames (serializable form — stores FunctionId, not &Code).
+    /// Call frames, including owned snippet bodies and IDs for borrowed code.
     frames: Vec<SerializedFrame>,
 
     /// Stack of exceptions being handled for nested except blocks.
@@ -793,10 +815,8 @@ pub struct VM<'h> {
     /// so sync-only code pays only for the main task entry.
     scheduler: Scheduler,
 
-    /// Module-level code (for restoring main task frames).
-    ///
-    /// Stored here because the main task's frames have `function_id: None` and
-    /// need a reference to the module code when being restored after task switching.
+    /// Module-level code for restoring the main task's root frame after task switching.
+    /// That frame has neither a function ID nor an owned snippet body.
     module_code: &'h Code,
 
     /// Bytecode IP of the most recent `LoadGlobalCallable` that
@@ -908,8 +928,8 @@ impl<'h> VM<'h> {
     ///
     /// The heap must already be deserialized. `FunctionId` values in frames
     /// are used to look up pre-compiled `Code` objects from the intern table;
-    /// `program.module_code` serves frames with `function_id = None`. The
-    /// snapshot's working directory overrides the program's.
+    /// owned snippet bodies travel in the snapshot, and remaining frames use
+    /// `program.module_code`. The snapshot's working directory overrides the program's.
     pub fn restore(
         snapshot: VMSnapshot,
         tables: &'h mut SessionTables,
@@ -922,23 +942,19 @@ impl<'h> VM<'h> {
         let frames: Vec<CallFrame<'_>> = snapshot
             .frames
             .into_iter()
-            .map(|sf| {
-                let code = frame_code(interns, &program.module_code, sf.function_id);
-                CallFrame {
-                    code,
-                    bytecode: code.bytecode(),
-                    ip: sf.ip,
-                    stack_base: stack_index(sf.stack_base),
-                    locals_count: sf.locals_count,
-                    exception_stack_base: stack_index(sf.exception_stack_base),
-                    function_id: sf.function_id,
-                    call_offset: sf.call_offset,
-                    should_return: false,
-                    is_parked: false,
-                    namespace: sf.namespace,
-                    is_initializer: sf.is_initializer,
-                    import_from_module: sf.import_from_module,
-                }
+            .map(|sf| CallFrame {
+                code: FrameCode::restore(interns, &program.module_code, sf.function_id, sf.owned_code),
+                ip: sf.ip,
+                stack_base: stack_index(sf.stack_base),
+                locals_count: sf.locals_count,
+                exception_stack_base: stack_index(sf.exception_stack_base),
+                function_id: sf.function_id,
+                call_offset: sf.call_offset,
+                should_return: false,
+                is_parked: false,
+                namespace: sf.namespace,
+                is_initializer: sf.is_initializer,
+                import_from_module: sf.import_from_module,
             })
             .collect();
 
@@ -1282,11 +1298,14 @@ impl<'h> VM<'h> {
             // Track instruction IP for exception table lookup
             self.instruction_ip = self.current_frame.ip;
 
-            // Fetch the opcode and advance the authoritative frame IP.
+            let mut instruction = InstructionReader {
+                bytecode: self.current_frame.code.bytecode(),
+                ip: &mut self.current_frame.ip,
+            };
             let opcode = {
-                let byte = self.current_frame.bytecode[self.current_frame.ip];
-                self.current_frame.ip += 1;
-                Opcode::from_repr(byte).expect("invalid opcode in bytecode")
+                let byte = instruction.bytecode[*instruction.ip];
+                *instruction.ip += 1;
+                Opcode::decode(byte).expect("invalid opcode in bytecode")
             };
 
             match opcode {
@@ -1323,7 +1342,7 @@ impl<'h> VM<'h> {
                 }
                 // Constants & Literals
                 Opcode::LoadConst => {
-                    let idx = self.current_frame.fetch_u16();
+                    let idx = instruction.fetch_u16();
                     let value = self.current_frame.code.constant(idx);
                     // Handle InternLongInt specially - convert to heap-allocated LongInt
                     if let Value::InternLongInt(long_int_id) = value {
@@ -1342,7 +1361,7 @@ impl<'h> VM<'h> {
                     self.push(Value::Ref(cell_id));
                 }
                 Opcode::LoadSmallInt => {
-                    let n = self.current_frame.fetch_i8();
+                    let n = instruction.fetch_i8();
                     self.push(Value::Int(i64::from(n)));
                 }
                 // Variables - Specialized Local Loads (no operand)
@@ -1352,23 +1371,23 @@ impl<'h> VM<'h> {
                 Opcode::LoadLocal3 => try_catch!(self, self.load_local(3)),
                 // Variables - General Local Operations
                 Opcode::LoadLocal => {
-                    let slot = u16::from(self.current_frame.fetch_u8());
+                    let slot = u16::from(instruction.fetch_u8());
                     try_catch!(self, self.load_local(slot));
                 }
                 Opcode::LoadLocalW => {
-                    let slot = self.current_frame.fetch_u16();
+                    let slot = instruction.fetch_u16();
                     try_catch!(self, self.load_local(slot));
                 }
                 Opcode::StoreLocal => {
-                    let slot = u16::from(self.current_frame.fetch_u8());
+                    let slot = u16::from(instruction.fetch_u8());
                     self.store_local(slot);
                 }
                 Opcode::StoreLocalW => {
-                    let slot = self.current_frame.fetch_u16();
+                    let slot = instruction.fetch_u16();
                     self.store_local(slot);
                 }
                 Opcode::LiftToTop => {
-                    let n = self.current_frame.fetch_u8();
+                    let n = instruction.fetch_u8();
                     // Move the item at TOS - n to TOS, shifting items in
                     // between down by one. Single `rotate_left(1)` on the
                     // affected slice does exactly that.
@@ -1377,63 +1396,63 @@ impl<'h> VM<'h> {
                     self.stack[src_idx..].rotate_left(1);
                 }
                 Opcode::SinkTop => {
-                    let n = usize::from(self.current_frame.fetch_u8());
+                    let n = usize::from(instruction.fetch_u8());
                     // Move TOS beneath the n items below it: one rotation of the
                     // affected slice, the mirror image of `LiftToTop`.
                     let len = self.stack.len();
                     self.stack[len - 1 - n..].rotate_right(1);
                 }
                 Opcode::RaiseUnboundLocal => {
-                    let name_idx = self.current_frame.fetch_u16();
+                    let name_idx = instruction.fetch_u16();
                     let name_id = StringId::from_index(name_idx);
                     catch!(self, self.unbound_local_error(0, Some(name_id)));
                 }
                 Opcode::DeleteLocal => {
-                    let slot = u16::from(self.current_frame.fetch_u8());
+                    let slot = u16::from(instruction.fetch_u8());
                     self.delete_local(slot);
                 }
                 Opcode::DeleteGlobal => {
-                    let slot = self.current_frame.fetch_u16();
+                    let slot = instruction.fetch_u16();
                     try_catch!(self, self.delete_global(slot));
                 }
                 // Variables - runtime name resolution (eval/exec snippets)
                 Opcode::LoadName => {
-                    let (slot, name_idx, flags) = self.current_frame.fetch_u16_u16_u8();
+                    let (slot, name_idx, flags) = instruction.fetch_u16_u16_u8();
                     handle_load_result!(self, self.load_name(slot, StringId::from_index(name_idx), flags));
                 }
                 Opcode::StoreName => {
-                    let (slot, name_idx, flags) = self.current_frame.fetch_u16_u16_u8();
+                    let (slot, name_idx, flags) = instruction.fetch_u16_u16_u8();
                     try_catch!(self, self.store_name(slot, StringId::from_index(name_idx), flags));
                 }
                 Opcode::DeleteName => {
-                    let (slot, name_idx, flags) = self.current_frame.fetch_u16_u16_u8();
+                    let (slot, name_idx, flags) = instruction.fetch_u16_u16_u8();
                     try_catch!(self, self.delete_name(slot, StringId::from_index(name_idx), flags));
                 }
                 // Variables - Global Operations
                 Opcode::LoadGlobal => {
-                    let slot = self.current_frame.fetch_u16();
+                    let slot = instruction.fetch_u16();
                     handle_load_result!(self, self.load_global(slot));
                 }
                 Opcode::LoadGlobalCallable => {
-                    let (slot, name_idx) = self.current_frame.fetch_u16_u16();
+                    let (slot, name_idx) = instruction.fetch_u16_u16();
                     let name_id = StringId::from_index(name_idx);
                     self.load_global_callable(slot, name_id);
                 }
                 Opcode::StoreGlobal => {
-                    let slot = self.current_frame.fetch_u16();
+                    let slot = instruction.fetch_u16();
                     self.store_global(slot);
                 }
                 // Variables - Cell Operations (closures)
                 Opcode::LoadCell => {
-                    let slot = self.current_frame.fetch_u16();
+                    let slot = instruction.fetch_u16();
                     try_catch!(self, self.load_cell(slot));
                 }
                 Opcode::StoreCell => {
-                    let slot = self.current_frame.fetch_u16();
+                    let slot = instruction.fetch_u16();
                     self.store_cell(slot);
                 }
                 Opcode::DeleteCell => {
-                    let slot = self.current_frame.fetch_u16();
+                    let slot = instruction.fetch_u16();
                     self.delete_cell(slot);
                 }
                 // Binary Operations - route through exception handling for tracebacks
@@ -1531,27 +1550,27 @@ impl<'h> VM<'h> {
                 }
                 // Collection Building - route through exception handling
                 Opcode::BuildList => {
-                    let count = self.current_frame.fetch_u16() as usize;
+                    let count = instruction.fetch_u16() as usize;
                     self.build_list(count);
                 }
                 Opcode::BuildTuple => {
-                    let count = self.current_frame.fetch_u16() as usize;
+                    let count = instruction.fetch_u16() as usize;
                     self.build_tuple(count);
                 }
                 Opcode::BuildDict => {
-                    let count = self.current_frame.fetch_u16() as usize;
+                    let count = instruction.fetch_u16() as usize;
                     try_catch!(self, self.build_dict(count));
                 }
                 Opcode::BuildSet => {
-                    let count = self.current_frame.fetch_u16() as usize;
+                    let count = instruction.fetch_u16() as usize;
                     try_catch!(self, self.build_set(count));
                 }
                 Opcode::FormatValue => {
-                    let flags = self.current_frame.fetch_u8();
+                    let flags = instruction.fetch_u8();
                     try_catch!(self, self.format_value(flags));
                 }
                 Opcode::BuildFString => {
-                    let count = self.current_frame.fetch_u16() as usize;
+                    let count = instruction.fetch_u16() as usize;
                     try_catch!(self, self.build_fstring(count));
                 }
                 Opcode::BuildSlice => {
@@ -1564,33 +1583,33 @@ impl<'h> VM<'h> {
                     try_catch!(self, self.list_to_tuple());
                 }
                 Opcode::DictMerge => {
-                    let func_name_id = self.current_frame.fetch_u16();
+                    let func_name_id = instruction.fetch_u16();
                     try_catch!(self, self.dict_merge(func_name_id));
                 }
                 Opcode::MethodDictMerge => {
-                    let func_name_id = self.current_frame.fetch_u16();
+                    let func_name_id = instruction.fetch_u16();
                     try_catch!(self, self.method_dict_merge(func_name_id));
                 }
                 // PEP 448 literal building
                 Opcode::DictUpdate => {
-                    let depth = self.current_frame.fetch_u8() as usize;
+                    let depth = instruction.fetch_u8() as usize;
                     try_catch!(self, self.dict_update(depth));
                 }
                 Opcode::SetExtend => {
-                    let depth = self.current_frame.fetch_u8() as usize;
+                    let depth = instruction.fetch_u8() as usize;
                     try_catch!(self, self.set_extend(depth));
                 }
                 // Comprehension Building - append/add/set items during iteration
                 Opcode::ListAppend => {
-                    let depth = self.current_frame.fetch_u8() as usize;
+                    let depth = instruction.fetch_u8() as usize;
                     try_catch!(self, self.list_append(depth));
                 }
                 Opcode::SetAdd => {
-                    let depth = self.current_frame.fetch_u8() as usize;
+                    let depth = instruction.fetch_u8() as usize;
                     try_catch!(self, self.set_add(depth));
                 }
                 Opcode::DictSetItem => {
-                    let depth = self.current_frame.fetch_u8() as usize;
+                    let depth = instruction.fetch_u8() as usize;
                     try_catch!(self, self.dict_set_item(depth));
                 }
                 // Subscript & Attribute - route through exception handling
@@ -1617,19 +1636,19 @@ impl<'h> VM<'h> {
                     }
                 }
                 Opcode::LoadAttr => {
-                    let name_idx = self.current_frame.fetch_u16();
+                    let name_idx = instruction.fetch_u16();
                     let name_id = StringId::from_index(name_idx);
                     handle_call_result!(self, self.load_attr(name_id));
                 }
                 Opcode::LoadSubmodule => {
-                    let (name_idx, path_idx) = self.current_frame.fetch_u16_u16();
+                    let (name_idx, path_idx) = instruction.fetch_u16_u16();
                     let path_id = StringId::from_index(path_idx);
                     // the module a following `LoadAttrImport` names in its `ImportError`
                     self.current_frame.import_from_module = Some(path_id);
                     handle_call_result!(self, self.load_submodule(StringId::from_index(name_idx), path_id));
                 }
                 Opcode::LoadAttrImport => {
-                    let name_idx = self.current_frame.fetch_u16();
+                    let name_idx = instruction.fetch_u16();
                     let name_id = StringId::from_index(name_idx);
                     // the compiler emits this only after the statement's `LoadModule`
                     let module_id = self
@@ -1639,17 +1658,17 @@ impl<'h> VM<'h> {
                     handle_call_result!(self, self.load_attr_import(name_id, module_id));
                 }
                 Opcode::StoreAttr => {
-                    let name_idx = self.current_frame.fetch_u16();
+                    let name_idx = instruction.fetch_u16();
                     let name_id = StringId::from_index(name_idx);
                     try_catch!(self, self.store_attr(name_id));
                 }
                 // Control Flow - use self.current_frame.ip directly for jumps
                 Opcode::Jump => {
-                    let offset = self.current_frame.fetch_i16();
+                    let offset = instruction.fetch_i16();
                     jump_relative!(self.current_frame.ip, offset);
                 }
                 Opcode::JumpIfTrue => {
-                    let offset = self.current_frame.fetch_i16();
+                    let offset = instruction.fetch_i16();
                     let cond = self.pop();
                     let result = cond.py_bool(self);
                     cond.drop_with(self);
@@ -1660,7 +1679,7 @@ impl<'h> VM<'h> {
                     }
                 }
                 Opcode::JumpIfFalse => {
-                    let offset = self.current_frame.fetch_i16();
+                    let offset = instruction.fetch_i16();
                     let cond = self.pop();
                     let result = cond.py_bool(self);
                     cond.drop_with(self);
@@ -1671,7 +1690,7 @@ impl<'h> VM<'h> {
                     }
                 }
                 Opcode::JumpIfTrueOrPop => {
-                    let offset = self.current_frame.fetch_i16();
+                    let offset = instruction.fetch_i16();
                     let value = self.pop();
                     match value.py_bool(self) {
                         Ok(true) => {
@@ -1686,7 +1705,7 @@ impl<'h> VM<'h> {
                     }
                 }
                 Opcode::JumpIfFalseOrPop => {
-                    let offset = self.current_frame.fetch_i16();
+                    let offset = instruction.fetch_i16();
                     let value = self.pop();
                     match value.py_bool(self) {
                         Ok(true) => value.drop_with(self),
@@ -1711,7 +1730,7 @@ impl<'h> VM<'h> {
                     }
                 }
                 Opcode::ForIter => {
-                    let offset = self.current_frame.fetch_i16();
+                    let offset = instruction.fetch_i16();
                     // Iterator implementations return heap objects from `py_iter`.
                     let Value::Ref(heap_id) = *self.peek() else {
                         return Err(RunError::internal("ForIter: expected iterator ref on stack"));
@@ -1752,16 +1771,16 @@ impl<'h> VM<'h> {
                 }
                 // Function Calls
                 Opcode::CallFunction => {
-                    let arg_count = self.current_frame.fetch_u8() as usize;
+                    let arg_count = instruction.fetch_u8() as usize;
                     handle_call_result!(self, self.exec_call_function(arg_count));
                 }
                 Opcode::CallBuiltinFunction => {
-                    let (builtin_id, arg_count) = self.current_frame.fetch_u8_u8();
+                    let (builtin_id, arg_count) = instruction.fetch_u8_u8();
                     let result = self.exec_call_builtin_function(builtin_id, arg_count as usize);
                     handle_call_result!(self, result);
                 }
                 Opcode::CallBuiltinType => {
-                    let (type_id, arg_count) = self.current_frame.fetch_u8_u8();
+                    let (type_id, arg_count) = instruction.fetch_u8_u8();
                     let arg_count = arg_count as usize;
 
                     match self.exec_call_builtin_type(type_id, arg_count) {
@@ -1771,13 +1790,13 @@ impl<'h> VM<'h> {
                 }
                 Opcode::CallFunctionKw => {
                     // Fetch operands: pos_count, kw_count, then kw_count name indices
-                    let (pos_count, kw_count) = self.current_frame.fetch_u8_u8();
+                    let (pos_count, kw_count) = instruction.fetch_u8_u8();
                     let (pos_count, kw_count) = (pos_count as usize, kw_count as usize);
 
                     // Read keyword name StringIds
                     let mut kwname_ids = Vec::with_capacity(kw_count);
                     for _ in 0..kw_count {
-                        kwname_ids.push(StringId::from_index(self.current_frame.fetch_u16()));
+                        kwname_ids.push(StringId::from_index(instruction.fetch_u16()));
                     }
 
                     handle_call_result!(self, self.exec_call_function_kw(pos_count, kwname_ids));
@@ -1785,7 +1804,7 @@ impl<'h> VM<'h> {
                 Opcode::CallAttr => {
                     // CallAttr: u16 name_id, u8 arg_count
                     // Stack: [obj, arg1, arg2, ..., argN] -> [result]
-                    let (name_idx, arg_count) = self.current_frame.fetch_u16_u8();
+                    let (name_idx, arg_count) = instruction.fetch_u16_u8();
                     let name_id = StringId::from_index(name_idx);
                     let arg_count = arg_count as usize;
 
@@ -1794,26 +1813,26 @@ impl<'h> VM<'h> {
                 Opcode::CallAttrKw => {
                     // CallAttrKw: u16 name_id, u8 pos_count, u8 kw_count, then kw_count u16 name indices
                     // Stack: [obj, pos_args..., kw_values...] -> [result]
-                    let (name_idx, pos_count, kw_count) = self.current_frame.fetch_u16_u8_u8();
+                    let (name_idx, pos_count, kw_count) = instruction.fetch_u16_u8_u8();
                     let name_id = StringId::from_index(name_idx);
                     let (pos_count, kw_count) = (pos_count as usize, kw_count as usize);
 
                     // Read keyword name StringIds
                     let mut kwname_ids = Vec::with_capacity(kw_count);
                     for _ in 0..kw_count {
-                        kwname_ids.push(StringId::from_index(self.current_frame.fetch_u16()));
+                        kwname_ids.push(StringId::from_index(instruction.fetch_u16()));
                     }
 
                     handle_call_result!(self, self.exec_call_attr_kw(name_id, pos_count, kwname_ids));
                 }
                 Opcode::CallFunctionExtended => {
-                    let flags = self.current_frame.fetch_u8();
+                    let flags = instruction.fetch_u8();
                     let has_kwargs = (flags & 0x01) != 0;
 
                     handle_call_result!(self, self.exec_call_function_extended(has_kwargs));
                 }
                 Opcode::CallAttrExtended => {
-                    let (name_idx, flags) = self.current_frame.fetch_u16_u8();
+                    let (name_idx, flags) = instruction.fetch_u16_u8();
                     let name_id = StringId::from_index(name_idx);
                     let has_kwargs = (flags & 0x01) != 0;
 
@@ -1821,7 +1840,7 @@ impl<'h> VM<'h> {
                 }
                 // Function Definition
                 Opcode::MakeFunction => {
-                    let (func_idx, defaults_count) = self.current_frame.fetch_u16_u8();
+                    let (func_idx, defaults_count) = instruction.fetch_u16_u8();
                     let func_id = FunctionId::from_index(func_idx);
                     let defaults_count = defaults_count as usize;
 
@@ -1851,7 +1870,7 @@ impl<'h> VM<'h> {
                     }
                 }
                 Opcode::MakeClosure => {
-                    let (func_idx, defaults_count, cell_count) = self.current_frame.fetch_u16_u8_u8();
+                    let (func_idx, defaults_count, cell_count) = instruction.fetch_u16_u8_u8();
                     let func_id = FunctionId::from_index(func_idx);
                     let (defaults_count, cell_count) = (defaults_count as usize, cell_count as usize);
 
@@ -1921,15 +1940,13 @@ impl<'h> VM<'h> {
                     yield_if_parked!(self);
                 }
                 Opcode::Assert => {
-                    match decode_assert_flags(self.current_frame.fetch_u8()).expect("invalid assert flags in bytecode")
-                    {
+                    match decode_assert_flags(instruction.fetch_u8()).expect("invalid assert flags in bytecode") {
                         Some(op) => try_catch!(self, self.assert_cmp(op)),
                         None => try_catch!(self, self.assert_test()),
                     }
                 }
                 Opcode::AssertFailed => {
-                    let cmp_op =
-                        decode_assert_flags(self.current_frame.fetch_u8()).expect("invalid assert flags in bytecode");
+                    let cmp_op = decode_assert_flags(instruction.fetch_u8()).expect("invalid assert flags in bytecode");
                     let error = self.assert_failed_msg(cmp_op);
                     catch!(self, error);
                 }
@@ -2062,20 +2079,20 @@ impl<'h> VM<'h> {
                 }
                 // Unpacking - route through exception handling
                 Opcode::UnpackSequence => {
-                    let count = self.current_frame.fetch_u8() as usize;
+                    let count = instruction.fetch_u8() as usize;
                     try_catch!(self, self.unpack_sequence(count));
                 }
                 Opcode::UnpackEx => {
-                    let (before, after) = self.current_frame.fetch_u8_u8();
+                    let (before, after) = instruction.fetch_u8_u8();
                     try_catch!(self, self.unpack_ex(before as usize, after as usize));
                 }
                 // Pattern matching
                 Opcode::MatchShape => {
-                    let (length, flags) = self.current_frame.fetch_u16_u8();
+                    let (length, flags) = instruction.fetch_u16_u8();
                     self.match_shape(length, flags);
                 }
                 Opcode::MatchKeys => {
-                    let mode = self.current_frame.fetch_u8();
+                    let mode = instruction.fetch_u8();
                     if mode == MATCH_KEYS_REST {
                         try_catch!(self, self.match_keys_rest());
                     } else {
@@ -2083,11 +2100,11 @@ impl<'h> VM<'h> {
                     }
                 }
                 Opcode::MatchClass => {
-                    let nargs = usize::from(self.current_frame.fetch_u8());
+                    let nargs = usize::from(instruction.fetch_u8());
                     try_catch!(self, self.match_class(nargs));
                 }
                 Opcode::MatchAttr => {
-                    let index = usize::from(self.current_frame.fetch_u8());
+                    let index = usize::from(instruction.fetch_u8());
                     handle_call_result!(self, self.match_attr(index));
                 }
                 // Special
@@ -2096,7 +2113,7 @@ impl<'h> VM<'h> {
                 }
                 // Module Operations
                 Opcode::LoadModule => {
-                    let module_id = self.current_frame.fetch_u16();
+                    let module_id = instruction.fetch_u16();
                     // for the `LoadAttrImport`s of a `from ... import`; harmless for a bare `import`
                     self.current_frame.import_from_module = Some(StringId::from_index(module_id));
                     handle_call_result!(self, Ok(self.load_module(module_id)));
@@ -2557,21 +2574,12 @@ impl<'h> VM<'h> {
         }
     }
 
-    /// Returns the source position for the instruction currently executing.
-    pub(super) fn current_position(&self) -> CodeRange {
-        self.current_frame
-            .code
-            .location_for_offset(self.instruction_ip)
-            .map(LocationEntry::range)
-            .unwrap_or_default()
-    }
-
     /// Returns the position a suspension at the current instruction reports.
     ///
     /// `instruction_ip` still names the suspending opcode; its location entry
     /// gives the byte range, so this reads no source.
     pub(crate) fn suspension_position(&self) -> SourceRange {
-        self.code_position(self.current_frame.code, self.instruction_ip)
+        self.code_position(&self.current_frame.code, self.instruction_ip)
     }
 
     /// Returns the source position of the `await` the main task is blocked on.
@@ -2588,7 +2596,13 @@ impl<'h> VM<'h> {
                 .main_task()
                 .and_then(|task| Some((task.frames.last()?, task.instruction_ip)))
                 .map_or_else(SourceRange::unknown, |(frame, ip)| {
-                    self.code_position(frame_code(self.interns, self.module_code, frame.function_id), ip)
+                    let code = FrameCode::restore(
+                        self.interns,
+                        self.module_code,
+                        frame.function_id,
+                        frame.owned_code.clone(),
+                    );
+                    self.code_position(&code, ip)
                 })
         }
     }
@@ -2609,8 +2623,7 @@ impl<'h> VM<'h> {
     /// Captures the caller's current bytecode offset for a call site, or `None`
     /// while the VM is parked with no active Python task.
     ///
-    /// The cheap counterpart to [`current_position`](Self::current_position):
-    /// no location-table scan, so it is affordable on every call. Out-of-range
+    /// No location-table scan, so it is affordable on every call. Out-of-range
     /// offsets (an invariant violation) degrade to `None` rather than panic.
     pub(super) fn current_offset(&self) -> Option<u32> {
         if self.current_frame.is_parked {
@@ -2618,17 +2631,6 @@ impl<'h> VM<'h> {
         } else {
             u32::try_from(self.instruction_ip).ok()
         }
-    }
-
-    /// Resolves a raw caller offset (`CallFrame::call_offset`) to a source
-    /// [`CodeRange`] against the current frame's code, during traceback unwind
-    /// once the failing frame has been popped so the current frame is the caller.
-    pub(super) fn resolve_offset(&self, offset: u32) -> CodeRange {
-        self.current_frame
-            .code
-            .location_for_offset(offset as usize)
-            .map(LocationEntry::range)
-            .unwrap_or_default()
     }
 
     // ========================================================================

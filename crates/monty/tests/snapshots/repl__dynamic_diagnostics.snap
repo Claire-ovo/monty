@@ -1,0 +1,120 @@
+---
+source: crates/monty/tests/repl.rs
+expression: "errors.join(\"\\n\\n\")"
+---
+[
+  {
+    "filename": "<python-input-1>",
+    "start": {
+      "L": 1,
+      "C": 1
+    },
+    "end": {
+      "L": 1,
+      "C": 8
+    },
+    "frame_name": "<module>",
+    "preview_line": "fail(0)",
+    "hide_caret": false,
+    "hide_frame_name": false
+  },
+  {
+    "filename": "<string>",
+    "start": {
+      "L": 4,
+      "C": 19
+    },
+    "end": {
+      "L": 4,
+      "C": 24
+    },
+    "frame_name": "fail",
+    "preview_line": null,
+    "hide_caret": false,
+    "hide_frame_name": false
+  }
+]
+
+[
+  {
+    "filename": "<string>",
+    "start": {
+      "L": 3,
+      "C": 5
+    },
+    "end": {
+      "L": 3,
+      "C": 9
+    },
+    "frame_name": null,
+    "preview_line": null,
+    "hide_caret": false,
+    "hide_frame_name": false
+  }
+]
+
+[
+  {
+    "filename": "<python-input-3>",
+    "start": {
+      "L": 1,
+      "C": 1
+    },
+    "end": {
+      "L": 1,
+      "C": 11
+    },
+    "frame_name": "<module>",
+    "preview_line": "closure(0)",
+    "hide_caret": false,
+    "hide_frame_name": false
+  },
+  {
+    "filename": "<string>",
+    "start": {
+      "L": 1,
+      "C": 11
+    },
+    "end": {
+      "L": 1,
+      "C": 16
+    },
+    "frame_name": "<lambda>",
+    "preview_line": null,
+    "hide_caret": false,
+    "hide_frame_name": false
+  }
+]
+
+[
+  {
+    "filename": "<python-input-4>",
+    "start": {
+      "L": 1,
+      "C": 1
+    },
+    "end": {
+      "L": 1,
+      "C": 21
+    },
+    "frame_name": "<module>",
+    "preview_line": "exec('é = 1; 1 / 0')",
+    "hide_caret": false,
+    "hide_frame_name": false
+  },
+  {
+    "filename": "<string>",
+    "start": {
+      "L": 1,
+      "C": 8
+    },
+    "end": {
+      "L": 1,
+      "C": 13
+    },
+    "frame_name": "<module>",
+    "preview_line": null,
+    "hide_caret": false,
+    "hide_frame_name": false
+  }
+]

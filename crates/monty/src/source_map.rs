@@ -1,8 +1,23 @@
+mod positions;
+
 use std::{collections::HashMap, sync::Arc};
 
 use monty_types::{CodeLoc, StackFrame};
+pub(crate) use positions::SourcePositions;
 
 use crate::{exception_private::RawStackFrame, intern::Interns, parse::CodeRange};
+
+/// A diagnostic location independent of the original source buffer.
+/// Dynamic code keeps positions only; source-backed code may also retain a preview.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ResolvedLocation {
+    #[serde(rename = "S")]
+    pub start: CodeLoc,
+    #[serde(rename = "E")]
+    pub end: CodeLoc,
+    #[serde(default, rename = "P", skip_serializing_if = "Option::is_none")]
+    pub preview_line: Option<Arc<str>>,
+}
 
 /// Lazy resolver from raw byte offsets (stored on every [`CodeRange`]) back to
 /// human-readable line/column/preview-line information.
@@ -205,6 +220,19 @@ pub(crate) trait StackFrameExt {
             end,
             frame_name: f.frame_name.map(|id| interns.get_str(id).to_string()),
             preview_line,
+            hide_caret: f.hide_caret,
+            hide_frame_name: false,
+        }
+    }
+
+    /// Builds a traceback entry whose code already resolved its source coordinates.
+    fn from_resolved(f: &RawStackFrame, interns: &Interns, location: &ResolvedLocation) -> StackFrame {
+        StackFrame {
+            filename: interns.get_filename(f.position.filename).to_owned(),
+            start: location.start,
+            end: location.end,
+            frame_name: f.frame_name.map(|id| interns.get_str(id).to_owned()),
+            preview_line: location.preview_line.clone(),
             hide_caret: f.hide_caret,
             hide_frame_name: false,
         }

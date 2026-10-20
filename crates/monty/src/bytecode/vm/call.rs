@@ -915,7 +915,9 @@ impl<'h> VM<'h> {
         let (namespace, this) = namespace_guard.as_parts_mut();
 
         // 2. Bind arguments to parameters
-        func.signature.bind(args, defaults, this, func.name, namespace)?;
+        func.signature
+            .bind(args, defaults, this, func.name, namespace)
+            .map_err(|error| func.resolve_binding_error(error))?;
 
         // 3. Install owned cells and captured free-var cells at their slots.
         this.install_closure_cells(func, cells, namespace);
@@ -1000,7 +1002,10 @@ impl<'h> VM<'h> {
 
         // 2. Bind arguments to parameters
         {
-            let bind_result = func.signature.bind(args, defaults, this, func.name, namespace);
+            let bind_result = func
+                .signature
+                .bind(args, defaults, this, func.name, namespace)
+                .map_err(|error| func.resolve_binding_error(error));
 
             bind_result?;
         }

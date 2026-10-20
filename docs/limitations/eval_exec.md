@@ -59,8 +59,11 @@ runtime, where no checker runs, so a call a host function stub would reject is o
 ## Resource use
 
 Parsing and compilation count against `max_feed_duration` and `max_turn_duration`.
-Once a snippet starts executing, its source, literals, functions and bytecode remain allocated for the rest of the
-session, counted against `max_memory`, even if execution raises an exception.
+Once a snippet starts executing, its interned names, literals and nested function definitions remain allocated for the
+rest of the session, counted against `max_memory`, even if execution raises an exception.
+Repeatedly compiling function definitions can therefore exhaust the session's function-ID limit even when the functions
+are no longer reachable.
+The top-level snippet body is released when its frame finishes; diagnostics retain positions rather than source text.
 A snippet rejected before execution, including one refused by the recursion limit, retains none of its compilation
 products.
 See [resource_limits.md](resource_limits.md).

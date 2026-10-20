@@ -3,7 +3,15 @@ use std::{
     fmt::{self, Write},
 };
 
-use crate::{args::Signature, bytecode::Code, expressions::Identifier, intern::Interns, namespace::NamespaceId};
+use crate::{
+    args::Signature,
+    bytecode::Code,
+    exception_private::RunError,
+    expressions::Identifier,
+    intern::Interns,
+    namespace::NamespaceId,
+    source_map::{ResolvedLocation, SourcePositions},
+};
 
 /// How an exact positional call can bypass argument binding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,9 +100,29 @@ pub(crate) struct Function {
     /// Compiled body borrowed by active frames, which track body-relative instruction offsets.
     #[serde(rename = "B")]
     pub code: Code,
+    /// Definition position for argument-binding errors after a dynamic source has been released.
+    #[serde(default, rename = "L", skip_serializing_if = "Option::is_none")]
+    name_location: Option<Box<ResolvedLocation>>,
 }
 
 impl Function {
+    /// Keeps diagnostics, not source text, for a function compiled by eval/exec.
+    pub(crate) fn resolve_locations(&mut self, source: &SourcePositions) {
+        self.name_location = Some(Box::new(source.resolve(self.name.position)));
+        self.code.resolve_locations(source);
+    }
+
+    /// Completes the binder's definition-site diagnostic before it leaves this function.
+    pub(crate) fn resolve_binding_error(&self, mut error: RunError) -> RunError {
+        if let RunError::Exc(exc) = &mut error
+            && let Some(frame) = &mut exc.frame
+            && frame.position == self.name.position
+        {
+            frame.resolved = self.name_location.as_deref().cloned();
+        }
+        error
+    }
+
     /// Create a new compiled function.
     ///
     /// This is typically called by the bytecode compiler after compiling a `PreparedFunctionDef`.
@@ -135,6 +163,7 @@ impl Function {
             is_async,
             exact_positional_call: OnceCell::new(),
             code,
+            name_location: None,
         }
     }
 

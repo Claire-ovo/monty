@@ -75,8 +75,8 @@ pub fn decode_assert_flags(flags: u8) -> Option<Option<CmpOperator>> {
 /// Opcode discriminant - just identifies the instruction type.
 ///
 /// Operands (if any) follow in the bytecode stream and are fetched separately.
-/// With `#[repr(u8)]`, each opcode is exactly 1 byte. Uses `strum::FromRepr` for
-/// efficient byte-to-opcode conversion (bounds check + transmute).
+/// With `#[repr(u8)]`, each opcode is exactly 1 byte. Checked decoding rejects
+/// byte values that do not name an instruction.
 ///
 /// Opcode bytes are part of Monty's serialized `Code` format. Explicit
 /// discriminants prevent source reordering or removal from changing that format
@@ -634,6 +634,24 @@ enum OperandShape {
 }
 
 impl Opcode {
+    /// Decodes instruction bytes through a compact checked lookup, including invalid-byte rejection.
+    #[inline]
+    pub(crate) fn decode(byte: u8) -> Option<Self> {
+        const TABLE: [Option<Opcode>; 256] = {
+            let mut table = [None; 256];
+            let mut byte = u8::MIN;
+            loop {
+                table[byte as usize] = Opcode::from_repr(byte);
+                if byte == u8::MAX {
+                    break;
+                }
+                byte += 1;
+            }
+            table
+        };
+        TABLE[usize::from(byte)]
+    }
+
     /// Returns this opcode's serialized operand shape.
     fn operand_shape(self) -> OperandShape {
         match self {

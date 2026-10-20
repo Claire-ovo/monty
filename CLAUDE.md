@@ -219,14 +219,20 @@ discriminating operand would cost measurable dispatch time.
 ### Code owns its instruction and constant buffers
 
 Each `Code` (`crates/monty/src/bytecode/code.rs`) owns its bytecode, constants and metadata.
-A `CallFrame` borrows the `Code` and caches its bytecode slice so instruction fetches avoid an extra dereference.
+An ordinary `CallFrame` borrows the `Code` and caches its bytecode slice so instruction fetches avoid an extra dereference.
+An `eval()` / `exec()` frame instead owns its transient body through `FrameCode::Owned`.
 Its `usize` instruction pointer, source locations and exception handlers all use body-relative offsets.
+Dispatch shares one resolved bytecode slice between an instruction's opcode and operands through `InstructionReader`.
+The borrow ends before execution, so calls, unwinding and task switches cannot leave a stale instruction view.
 
 Committed functions have stable addresses and their code is immutable, so runtime compilation can publish new
 functions without invalidating active frames.
 Module code is held in an `Arc<Code>` so runner clones share it; frames borrow it from the running `Program`.
-`eval()` / `exec()` bodies are stored as functions in `Interns`.
-Snapshots store function IDs and offsets, rebuilding code borrows on restore.
+`eval()` / `exec()` bodies are not interned; only their nested function definitions are.
+Runtime compilation resolves diagnostic coordinates before releasing the source; code and traceback frames own those
+coordinates, with an optional preview field reserved for source-backed diagnostics.
+Snapshots store function IDs and offsets for borrowed code, and include owned snippet bodies.
+Older dumps with interned snippet bodies and source tables still restore through the legacy path.
 
 ### Session dumps name their fields
 
@@ -235,6 +241,7 @@ enums by variant name (a `#[serde(transparent)]` newtype or a hand-written impl 
 it). Adding a field (`#[serde(default)]`), removing one, or inserting a variant anywhere keeps older dumps
 loading, while tuple structs and tuple variants are positional and may only grow at the end; the names are the
 persistence contract, so renaming a serialized field or variant needs `#[serde(alias = "old")]`, and `#[serde(deny_unknown_fields)]` must never go on a dumped type.
+These changes preserve backward readability; they do not guarantee that older readers can interpret new dumps correctly.
 Persisted `Vec<u8>` / `[u8; N]` data takes `#[serde(with = "serde_bytes")]` so it is written as one byte string.
 Types written many times (`Value`, `HeapEntry`, `CcColor`, the hot `HeapData` variants, `List`, `Tuple`, `Dict`,
 `DictEntry`, `SetEntry`, `CodeRange`, `LocationEntry`, `CodeLoc`, `Instance`, `Closure`, `FunctionDefaults`,
@@ -245,8 +252,19 @@ or variant on them takes an unused letter.
 discriminants are bytecode operands), `CmpOperator` values, the compiler's constant layout, how a key hashes (dict and
 set entries persist their hash, which is why keys without a heap identity hash by name or a persisted id such as a
 `FunctionId`, never by discriminant), a semantic change to a stored value, or a `sha1` / `sha2` crate upgrade that
-changes their `SerializableState` layout (`hashlib`'s SHA-1 and SHA-2 objects persist it verbatim). `crates/monty/tests/dump_compat.rs` loads a checked-in fixture written at the current version; a
-change that breaks it decides between an alias, a default, or a bump plus `UPDATE_DUMP_FIXTURE=1` to regenerate.
+changes their `SerializableState` layout (`hashlib`'s SHA-1 and SHA-2 objects persist it verbatim).
+
+`DUMP_VERSION` is the emitted version and maximum supported version.
+Bump it when new dumps require reader behavior that older interpreters lack, even if older dumps remain readable.
+This includes optional fields that older readers would ignore but that are required for correct restoration.
+Adding defaults alone does not justify leaving the emitted version unchanged.
+Advance `MIN_SUPPORTED_DUMP_VERSION` only when support for older dumps is intentionally dropped; do not automatically
+advance it with `DUMP_VERSION`.
+
+Keep compatibility fixtures in `crates/monty/tests/dump_compat.rs` for supported older versions.
+Do not regenerate an older fixture merely because the emitted version increases.
+Use `UPDATE_DUMP_FIXTURE=1` to generate the current-version fixture while retaining supported older fixtures.
+If an older fixture stops loading, add compatibility handling or explicitly raise `MIN_SUPPORTED_DUMP_VERSION`.
 
 ### Compilation overlays and stable intern entries
 
@@ -260,14 +278,14 @@ An active overlay blocks runtime interning and other compilations from consuming
 
 Compiled function bodies remain owned by the overlay until publication.
 Only an admitted snippet publishes its intern entries and code; dropping a rejected overlay frees its products.
-For `eval()` / `exec()`, reserve the frame's recursion level before publication, then construct its frame from the
-committed code.
+For `eval()` / `exec()`, reserve the frame's recursion level before publication, then install its owned body alongside the
+committed nested functions.
 No fallible operation or Python execution may intervene between admission and installing the frame.
 Preparation's provisional global slots are restored on rejection.
 Never roll back a snippet after execution starts: its definitions may already be reachable from globals.
 
-Snippet source IDs occupy a separate range from canonical string IDs.
-They display as `<string>` without allowing duplicate entries in the string-deduplication maps.
+Legacy snippet source IDs occupy a separate range from canonical string IDs and display as `<string>`.
+New dynamic code uses the canonical `<string>` filename and code-owned diagnostics, without adding source entries.
 Resolve filenames with `Interns::get_filename`; ordinary `get_str` only accepts canonical string IDs.
 
 ### HeapReader API — Safe Heap Access

@@ -11,7 +11,7 @@
 //! * 0 to 127 - single character strings for all 128 ASCII characters
 //! * 128 - the empty string
 //! * 129 to 2³¹-1 - strings interned per executor
-//! * 2³¹ and above - snippet filename identities, never Python string values
+//! * 2³¹ and above - legacy snippet filename identities, never Python string values
 //!
 //! Other static strings occupy ordinary executor-local slots. Their interner entries
 //! retain a [`StaticStrings`] tag for dispatch, while snapshots serialize only
@@ -2566,7 +2566,7 @@ fn get_static_string(strings: &Entries<InternedString>, id: StringId) -> Option<
     }
 }
 
-/// Committed strings, literals, functions and snippet sources.
+/// Committed strings, literals, functions and legacy snippet sources.
 /// Entries never move or disappear; existing sessions publish private compilation overlays on success.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(try_from = "InternsWire")]
@@ -2576,6 +2576,7 @@ pub(crate) struct Interns {
     long_ints: Entries<WithHash<BigInt>>,
     /// Boxes keep a mostly empty storage page from reserving hundreds of function bodies.
     functions: Entries<Box<Function>>,
+    /// Sources retained by older dumps; new runtime compilation stores resolved diagnostics instead.
     eval_sources: Entries<Arc<str>>,
     #[serde(skip)]
     string_id_by_name: RefCell<AHashMap<String, StringId>>,
@@ -2634,8 +2635,8 @@ impl TryFrom<InternsWire> for Interns {
     }
 }
 
-/// Filename-only IDs are separate from canonical Python strings.
-/// Each snippet has distinct source identity but the same displayed filename.
+/// Legacy filename-only IDs are separate from canonical Python strings.
+/// New dynamic code resolves positions at compilation and needs no distinct source identity.
 const SOURCE_ID_BASE: usize = 1 << 31;
 
 impl Interns {
@@ -2728,7 +2729,7 @@ impl Interns {
         &self.functions[id.index()]
     }
 
-    /// Looks up source by its filename-only ID, never by the displayed text.
+    /// Resolves legacy dump diagnostics by filename-only ID, never by the displayed text.
     pub(crate) fn eval_source(&self, filename: StringId) -> Option<&str> {
         filename
             .index()

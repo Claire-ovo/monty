@@ -1,0 +1,11 @@
+---
+source: crates/monty/tests/dump_compat.rs
+expression: error.error.to_string()
+---
+Traceback (most recent call last):
+  File "<python-input-1>", line 1, in <module>
+    Pending(xs, d, b).result + 1
+    ~~~~~~~~~~~~~~~~~
+  File "<python-input-0>", line 134, in __init__
+    pending_log.append('finally')
+ValueError: host failed

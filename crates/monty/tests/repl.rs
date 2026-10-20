@@ -2132,6 +2132,102 @@ fn repl_eval_suspends_at_external_call() {
     assert_eq!(feed_run_print(&mut repl, "double(21)").unwrap(), MontyObject::int(42));
 }
 
+/// Executed wrappers neither consume function IDs nor retain source, even with distinct inputs.
+#[test]
+fn repl_runtime_compilation_releases_wrappers_and_sources() {
+    let (repl, _) = init_repl(
+        "for i in range(65537):\n    assert eval('1 + 1') == 2\n    assert eval(str(i)) == i\n    exec('pass')",
+    );
+    let state = to_value(&repl).unwrap();
+    assert_eq!(state["interns"]["functions"].as_array().unwrap().len(), 0);
+    assert_eq!(state["interns"]["eval_sources"].as_array().unwrap().len(), 0);
+
+    let mut repl = round_trip_repl(&repl);
+    feed_run_print(&mut repl, "exec('def kept():\\n    return 42')").unwrap();
+    assert_eq!(feed_run_print(&mut repl, "kept()").unwrap(), MontyObject::int(42));
+    let state = to_value(&repl).unwrap();
+    assert_eq!(state["interns"]["functions"].as_array().unwrap().len(), 1);
+    assert_eq!(state["interns"]["eval_sources"].as_array().unwrap().len(), 0);
+}
+
+/// Nested transient frames survive a dump, then release their code on return or unwind.
+#[test]
+fn repl_nested_snippet_dump_restores_code_and_diagnostics() {
+    for fail in [false, true] {
+        let (repl, _) = init_repl("");
+        let progress = repl
+            .feed_start(
+                "exec(\"answer = eval('ext_fn(41) + 1')\\nassert answer == 42\")",
+                vec![],
+                PrintWriter::Stdout,
+            )
+            .unwrap();
+        let loaded = round_trip_progress(&progress);
+        drop(progress.into_function_call().unwrap().into_repl());
+        let call = loaded.into_function_call().unwrap();
+        let result = if fail {
+            ExtFunctionResult::Error(MontyException::new(ExcType::ValueError, Some("host failed".to_owned())))
+        } else {
+            ExtFunctionResult::Return(MontyObject::int(41))
+        };
+        let result = call.resume(result, PrintWriter::Stdout);
+        let mut repl = if fail {
+            let error = result.unwrap_err();
+            assert_snapshot!("nested_snippet_dump_error", error.error.to_string());
+            error.repl
+        } else {
+            let (repl, value) = result.unwrap().into_complete().unwrap();
+            assert_eq!(value, MontyObject::none());
+            repl
+        };
+        assert_eq!(
+            feed_run_print(&mut repl, "eval('6 * 7')").unwrap(),
+            MontyObject::int(42)
+        );
+        let state = to_value(&repl).unwrap();
+        assert_eq!(state["interns"]["functions"].as_array().unwrap().len(), 0);
+        assert_eq!(state["interns"]["eval_sources"].as_array().unwrap().len(), 0);
+    }
+}
+
+/// Dynamic functions keep Unicode positions and definition-site binding errors, but not source.
+#[test]
+fn repl_dynamic_diagnostics_without_source() {
+    let (repl, _) = init_repl(
+        "exec('#é😀' + 'padding' * 10000 + '\\r\\n\\r\\ndef fail(x):\\r\\n    é = 1; return é / x')\nclosure = eval('lambda x: 1 / x')",
+    );
+    let state = to_value(&repl).unwrap();
+    assert_eq!(state["interns"]["eval_sources"].as_array().unwrap().len(), 0);
+    // Function metadata must not contain the large comment preceding the definition.
+    assert!(state["interns"]["functions"].to_string().len() < 10000);
+    let mut repl = round_trip_repl(&repl);
+    let mut errors = Vec::new();
+    for code in ["fail(0)", "fail()", "closure(0)", "exec('é = 1; 1 / 0')"] {
+        let error = feed_run_print(&mut repl, code).unwrap_err();
+        errors.push(serde_json::to_string_pretty(error.traceback()).unwrap());
+    }
+    assert_snapshot!("dynamic_diagnostics", errors.join("\n\n"));
+}
+
+/// A failed gather can retain a dynamic traceback after its snippet frame has been destroyed.
+#[test]
+fn repl_cached_dynamic_traceback_survives_dump() {
+    let (repl, _) = init_repl("");
+    let progress = repl.feed_start(
+        "import asyncio\nexec(\"async def worker():\\n    exec('1 / 0')\")\ng = asyncio.gather(worker())\ntry:\n    await g\nexcept ZeroDivisionError:\n    pass\ncheckpoint()\nawait g",
+        vec![], PrintWriter::Stdout,
+    ).unwrap();
+    let loaded = round_trip_progress(&progress);
+    drop(progress.into_function_call().unwrap().into_repl());
+    let call = loaded.into_function_call().unwrap();
+    assert_eq!(call.function_name, "checkpoint");
+    let error = call.resume(MontyObject::none(), PrintWriter::Stdout).unwrap_err();
+    assert_snapshot!("cached_dynamic_traceback", error.error.to_string());
+    let state = to_value(&error.repl).unwrap();
+    assert_eq!(state["interns"]["eval_sources"].as_array().unwrap().len(), 0);
+    assert_eq!(state["interns"]["functions"].as_array().unwrap().len(), 1);
+}
+
 /// A refused locals snapshot must not retain the function's globals namespace.
 #[cfg(feature = "ref-count-return")]
 #[test]

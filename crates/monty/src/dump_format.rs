@@ -16,8 +16,20 @@
 //! Tuple structs and tuple variants are positional, so their fields may only
 //! be appended.
 //! The names themselves are the contract: renaming a serialized field or
-//! variant needs `#[serde(alias = "old")]` (or a [`DUMP_VERSION`] bump), and
+//! variant needs `#[serde(alias = "old")]` while older dumps remain supported, and
 //! `#[serde(deny_unknown_fields)]` must never be added to a dumped type.
+//!
+//! # Version range
+//!
+//! [`DUMP_VERSION`] is the emitted version and newest readable version.
+//! Bump it when new dumps require reader behavior that older builds lack, even
+//! if defaulted fields keep older dumps readable. The version check must reject
+//! dumps containing fields an older reader cannot safely ignore, such as owned snippet bodies.
+//! This also covers changes to opcodes or operand shapes, builtin discriminants,
+//! comparison operators, constant layout, persisted key hashes and stored values.
+//! Raise [`MIN_SUPPORTED_DUMP_VERSION`] only when older dumps can no longer be read.
+//! A writer-version bump alone does not retire their compatibility paths or fixtures.
+//! Avoid multiple bumps between releases when one already covers the new format.
 
 use std::{convert::Infallible, error::Error, fmt, mem::size_of};
 
@@ -36,23 +48,14 @@ use crate::{
 /// Prefix distinguishing Monty dumps from unframed CBOR data.
 const MAGIC: &[u8; 6] = b"MONTY\0";
 
-/// Version of the dump schema.
-///
-/// The payload names its fields and variants, so adding a field with a default,
-/// removing one or reordering them does not need a bump (see the module docs).
-/// Bump for every release where
-/// the *meaning* of serialized data changes: opcodes or their operand shapes,
-/// `BuiltinsFunctions` order (its discriminants are bytecode operands),
-/// `CmpOperator` values, the compiler's constant layout, how a dict or set key
-/// hashes (entries persist their hash), or a semantic change to a stored value.
-/// Older dumps are then rejected instead of misexecuting.
-///
-/// Before bumping, check there's already been a bump since the last release - multiple bumps
-/// between releases is unnecessary and can lead to confusion.
-pub const DUMP_VERSION: u16 = 13;
+/// Version written by [`dump`] and the newest version accepted by [`Dump::load`].
+/// Version 14 adds owned snippet bodies and source-independent diagnostics;
+/// older readers must reject these dumps rather than misinterpret their frames.
+pub const DUMP_VERSION: u16 = 14;
 
-/// Set to [`DUMP_VERSION`], the current dump version, until this crate can load older dumps.
-pub const MIN_SUPPORTED_DUMP_VERSION: u16 = DUMP_VERSION;
+/// Oldest readable dump version; advance only when its compatibility support is dropped.
+/// Version 13 retains the legacy interned snippet bodies and source tables.
+pub const MIN_SUPPORTED_DUMP_VERSION: u16 = 13;
 
 // The supported range must be non-empty, and must exclude zero
 const _: () = assert!(MIN_SUPPORTED_DUMP_VERSION >= 1);
@@ -135,8 +138,8 @@ impl Dump {
     /// Successful decoding does not authenticate or fully validate a snapshot.
     /// The same contract applies to direct serde deserialization.
     ///
-    /// Accepts [`MIN_SUPPORTED_DUMP_VERSION`]`..=`[`DUMP_VERSION`], which is one
-    /// version wide until a compatibility mechanism lowers the floor.
+    /// Accepts [`MIN_SUPPORTED_DUMP_VERSION`]`..=`[`DUMP_VERSION`], including
+    /// older formats whose compatibility paths are still supported.
     ///
     /// # Errors
     /// Returns [`DumpError`] for a dump this build cannot read. The version
@@ -334,7 +337,8 @@ mod tests {
     };
 
     /// If a component changes incompatibly, bump `DUMP_VERSION` before updating its
-    /// expected fingerprint. Compatible changes only require a fingerprint update.
+    /// fingerprint. Preserve older dumps' semantics through compatibility handling,
+    /// or raise `MIN_SUPPORTED_DUMP_VERSION` to reject their dumps.
     ///
     /// NB this test is not exhaustive of all possible compatibility issues, it just helps
     /// catch the obvious ones!
@@ -411,9 +415,9 @@ mod tests {
     /// FNV-1a over variant names in sorted order.
     ///
     /// `Type` and `MontyType` are encoded by variant name inside a `Dump`, so
-    /// order is free but a rename or removal breaks older dumps: fix it with
-    /// `#[serde(alias)]` or bump `DUMP_VERSION`. Adding a variant only needs
-    /// the expected hash updated.
+    /// order is free but a rename or removal breaks older dumps: preserve their
+    /// decoding or raise `MIN_SUPPORTED_DUMP_VERSION`. New variants also need a
+    /// writer-version bump when older readers cannot interpret them.
     fn variant_name_fingerprint(names: &[String]) -> u64 {
         let mut sorted = names.to_vec();
         sorted.sort_unstable();
@@ -469,8 +473,9 @@ mod tests {
 
     /// `TypeCheckingFormat` reaches the dump schema through
     /// `monty_types::TypeCheckState` and serializes by variant name, so the
-    /// names are compared in sorted order: renaming one needs `#[serde(alias)]`
-    /// or a `DUMP_VERSION` bump, adding one only needs this list updated.
+    /// names are compared in sorted order. Preserve old names with aliases while
+    /// their dumps remain supported; new variants require a writer-version bump
+    /// when older readers cannot interpret them.
     #[test]
     fn type_checking_format_variants_match_dump_version() {
         let mut variants = serde_variant_names::<TypeCheckingFormat>(TypeCheckingFormat::VARIANTS, &[]);

@@ -328,6 +328,8 @@ A host driving the interpreter directly must count suspensions and call `abort` 
 The free function `monty::dump` serializes a session — idle between feeds ([`SessionRef::Idle`](../api/rust/monty.md#sessionref)) or suspended mid-run
 ([`SessionRef::Suspended`](../api/rust/monty.md#sessionref)) — together with its script name and type-check state.
 [`Dump::load`](../api/rust/monty.md#dump) restores it, in the same process or a different one.
+Writing uses `DUMP_VERSION`; loading accepts the inclusive `MIN_SUPPORTED_DUMP_VERSION..=DUMP_VERSION` range.
+A writer-version bump does not by itself drop support for older dumps.
 Both this method and direct serde deserialization require unmodified bytes from a trusted, compatible Monty producer.
 The caller must establish provenance and integrity; invalid snapshots have no correctness or availability guarantees.
 See [snapshot security](../security.md#deserializing-snapshots).

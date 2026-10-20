@@ -7,17 +7,17 @@
 use std::{str, sync::Arc};
 
 use crate::{
-    args::{ArgValues, FromArgs, Signature},
+    args::{ArgValues, FromArgs},
     bytecode::{CallResult, Compiler, FrameNamespace, VM},
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult, SimpleException},
-    expressions::{Identifier, Node},
-    function::Function,
+    expressions::Node,
     heap::{DropGuard, HeapData, HeapId},
-    intern::{CompileInterns, FunctionId, StaticStrings},
+    intern::CompileInterns,
     name_map::NameMap,
-    parse::{CodeRange, parse_expression_with_interner, parse_module_with_filename_id},
+    parse::{parse_expression_with_interner, parse_module_with_filename_id},
     prepare::{SnippetNames, prepare_snippet},
+    source_map::SourcePositions,
     types::{Type, py_trait::PyTrait},
     value::Value,
 };
@@ -140,7 +140,7 @@ fn compile_and_push(
     let mut namespace_guard = DropGuard::new(namespace, vm);
     let (_, vm) = namespace_guard.as_parts_mut();
     let mut overlay = CompileInterns::new(vm.interns);
-    let filename_id = overlay.add_eval_source(Arc::clone(source));
+    let filename_id = overlay.intern("<string>");
     let options = vm.env.options;
     let nodes = match builtin {
         Builtin::Exec => {
@@ -164,37 +164,14 @@ fn compile_and_push(
         &mut *vm.global_names
     };
     let nodes = prepare_snippet(nodes, &overlay, globals, names).map_err(|e| e.into_run_error(source))?;
-    let code = Compiler::compile_snippet(&nodes, &mut overlay, globals, options, globals_by_name)
+    let mut code = Compiler::compile_snippet(&nodes, &mut overlay, globals, options, globals_by_name)
         .map_err(|e| e.into_run_error(source))?;
 
-    let position = CodeRange {
-        filename: filename_id,
-        start_byte: 0,
-        end_byte: u32::try_from(source.len()).unwrap_or(u32::MAX),
-    };
-    let function = Function::new(
-        Identifier::new(overlay.intern_static(StaticStrings::Module), position),
-        Signature::default(),
-        0,
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        Vec::new(),
-        0,
-        false,
-        code,
-    );
-    let index = overlay.functions_len();
-    let func_id = u16::try_from(index).map(FunctionId::from_index).map_err(|_| {
-        SimpleException::new_msg(
-            ExcType::SyntaxError,
-            format!("session defines too many functions; maximum is {}", u16::MAX),
-        )
-    })?;
-
-    overlay.push_function(function);
+    let positions = SourcePositions::new(source);
+    code.resolve_locations(&positions);
+    overlay.resolve_locations(&positions);
     let (namespace, vm) = namespace_guard.into_parts();
-    vm.push_snippet_frame(func_id, overlay, namespace)?;
+    vm.push_snippet_frame(code, overlay, namespace)?;
     vm.globals.resize_with(vm.global_names.len(), || Value::Undefined);
     Ok(CallResult::FramePushed)
 }

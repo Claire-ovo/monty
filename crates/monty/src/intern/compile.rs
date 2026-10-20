@@ -1,12 +1,10 @@
 //! Compiler access to session tables, with private overlays for recoverable compilation.
 
-use std::sync::Arc;
-
 use ahash::AHashMap;
 use num_bigint::BigInt;
 
-use super::{BytesId, InternedString, Interns, LongIntId, SOURCE_ID_BASE, StaticStrings, StringId, next_string_id};
-use crate::{function::Function, hash::WithHash};
+use super::{BytesId, InternedString, Interns, LongIntId, StaticStrings, StringId, next_string_id};
+use crate::{function::Function, hash::WithHash, source_map::SourcePositions};
 
 /// Compilation tables with final IDs assigned before execution.
 /// Existing sessions use a private overlay so rejection retains no products.
@@ -26,7 +24,6 @@ struct PendingInterns {
     bytes: Vec<WithHash<Vec<u8>>>,
     long_ints: Vec<WithHash<BigInt>>,
     functions: Vec<Function>,
-    sources: Vec<Arc<str>>,
 }
 
 impl<'i> CompileInterns<'i> {
@@ -68,9 +65,6 @@ impl<'i> CompileInterns<'i> {
             }
             for entry in pending.functions.drain(..) {
                 self.base.functions.push(Box::new(entry));
-            }
-            for source in pending.sources.drain(..) {
-                self.base.eval_sources.push(source);
             }
         }
     }
@@ -191,17 +185,12 @@ impl<'i> CompileInterns<'i> {
         }
     }
 
-    /// Records source separately from canonical strings, preserving equal-string ID equality.
-    pub(crate) fn add_eval_source(&mut self, source: Arc<str>) -> StringId {
-        let pending_len = self.pending.as_ref().map_or(0, |pending| pending.sources.len());
-        let index = SOURCE_ID_BASE + self.base.eval_sources.len() + pending_len;
-        let id = StringId(index.try_into().expect("source ID overflow"));
-        if let Some(pending) = &mut self.pending {
-            pending.sources.push(source);
-        } else {
-            self.base.eval_sources.push(source);
+    /// Resolves diagnostics for every nested function before publishing a dynamic compilation.
+    pub(crate) fn resolve_locations(&mut self, source: &SourcePositions) {
+        let pending = self.pending.as_mut().expect("dynamic compilation requires an overlay");
+        for function in &mut pending.functions {
+            function.resolve_locations(source);
         }
-        id
     }
 
     /// Appends a compiled function under its final session ID.
