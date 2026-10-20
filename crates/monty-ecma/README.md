@@ -12,7 +12,8 @@ and a session keeps its `globalThis` properties and top-level `let`/`const`/`cla
 
 The surface mirrors the Python interpreter's REPL:
 
-- `JsRepl::new(script_name, limits)` creates an idle session; `with_os_policy` sets the clock, zone, sleep and
+- `JsRepl::new(script_name, limits)` creates an idle session whose dialect the script name's extension picks
+  (`.ts`, `.tsx`, `.jsx`; `with_typescript` overrides the TypeScript half); `with_os_policy` sets the clock, zone, sleep and
   entropy policy that `Date`, timers and `Math.random` observe.
 - `JsRepl::feed(code, inputs, print)` runs one snippet with named host values in scope, streaming `console.*` output
   to the `PrintWriter`, and returns a `JsProgress`: `Complete` with the completion value as a `MontyObject`,

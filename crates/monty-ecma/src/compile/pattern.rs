@@ -173,7 +173,7 @@ impl<'c> Compiler<'c> {
             | AssignmentTarget::TSSatisfiesExpression(_)
             | AssignmentTarget::TSNonNullExpression(_)
             | AssignmentTarget::TSTypeAssertion(_) => {
-                Err(CompileError::unsupported("TypeScript syntax", Self::span_of(target)))
+                Err(CompileError::internal("TypeScript syntax survived the transform"))
             }
         }
     }

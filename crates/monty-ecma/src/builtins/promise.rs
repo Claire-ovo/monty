@@ -91,7 +91,7 @@ impl Vm<'_> {
 
     /// A native function with a fixed `this` and leading arguments; `this`
     /// and `args` are consumed.
-    fn bound_native(&mut self, native: NativeFn, this: JsValue, args: Vec<JsValue>) -> JsValue {
+    pub(super) fn bound_native(&mut self, native: NativeFn, this: JsValue, args: Vec<JsValue>) -> JsValue {
         let target = self.new_function_object(FunctionObject::Native(native), StaticAtom::Empty.id(), 1);
         let bound = FunctionObject::Bound {
             target,

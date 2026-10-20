@@ -423,7 +423,7 @@ impl Opcode {
             // `count` values become one array / string
             Self::NewArray | Self::TemplateConcat => 1 - operand,
             // callee, this and `argc` arguments become one result
-            Self::Call => -1 - operand,
+            Self::Call | Self::JsxElement => -1 - operand,
             Self::CallSpread => -2,
             // callee and `argc` arguments become one result
             Self::New => -operand,
@@ -432,7 +432,7 @@ impl Opcode {
             Self::SuperCall => 1 - operand,
             Self::SuperCallSpread => 0,
             Self::MakeClass => -1,
-            Self::MakeRegExp | Self::LoadGlobalCallable | Self::LoadGlobalTypeof => 1,
+            Self::MakeRegExp | Self::LoadGlobalCallable | Self::LoadGlobalTypeof | Self::LoadIntrinsic => 1,
             Self::InitialYield => 2,
             Self::Yield => 1,
             Self::ResumeGenerator | Self::DelegateStep => -1,

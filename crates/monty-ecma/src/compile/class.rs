@@ -125,11 +125,8 @@ impl<'c> Compiler<'c> {
                         Self::span_of(&**accessor),
                     ));
                 }
-                ClassElement::TSIndexSignature(signature) => {
-                    return Err(CompileError::unsupported(
-                        "TypeScript syntax",
-                        Self::span_of(&**signature),
-                    ));
+                ClassElement::TSIndexSignature(_) => {
+                    return Err(CompileError::internal("TypeScript syntax survived the transform"));
                 }
             }
         }

@@ -1,6 +1,13 @@
 //! Differential tests for the JavaScript engine: every `crates/monty-ecma/test_cases/*.js`
-//! file runs through `monty-ecma` and through Node, and the two must print the
-//! same text and end the same way (an uncaught `Name: message`, or not).
+//! (or `.ts`, `.jsx`, `.tsx`) file runs through `monty-ecma` and through Node, and
+//! the two must print the same text and end the same way (an uncaught
+//! `Name: message`, or not).
+//!
+//! The extension picks the dialect on both sides: the engine infers it from the
+//! script name, Node strips `.ts` types itself (`--input-type=module-typescript`),
+//! and a `.jsx` / `.tsx` case is lowered for Node with oxc's classic JSX transform
+//! and run with the reference `jsx` / `renderToString` in `jsx_runtime.js`, so the
+//! engine's natives are checked against that JavaScript.
 //!
 //! Cases configure themselves with a `// /// monty` header (see `monty-fixture`).
 //! Run with `make test-js-cases`; `TEST_CASE=<substring>` filters as `cargo test` does.
@@ -21,9 +28,18 @@ use monty_types::{
     CollectedStreams, ExcType, ExtFunctionResult, MontyException, NameLookupResult, NamedValues, PrintStream,
     PrintWriter, ResourceLimits,
 };
+use oxc_allocator::Allocator;
+use oxc_codegen::Codegen;
+use oxc_parser::Parser;
+use oxc_semantic::SemanticBuilder;
+use oxc_span::SourceType;
+use oxc_transformer::{JsxOptions, JsxRuntime, TransformOptions, Transformer};
 use similar::TextDiff;
 
 const TEST_CASES_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../monty-ecma/test_cases");
+
+/// The reference JSX runtime prepended to a lowered `.jsx` / `.tsx` case for Node.
+const JSX_RUNTIME: &str = include_str!("../jsx_runtime.js");
 
 /// How long Node may take on one case before it is killed and the case fails.
 const NODE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -72,7 +88,7 @@ fn run_case(path: &Path) -> Result<(), Box<dyn Error>> {
         "xfail is not allowed in test cases: fix the behaviour instead"
     );
     let monty = run_monty(path, &code);
-    let node = run_node(&code)?;
+    let node = run_node(path, &code)?;
     if monty.stdout != node.stdout {
         return Err(Box::new(Mismatch {
             kind: "stdout",
@@ -156,10 +172,21 @@ fn leaked_entries(_: &mut JsRepl) -> Vec<String> {
 }
 
 /// Runs the case under `node` as an ES module (strict mode and a module
-/// `this`, like the engine), killing it after [`NODE_TIMEOUT`].
-fn run_node(code: &str) -> Result<Outcome, Box<dyn Error>> {
+/// `this`, like the engine), killing it after [`NODE_TIMEOUT`]. TypeScript is
+/// stripped by Node itself; JSX is lowered here first.
+fn run_node(path: &Path, code: &str) -> Result<Outcome, Box<dyn Error>> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("case.js");
+    let extension = name.rsplit_once('.').map_or("js", |(_, ext)| ext);
+    let (input_type, code) = match extension {
+        "ts" => ("--input-type=module-typescript", code.to_owned()),
+        "jsx" | "tsx" => (
+            "--input-type=module",
+            format!("{JSX_RUNTIME}\n{}", lower_jsx(name, code)?),
+        ),
+        _ => ("--input-type=module", code.to_owned()),
+    };
     let mut child = Command::new("node")
-        .args(["--no-warnings", "--input-type=module", "-"])
+        .args(["--no-warnings", input_type, "-"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .env("TZ", "UTC")
@@ -207,19 +234,61 @@ fn run_node(code: &str) -> Result<Outcome, Box<dyn Error>> {
     })
 }
 
+/// Lowers a JSX case to the JavaScript Node runs: types erased, every element
+/// a `jsx(type, props, ...children)` call (`Fragment` for `<>`), as the engine
+/// does internally with the same transformer.
+fn lower_jsx(name: &str, code: &str) -> Result<String, Box<dyn Error>> {
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(name).map_err(|err| err.to_string())?;
+    let parsed = Parser::new(&allocator, code, source_type).parse();
+    if let Some(error) = parsed.diagnostics.errors().next() {
+        return Err(format!("oxc cannot parse the case for Node: {}", error.message).into());
+    }
+    let mut program = parsed.program;
+    let scoping = SemanticBuilder::new().build(&program).semantic.into_scoping();
+    let mut options = TransformOptions::default();
+    options.typescript.jsx_pragma = "jsx".into();
+    options.typescript.jsx_pragma_frag = "Fragment".into();
+    options.jsx = JsxOptions {
+        runtime: JsxRuntime::Classic,
+        pragma: Some("jsx".to_owned()),
+        pragma_frag: Some("Fragment".to_owned()),
+        pure: false,
+        display_name_plugin: false,
+        throw_if_namespace: false,
+        ..JsxOptions::enable()
+    };
+    let transformed = Transformer::new(&allocator, Path::new(name), &options).build_with_scoping(scoping, &mut program);
+    if let Some(error) = transformed.diagnostics.errors().next() {
+        return Err(format!("oxc cannot lower the case for Node: {}", error.message).into());
+    }
+    Ok(Codegen::new().build(&program).code)
+}
+
 /// The `Name: message` line of Node's uncaught-error report: the first line
-/// that names an error class, else the whole report.
+/// that names an error class, else the whole report. Node's own error codes
+/// (`SyntaxError [ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX]: …`) are dropped, since
+/// the engine reports the class alone.
 fn node_error_summary(stderr: &str) -> String {
     stderr
         .lines()
         .map(str::trim_end)
-        .find(|line| {
-            let (name, _) = line.split_once(": ").unwrap_or((line, ""));
-            !name.is_empty()
-                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && (name.ends_with("Error") || *line == "Uncaught")
+        .find_map(|line| {
+            let (name, message) = line.split_once(": ").unwrap_or((line, ""));
+            let (class, code) = name.split_once(" [").unwrap_or((name, ""));
+            let coded = code.is_empty() || code.ends_with(']');
+            let named = !class.is_empty()
+                && class.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && (class.ends_with("Error") || line == "Uncaught");
+            (coded && named).then(|| {
+                if code.is_empty() {
+                    line.to_owned()
+                } else {
+                    format!("{class}: {message}")
+                }
+            })
         })
-        .map_or_else(|| stderr.trim().to_owned(), ToOwned::to_owned)
+        .unwrap_or_else(|| stderr.trim().to_owned())
 }
 
-datatest_stable::harness!(run_case, TEST_CASES_DIR, r"^.*\.js$");
+datatest_stable::harness!(run_case, TEST_CASES_DIR, r"^.*\.(js|jsx|ts|tsx)$");

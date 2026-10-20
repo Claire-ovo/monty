@@ -46,6 +46,10 @@ pub(crate) struct Realm {
     /// `%AsyncFunction.prototype%`: the prototype of every async function object.
     pub async_function_prototype: HeapId,
     pub date_prototype: HeapId,
+    /// The `jsx` function JSX elements lower to (`Opcode::LoadIntrinsic`).
+    pub jsx_function: HeapId,
+    /// `Fragment`: the element type of `<>…</>`.
+    pub jsx_fragment: HeapId,
 }
 
 impl Realm {
@@ -85,6 +89,8 @@ impl Realm {
             self.promise_prototype,
             self.async_function_prototype,
             self.date_prototype,
+            self.jsx_function,
+            self.jsx_fragment,
         ]
         .into_iter()
     }
@@ -126,6 +132,8 @@ impl Realm {
             promise_prototype: zero,
             async_function_prototype: zero,
             date_prototype: zero,
+            jsx_function: zero,
+            jsx_fragment: zero,
         }
     }
 
@@ -149,6 +157,36 @@ impl Realm {
             .iter()
             .copied()
             .find(|kind| self.error_prototype(*kind) == proto)
+    }
+}
+
+/// The intrinsics bytecode names directly, as `Opcode::LoadIntrinsic` operands.
+///
+/// JSX lowers to calls of `jsx` with `Fragment` as a type; loading them by
+/// name would let a script-level `const jsx = …` capture every element, so the
+/// compiler emits these instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum Intrinsic {
+    Jsx = 0,
+    Fragment = 1,
+}
+
+impl Intrinsic {
+    /// Decodes an operand; the compiler only emits the variants above.
+    pub fn from_operand(operand: u8) -> Self {
+        match operand {
+            0 => Self::Jsx,
+            _ => Self::Fragment,
+        }
+    }
+
+    /// The realm's object for this intrinsic (a borrowed id).
+    pub fn id(self, realm: &Realm) -> HeapId {
+        match self {
+            Self::Jsx => realm.jsx_function,
+            Self::Fragment => realm.jsx_fragment,
+        }
     }
 }
 

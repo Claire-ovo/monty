@@ -184,6 +184,9 @@ impl<'c> Compiler<'c> {
                 "'with' statements are not allowed in strict mode",
                 Self::span_of(&**statement),
             )),
+            // the TypeScript transform leaves an empty `export {}` where it
+            // erased every import and export, to keep the file a module
+            Statement::ExportNamedDeclaration(export) if export.specifiers.is_empty() => Ok(()),
             Statement::ImportDeclaration(_)
             | Statement::ExportAllDeclaration(_)
             | Statement::ExportDefaultDeclaration(_)
@@ -193,7 +196,8 @@ impl<'c> Compiler<'c> {
                 "module declarations",
                 Self::span_of(statement),
             )),
-            // TODO(ts-syntax): type-only declarations compile to nothing; enums and namespaces need emission.
+            // the TypeScript transform erases type-only declarations, and
+            // `typescript.rs` rejects the rest before it runs
             Statement::TSTypeAliasDeclaration(_)
             | Statement::TSInterfaceDeclaration(_)
             | Statement::TSEnumDeclaration(_)
@@ -203,7 +207,7 @@ impl<'c> Compiler<'c> {
             | Statement::TSImportEqualsDeclaration(_)
             | Statement::TSExportAssignment(_)
             | Statement::TSNamespaceExportDeclaration(_) => {
-                Err(CompileError::unsupported("TypeScript syntax", Self::span_of(statement)))
+                Err(CompileError::internal("TypeScript syntax survived the transform"))
             }
         }
     }

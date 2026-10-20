@@ -15,6 +15,7 @@ use crate::heap::{HeapReader, JsHeapData};
 use crate::{
     builtins,
     compile::compile,
+    dialect::Dialect,
     error::Throw,
     heap::{Heap, HeapId, ObjectClass},
     intern::{Interns, StaticAtom},
@@ -248,6 +249,7 @@ impl JsRepl {
             realm: Realm::placeholder(),
             script: ScriptScope::default(),
             script_name: script_name.to_owned(),
+            dialect: Dialect::from_script_name(script_name),
             feed_count: 0,
             random_state: 0,
             next_call_id: 1,
@@ -262,6 +264,20 @@ impl JsRepl {
             .check_allocation(0)
             .map_err(|err| JsStartError::Memory(err.to_string()))?;
         Ok(Self { session })
+    }
+
+    /// Parses every feed as TypeScript (or not), whatever the script name's
+    /// extension says; `.tsx` keeps its JSX either way.
+    #[must_use]
+    pub fn with_typescript(mut self, typescript: bool) -> Self {
+        self.session.dialect.typescript = typescript;
+        self
+    }
+
+    /// Whether feeds are parsed as TypeScript.
+    #[must_use]
+    pub fn typescript(&self) -> bool {
+        self.session.dialect.typescript
     }
 
     /// Replaces the clock, sleep and random policies.
@@ -326,7 +342,7 @@ impl JsRepl {
         self.session.feed_count += 1;
         self.session.interns.add_source(code);
         let allocator = Allocator::default();
-        let compiled = match parse(&allocator, code) {
+        let compiled = match parse(&allocator, code, self.session.dialect, &script_name) {
             Ok((program, scoping)) => {
                 let analysis = Analysis::new(&program, scoping);
                 compile(

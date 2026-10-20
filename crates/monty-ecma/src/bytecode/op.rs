@@ -257,6 +257,13 @@ pub(crate) enum Opcode {
     /// Push a global for `typeof`: asks the host for an unknown name and
     /// pushes `undefined` when it has none. Operand: u16 atom.
     LoadGlobalTypeof = 147,
+    /// Pushes a realm intrinsic (`realm::Intrinsic` operand): the `jsx`
+    /// function or `Fragment`, which JSX lowers to and no binding can shadow.
+    LoadIntrinsic = 148,
+    /// A JSX element: pops the type, the props and `operand` children. A
+    /// function type is called from bytecode with its props (so a host call
+    /// inside a component can suspend); anything else goes to the `jsx` native.
+    JsxElement = 149,
 
     // === Generators ===
     /// End of a generator's prologue: suspend the frame into a new generator
@@ -363,6 +370,7 @@ impl Opcode {
             | Self::Nop => OperandShape::None,
             Self::LoadInt | Self::IncDec => OperandShape::I8,
             Self::DefineAccessor | Self::TemplateConcat | Self::Call | Self::New | Self::Yield => OperandShape::U8,
+            Self::LoadIntrinsic | Self::JsxElement => OperandShape::U8,
             Self::SuperCall => OperandShape::U8,
             Self::LoadConst
             | Self::LoadLocal

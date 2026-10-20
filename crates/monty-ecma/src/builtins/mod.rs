@@ -16,6 +16,7 @@ mod function;
 mod generator;
 mod global;
 mod json;
+pub(crate) mod jsx;
 mod math;
 mod number;
 mod object;
@@ -374,6 +375,10 @@ natives! {
     UriError => ("URIError", 1, true, error::uri_error),
     AggregateError => ("AggregateError", 2, true, error::aggregate_error),
     ErrorProtoToString => ("toString", 0, false, error::proto_to_string),
+    // JSX
+    Jsx => ("jsx", 2, false, jsx::jsx),
+    RenderToString => ("renderToString", 1, false, jsx::render_to_string),
+    JsxSettle => ("", 1, false, jsx::settle),
     // globals
     ParseInt => ("parseInt", 2, false, global::parse_int),
     ParseFloat => ("parseFloat", 1, false, global::parse_float),
@@ -427,6 +432,7 @@ pub(crate) fn create_realm(vm: &mut Vm<'_>) {
     math::install(vm, global);
     json::install(vm, global);
     console::install(vm, global);
+    jsx::install(vm, global);
     global::install(vm, global);
 }
 

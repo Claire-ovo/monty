@@ -88,6 +88,10 @@ oxc_semantic = "0.155.0"
 oxc_span = "0.155.0"
 oxc_str = "0.155.0"
 oxc_syntax = "0.155.0"
+# strips TypeScript types and lowers JSX before monty-ecma compiles a feed; the datatest harness also uses it
+# (with oxc_codegen) to produce the JavaScript Node runs for TSX cases
+oxc_transformer = "0.155.0"
+oxc_codegen = "0.155.0"
 # ruff, ty and related crates
 ruff_python_parser = "0.0.14"
 ruff_python_stdlib = "0.0.14"

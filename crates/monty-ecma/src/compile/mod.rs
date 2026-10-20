@@ -24,7 +24,10 @@ use oxc_ast::ast::{
 };
 use oxc_semantic::Scoping;
 use oxc_span::{GetSpan, Span};
-use oxc_syntax::{scope::ScopeId, symbol::SymbolId};
+use oxc_syntax::{
+    scope::ScopeId,
+    symbol::{SymbolFlags, SymbolId},
+};
 
 use crate::{
     bytecode::{CodeBuilder, JumpLabel, Opcode},
@@ -551,7 +554,19 @@ impl<'c> Compiler<'c> {
     /// The symbols a scope declares, in source order so slot numbering is stable.
     fn scope_symbols(&self, scope: ScopeId) -> Vec<SymbolId> {
         let scoping = self.scoping();
-        let mut symbols: Vec<SymbolId> = scoping.get_bindings(scope).values().copied().collect();
+        // TypeScript binds names the transform then erases: types, `declare`d
+        // (ambient) declarations and type-only imports have no runtime slot
+        let mut symbols: Vec<SymbolId> = scoping
+            .get_bindings(scope)
+            .values()
+            .copied()
+            .filter(|symbol| {
+                let flags = scoping.symbol_flags(*symbol);
+                !flags.contains(SymbolFlags::Ambient)
+                    && !flags.is_import()
+                    && (flags.is_value() || flags.is_catch_variable())
+            })
+            .collect();
         symbols.sort_by_key(|symbol| scoping.symbol_span(*symbol).start);
         symbols
     }

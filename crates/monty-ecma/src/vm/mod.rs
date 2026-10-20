@@ -30,13 +30,14 @@ use self::{
     promise::{Job, Timer},
 };
 use crate::{
-    builtins::regexp,
+    builtins::{jsx, regexp},
     bytecode::{Code, Opcode},
+    dialect::Dialect,
     error::{RunResult, Throw, stack_frame},
     function::Function,
     heap::{GeneratorState, Heap, HeapId, JsHeapData, JsObject, MapKey, PropFlags, PropertyKey, Settled, Target},
     intern::{AtomId, FunctionId, Interns, StaticAtom},
-    realm::{ErrorKind, Realm, ScriptScope},
+    realm::{ErrorKind, Intrinsic, Realm, ScriptScope},
     string::JsString,
     value::JsValue,
 };
@@ -56,6 +57,9 @@ pub(crate) struct Session {
     pub realm: Realm,
     pub script: ScriptScope,
     pub script_name: String,
+    /// The syntax every feed is parsed with, fixed by the first script name.
+    #[serde(default)]
+    pub dialect: Dialect,
     /// Feeds run so far; the next feed's index.
     pub feed_count: u32,
     /// `Math.random`'s generator state.
@@ -727,6 +731,11 @@ impl<'p> Vm<'p> {
                 };
                 self.stack.push(value);
             }
+            Opcode::LoadIntrinsic => {
+                let id = Intrinsic::from_operand(self.operand_u8()).id(&self.session.realm);
+                self.session.heap.inc_ref(id);
+                self.stack.push(JsValue::Ref(id));
+            }
             Opcode::LoadGlobalOrUndefined => {
                 let name = AtomId::from_u16(self.operand_u16());
                 let global = self.session.realm.global;
@@ -1162,6 +1171,12 @@ impl<'p> Vm<'p> {
                 let regexp = regexp::create(self, source, &flags)?;
                 self.stack.push(regexp);
             }
+            Opcode::JsxElement => {
+                let count = usize::from(self.operand_u8());
+                let start = self.stack.len() - count - 2;
+                let args: Vec<JsValue> = self.stack.drain(start..).collect();
+                return self.jsx_element(args);
+            }
             Opcode::Call => {
                 let count = usize::from(self.operand_u8());
                 let start = self.stack.len() - count;
@@ -1585,5 +1600,31 @@ impl ContainsHeap for Vm<'_> {
 
     fn heap_mut(&mut self) -> &mut Heap {
         &mut self.session.heap
+    }
+}
+
+impl Vm<'_> {
+    /// `Opcode::JsxElement`: `args` is the type, the props and the children
+    /// (all owned). A component runs as an ordinary bytecode call so that a
+    /// host function it calls can suspend the feed; the other element kinds
+    /// are the `jsx` native's.
+    fn jsx_element(&mut self, mut args: Vec<JsValue>) -> RunResult<Step> {
+        if self.is_callable(&args[0]) {
+            let component = args.remove(0);
+            let props = jsx::component_props(self, &args[0], &args[1..]);
+            self.drop_all(JsValue::Undefined, args);
+            let props = match props {
+                Ok(props) => props,
+                Err(err) => {
+                    component.drop_with(&mut self.session.heap);
+                    return Err(err);
+                }
+            };
+            return self.call_from_bytecode(component, JsValue::Undefined, vec![props]);
+        }
+        let result = jsx::jsx(self, &JsValue::Undefined, &args, false);
+        self.drop_all(JsValue::Undefined, args);
+        self.stack.push(result?);
+        Ok(Step::Continue)
     }
 }

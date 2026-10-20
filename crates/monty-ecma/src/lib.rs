@@ -14,6 +14,7 @@
 mod builtins;
 mod bytecode;
 mod compile;
+mod dialect;
 mod dump;
 mod error;
 mod function;
@@ -26,6 +27,7 @@ mod repl;
 mod resolve;
 mod source_nesting;
 mod string;
+mod typescript;
 mod value;
 mod vm;
 

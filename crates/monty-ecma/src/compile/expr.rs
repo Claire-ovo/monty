@@ -16,6 +16,8 @@ use crate::{
     error::CompileError,
     function::FunctionKind,
     intern::{AtomId, FunctionId, StaticAtom},
+    parse::{JSX_FACTORY, JSX_FRAGMENT},
+    realm::Intrinsic,
     vm::number::number_to_string,
 };
 
@@ -180,17 +182,20 @@ impl<'c> Compiler<'c> {
             Expression::ImportExpression(_) => Err(CompileError::unsupported("dynamic import", Self::span_of(expr))),
             Expression::ImportMeta(_) => Err(CompileError::unsupported("import.meta", Self::span_of(expr))),
             Expression::PrivateInExpression(_) => Err(CompileError::unsupported("private fields", Self::span_of(expr))),
+            // a JSX dialect lowers elements to `JSX_FACTORY` calls before compilation
             Expression::JSXElement(_) | Expression::JSXFragment(_) => {
                 Err(CompileError::unsupported("JSX", Self::span_of(expr)))
             }
-            // TODO(ts-syntax): type-only wrappers compile to their inner expression once TypeScript feeds are accepted.
+            Expression::V8IntrinsicExpression(_) => {
+                Err(CompileError::unsupported("V8 intrinsics", Self::span_of(expr)))
+            }
+            // the TypeScript transform unwraps these before compilation
             Expression::TSAsExpression(_)
             | Expression::TSSatisfiesExpression(_)
             | Expression::TSTypeAssertion(_)
             | Expression::TSNonNullExpression(_)
-            | Expression::TSInstantiationExpression(_)
-            | Expression::V8IntrinsicExpression(_) => {
-                Err(CompileError::unsupported("TypeScript syntax", Self::span_of(expr)))
+            | Expression::TSInstantiationExpression(_) => {
+                Err(CompileError::internal("TypeScript syntax survived the transform"))
             }
         }
     }
@@ -224,6 +229,9 @@ impl<'c> Compiler<'c> {
         }
         match ident.name.as_str() {
             "undefined" => self.builder().emit(Opcode::LoadUndefined),
+            // the names the JSX lowering produces
+            JSX_FACTORY => self.builder().emit_u8(Opcode::LoadIntrinsic, Intrinsic::Jsx as u8),
+            JSX_FRAGMENT => self.builder().emit_u8(Opcode::LoadIntrinsic, Intrinsic::Fragment as u8),
             "arguments" => match self.resolve_arguments()? {
                 Some(Place::Local(slot)) => self.builder().emit_u16(Opcode::LoadLocal, slot),
                 Some(Place::Cell(slot)) => self.builder().emit_u16(Opcode::LoadCell, slot),
@@ -302,10 +310,11 @@ impl<'c> Compiler<'c> {
         } else {
             kind
         };
+        // overload signatures and `declare` functions have no body; the TypeScript transform removes them
         let body = function
             .body
             .as_ref()
-            .ok_or_else(|| CompileError::unsupported("TypeScript syntax", Self::span_of(function)))?;
+            .ok_or_else(|| CompileError::internal("TypeScript syntax survived the transform"))?;
         let scope = scope_of(&function.scope_id)?;
         let self_symbol = match (function.is_expression(), &function.id) {
             (true, Some(id)) => Some(symbol_of(id)?),
@@ -393,6 +402,15 @@ impl<'c> Compiler<'c> {
 
     /// `callee this args… Call n`, with the receiver of a method call.
     fn compile_call(&mut self, call: &'c CallExpression<'c>) -> Result<(), CompileError> {
+        if self.is_jsx_factory_call(call) {
+            // a lowered element: `JsxElement` calls a component from bytecode
+            for argument in &call.arguments {
+                self.compile_expression(argument.to_expression())?;
+            }
+            self.locate(call.span);
+            let children = u8::try_from(call.arguments.len() - 2).expect("checked by is_jsx_factory_call");
+            return self.builder().emit_u8(Opcode::JsxElement, children);
+        }
         match &call.callee {
             Expression::StaticMemberExpression(_)
             | Expression::ComputedMemberExpression(_)
@@ -419,6 +437,12 @@ impl<'c> Compiler<'c> {
                 self.emit_optional_link(call.optional, 2)?;
             }
             Expression::Super(_) => return self.compile_super_call(call),
+            Expression::Identifier(ident) if ident.name.as_str() == JSX_FACTORY && self.is_unbound_global(ident) => {
+                // a lowered JSX element: the realm's `jsx`, whatever `jsx` the script declares
+                self.builder().emit_u8(Opcode::LoadIntrinsic, Intrinsic::Jsx as u8)?;
+                self.emit_optional_link(call.optional, 1)?;
+                self.builder().emit(Opcode::LoadUndefined)?;
+            }
             Expression::Identifier(ident) if self.is_unbound_global(ident) => {
                 // an undeclared name that is called becomes a host function
                 let resolved = self.resolve_unbound(ident.name.as_str());
@@ -444,6 +468,19 @@ impl<'c> Compiler<'c> {
             self.builder().set_callee(callee);
             self.builder().emit_u8(Opcode::Call, count)
         }
+    }
+
+    /// Whether a call is the JSX lowering's `__monty_jsx(type, props, ...children)`
+    /// in the shape `Opcode::JsxElement` takes; other shapes call the intrinsic.
+    fn is_jsx_factory_call(&mut self, call: &CallExpression<'c>) -> bool {
+        let Expression::Identifier(ident) = &call.callee else {
+            return false;
+        };
+        ident.name.as_str() == JSX_FACTORY
+            && !call.optional
+            && !has_spread(&call.arguments)
+            && (2..=257).contains(&call.arguments.len())
+            && self.is_unbound_global(ident)
     }
 
     /// `super(...)` in a derived constructor: constructs the parent and
@@ -533,7 +570,7 @@ impl<'c> Compiler<'c> {
         let result = match &chain.expression {
             ChainElement::CallExpression(call) => self.compile_call(call),
             ChainElement::TSNonNullExpression(_) => {
-                Err(CompileError::unsupported("TypeScript syntax", Self::span_of(chain)))
+                Err(CompileError::internal("TypeScript syntax survived the transform"))
             }
             member => {
                 let member = member.to_member_expression();
