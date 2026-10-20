@@ -263,12 +263,12 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Str> {
         Type::Str
     }
 
-    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<Value> {
-        Ok(StringIterator::from_heap(
+    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<CallResult> {
+        Ok(CallResult::Value(StringIterator::from_heap(
             self.id(),
             self.get(vm.heap).as_str().is_ascii(),
             vm,
-        ))
+        )))
     }
 
     fn py_len_impl(&self, vm: &mut VM<'h>) -> RunResult<Option<i64>> {
@@ -571,7 +571,7 @@ fn str_join<'h>(separator: &impl HeapView<'h, str>, iterable: Value, vm: &mut VM
         iterable.drop_with(vm);
         return Err(ExcType::type_error_join_not_iterable());
     }
-    let iter = iterable.into_py_iter(vm)?;
+    let iter = iterable.into_py_iter(vm)?.require_synchronous(vm)?;
     defer_drop!(iter, vm);
     let mut iter = iter.read(vm);
 
@@ -1568,7 +1568,8 @@ fn str_center<'h>(s: &impl HeapView<'h, str>, args: ArgValues, vm: &mut VM<'h>) 
         let total_pad = width - len;
         let capacity = s.len().saturating_add(total_pad.saturating_mul(fillchar.len_utf8()));
         let mut builder = StringBuilder::with_capacity(capacity, &vm.heap.tracker)?;
-        let left_pad = total_pad / 2;
+        // CPython puts the odd fill unit on the left only when `width` is also odd.
+        let left_pad = total_pad / 2 + (total_pad & width & 1);
         let right_pad = total_pad - left_pad;
         for _ in 0..left_pad {
             builder.push(fillchar)?;
@@ -1953,8 +1954,8 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, StringIterator> {
         Ok(None)
     }
 
-    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<Value> {
-        Ok(self.clone_value(vm.heap))
+    fn py_iter(&self, vm: &mut VM<'h>) -> RunResult<CallResult> {
+        Ok(CallResult::Value(self.clone_value(vm.heap)))
     }
 
     fn py_next(&mut self, vm: &mut VM<'h>) -> RunResult<Option<Value>> {
