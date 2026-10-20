@@ -357,7 +357,8 @@ impl<'h> HeapRead<'h, SetStorage> {
             Some(HeapReadOutput::FrozenSet(other)) => self.compare_storage(&other.storage(), op, vm),
             Some(view @ (HeapReadOutput::DictKeysView(_) | HeapReadOutput::DictItemsView(_))) => {
                 let lhs_len = self.get(vm.heap).len();
-                let rhs_len = view.py_len(vm).expect("dict views have a length");
+                let rhs_len = usize::try_from(view.py_len_impl(vm)?.expect("dict views have a length"))
+                    .expect("dict view length fits usize");
                 let possible = match op {
                     CmpOperator::Lt => lhs_len < rhs_len,
                     CmpOperator::LtE => lhs_len <= rhs_len,
@@ -1143,8 +1144,10 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Set> {
         Ok(SetIterator::from_set(self.id(), self.get(vm.heap).len(), vm))
     }
 
-    fn py_len(&self, vm: &VM<'h>) -> Option<usize> {
-        Some(self.get(vm.heap).len())
+    fn py_len_impl(&self, vm: &mut VM<'h>) -> RunResult<Option<i64>> {
+        i64::try_from(self.get(vm.heap).len())
+            .map(Some)
+            .map_err(|_| ExcType::overflow_c_ssize_t())
     }
 
     fn py_cmp_op(&self, other: &Value, op: CmpOperator, vm: &mut VM<'h>) -> RunResult<Option<bool>> {
@@ -1456,8 +1459,10 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, FrozenSet> {
         Ok(SetIterator::from_frozen_set(self.id(), self.get(vm.heap).len(), vm))
     }
 
-    fn py_len(&self, vm: &VM<'h>) -> Option<usize> {
-        Some(self.get(vm.heap).len())
+    fn py_len_impl(&self, vm: &mut VM<'h>) -> RunResult<Option<i64>> {
+        i64::try_from(self.get(vm.heap).len())
+            .map(Some)
+            .map_err(|_| ExcType::overflow_c_ssize_t())
     }
 
     fn py_cmp_op(&self, other: &Value, op: CmpOperator, vm: &mut VM<'h>) -> RunResult<Option<bool>> {
@@ -1732,10 +1737,6 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, SetIterator> {
 
     fn py_type(&self, _: &VM<'h>) -> Type {
         Type::SetIterator
-    }
-
-    fn py_len(&self, _: &VM<'h>) -> Option<usize> {
-        None
     }
 
     fn py_eq_impl(&self, _: &Value, _: &mut VM<'h>) -> RunResult<Option<bool>> {

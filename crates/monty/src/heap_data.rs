@@ -490,10 +490,6 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Closure> {
         Type::Function
     }
 
-    fn py_len(&self, _: &VM<'h>) -> Option<usize> {
-        None
-    }
-
     /// Two closures over the same `def` are equal only if they captured the
     /// same cells; the defaults play no part, as in CPython.
     fn py_eq_impl(&self, other: &Value, vm: &mut VM<'h>) -> RunResult<Option<bool>> {
@@ -532,10 +528,6 @@ impl<'h> PyTrait<'h> for HeapObjectRead<'h, Closure> {
 impl<'h> PyTrait<'h> for HeapObjectRead<'h, FunctionDefaults> {
     fn py_type(&self, _: &VM<'h>) -> Type {
         Type::Function
-    }
-
-    fn py_len(&self, _: &VM<'h>) -> Option<usize> {
-        None
     }
 
     /// Equal when they decorate the same `def`: with no captured scope, the
@@ -949,8 +941,8 @@ impl<'h> PyTrait<'h> for HeapReadOutput<'h> {
         )
     }
 
-    fn py_len(&self, vm: &VM<'h>) -> Option<usize> {
-        heap_read_output_py_trait_forward!(self, |value| value.py_len(vm), else None)
+    fn py_len_impl(&self, vm: &mut VM<'h>) -> RunResult<Option<i64>> {
+        heap_read_output_py_trait_forward!(self, |value| value.py_len_impl(vm), else Ok(None))
     }
 
     fn py_eq_impl(&self, other: &Value, vm: &mut VM<'h>) -> RunResult<Option<bool>> {

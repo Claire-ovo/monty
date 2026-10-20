@@ -253,6 +253,49 @@ fn external_function_in_next_raises_not_implemented() {
     "#);
 }
 
+/// Length and truthiness hooks reject host calls at the synchronous boundary;
+/// handlers inside the hook and around its caller can both catch the error.
+#[test]
+fn truthiness_hooks_cannot_suspend() {
+    for (slot, invocation, fallback) in [
+        ("__len__", "len(obj)", "0"),
+        ("__len__", "bool(obj)", "0"),
+        ("__bool__", "bool(obj)", "False"),
+    ] {
+        let code = format!(
+            "\
+class Subject:
+    def {slot}(self):
+        if self.catch_inside:
+            try:
+                ext_fn()
+            except NotImplementedError as exc:
+                messages.append(str(exc))
+                return {fallback}
+        return ext_fn()
+messages = []
+obj = Subject()
+obj.catch_inside = True
+{invocation}
+obj.catch_inside = False
+try:
+    {invocation}
+except NotImplementedError as exc:
+    messages.append(str(exc))
+messages"
+        );
+        let mut runner = MontyRun::new(code, "test.py", vec!["ext_fn".to_owned()], CompileOptions::default()).unwrap();
+        let result = runner
+            .run_no_limits(vec![MontyObject::function("ext_fn".to_owned(), None)])
+            .unwrap();
+        let message = format!("{slot}: external function 'ext_fn' is not yet supported in this context");
+        assert_eq!(
+            result,
+            MontyObject::list([MontyObject::string(message.clone()), MontyObject::string(message)])
+        );
+    }
+}
+
 /// Rejected suspensions are raised inside the key function's frame, where an
 /// ordinary `try`/`except` can catch them and let the sort complete.
 #[test]
