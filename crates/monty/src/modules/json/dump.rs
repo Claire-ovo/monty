@@ -5,10 +5,7 @@
 //! the whole document first and hands it to the file object in one write
 //! (see [`FileTarget`]).
 
-use std::{
-    cmp::Ordering,
-    fmt::{Display, Write},
-};
+use std::{cmp::Ordering, fmt::Write};
 
 use super::fp::FileTarget;
 use crate::{
@@ -16,9 +13,10 @@ use crate::{
     bytecode::{CallResult, ContainsVM, VM},
     defer_drop, defer_drop_mut,
     exception_private::{ExcType, ExcTypeExt, RunError, RunResult},
-    heap::{ContainsHeap, DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapRead, HeapReadOutput},
+    heap::{ContainsHeap, DropGuard, DropWithContext, Heap, HeapData, HeapId, HeapRead},
+    py_value::PyValue,
     sorting::{apply_permutation, sort_indices},
-    types::{Dict, PyTrait, long_int::check_bigint_str_digits_limit, str::allocate_string},
+    types::{Dict, PyTrait, str::allocate_string},
     value::Value,
 };
 
@@ -339,20 +337,14 @@ fn apply_bool_flag(flags: u8, bit: u8, value: &Value, vm: &mut VM<'_>) -> RunRes
 /// any other value becomes CPython's `' ' * indent`: integers give that many
 /// spaces (none when zero or negative) and other types raise its `TypeError`.
 fn parse_indent_value(value: &Value, vm: &mut VM<'_>) -> RunResult<Option<String>> {
-    match value {
-        Value::None => Ok(None),
-        Value::Bool(flag) => spaces_from_indent_count(i64::from(*flag)),
-        Value::Int(count) => spaces_from_indent_count(*count),
-        Value::InternString(string_id) => Ok(Some(vm.interns.get_str(*string_id).to_owned())),
-        Value::Ref(heap_id) => match vm.heap.read(*heap_id) {
-            HeapReadOutput::Str(string) => Ok(Some(string.get(vm.heap).as_str().to_owned())),
-            HeapReadOutput::LongInt(long_int) => {
-                let count = long_int.get(vm.heap).to_i64();
-                spaces_from_indent_count(count.ok_or_else(ExcType::overflow_index_sized_int)?)
-            }
-            _ => Err(ExcType::type_error_multiply_sequence(&value.py_type_name(vm))),
-        },
-        _ => Err(ExcType::type_error_multiply_sequence(&value.py_type_name(vm))),
+    match value.py_value(vm) {
+        PyValue::None => Ok(None),
+        PyValue::Bool(value) => spaces_from_indent_count(i64::from(value)),
+        PyValue::Int(integer) => {
+            spaces_from_indent_count(integer.to_i64(vm).ok_or_else(ExcType::overflow_index_sized_int)?)
+        }
+        PyValue::Str(value) => Ok(Some(value.as_str(vm).to_owned())),
+        _ => Err(ExcType::type_error_sequence_repeat(value.py_type_name(vm))),
     }
 }
 
@@ -493,91 +485,70 @@ impl<'h> Encoder<'_, 'h> {
     /// Handles immediate primitives directly and delegates to type-specific
     /// helpers for strings, long integers, lists, tuples, and dicts.
     fn serialize_value(&mut self, value: &Value, depth: usize) -> RunResult<()> {
+        let view = value.py_value(self.vm);
         // Strings size their own check, and containers check per item.
-        if !matches!(value, Value::InternString(_) | Value::Ref(_)) {
+        if matches!(
+            view,
+            PyValue::None | PyValue::Bool(_) | PyValue::Int(_) | PyValue::Float(_)
+        ) {
             self.check_output_growth(0)?;
         }
-        match value {
-            Value::None => {
+        match view {
+            PyValue::None => {
                 self.out.push_str("null");
                 Ok(())
             }
-            Value::Bool(true) => {
+            PyValue::Bool(true) => {
                 self.out.push_str("true");
                 Ok(())
             }
-            Value::Bool(false) => {
+            PyValue::Bool(false) => {
                 self.out.push_str("false");
                 Ok(())
             }
-            Value::Int(value) => {
-                write!(self.out, "{value}").expect("writing to String cannot fail");
+            PyValue::Int(integer) => integer.write_decimal(self.out, self.vm),
+            PyValue::Float(value) => serialize_float(value, self.out, self.config),
+            PyValue::Str(string) => {
+                self.check_output_growth(string.as_str(self.vm).len())?;
+                write_json_string(string.as_str(self.vm), self.out, self.config.ensure_ascii());
                 Ok(())
             }
-            Value::Float(value) => serialize_float(*value, self.out, self.config),
-            Value::InternString(string_id) => {
-                let string = self.vm.interns.get_str(*string_id);
-                self.check_output_growth(string.len())?;
-                write_json_string(string, self.out, self.config.ensure_ascii());
-                Ok(())
+            PyValue::List(list) => self.with_entered_container(list.id(), |enc| {
+                let iter = list.iter(enc.vm)?;
+                defer_drop_mut!(iter, enc);
+                enc.serialize_array(depth, |enc, depth| {
+                    if let Some(item) = iter.next(enc.vm)? {
+                        enc.serialize_value(item, depth)?;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                })
+            }),
+            PyValue::Tuple(tuple) => self.with_entered_container(tuple.id(), |enc| {
+                let iter = tuple.iter(enc.vm)?;
+                defer_drop_mut!(iter, enc);
+                enc.serialize_array(depth, |enc, depth| {
+                    if let Some(item) = iter.next(enc.vm)? {
+                        enc.serialize_value(item, depth)?;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                })
+            }),
+            PyValue::Dict(dict) => {
+                // Dict pre-materializes entries because `sort_keys` and
+                // `skipkeys` need to mutate the entries vector before output.
+                let entries = self.collect_dict_entries(&dict);
+                let this = self;
+                defer_drop_mut!(entries, this);
+                // Need to explicitly acquire a recursion token for the dict as we don't go
+                // via the default dict iterator.
+                let token = this.vm.recursion_token()?;
+                defer_drop!(token, this);
+                this.with_entered_container(dict.id(), |enc| enc.serialize_dict(entries, depth))
             }
-            Value::InternLongInt(long_int_id) => {
-                let value = self.vm.interns.get_long_int(*long_int_id);
-                check_bigint_str_digits_limit(value)?;
-                write!(self.out, "{value}").expect("writing to String cannot fail");
-                Ok(())
-            }
-            Value::Ref(heap_id) => match self.vm.heap.read(*heap_id) {
-                HeapReadOutput::Str(string) => {
-                    self.check_output_growth(string.get(self.vm.heap).as_str().len())?;
-                    write_json_string(string.get(self.vm.heap).as_str(), self.out, self.config.ensure_ascii());
-                    Ok(())
-                }
-                HeapReadOutput::LongInt(long_int) => {
-                    long_int.get(self.vm.heap).check_str_digits_limit()?;
-                    self.check_output_growth(0)?;
-                    write!(self.out, "{}", long_int.get(self.vm.heap).inner()).expect("writing to String cannot fail");
-                    Ok(())
-                }
-                HeapReadOutput::List(list) => self.with_entered_container(*heap_id, |enc| {
-                    let iter = list.iter(enc.vm)?;
-                    defer_drop_mut!(iter, enc);
-                    enc.serialize_array(depth, |enc, depth| {
-                        if let Some(item) = iter.next(enc.vm)? {
-                            enc.serialize_value(item, depth)?;
-                            Ok(true)
-                        } else {
-                            Ok(false)
-                        }
-                    })
-                }),
-                HeapReadOutput::Tuple(tuple) => self.with_entered_container(*heap_id, |enc| {
-                    let iter = tuple.iter(enc.vm)?;
-                    defer_drop_mut!(iter, enc);
-                    enc.serialize_array(depth, |enc, depth| {
-                        if let Some(item) = iter.next(enc.vm)? {
-                            enc.serialize_value(item, depth)?;
-                            Ok(true)
-                        } else {
-                            Ok(false)
-                        }
-                    })
-                }),
-                HeapReadOutput::Dict(dict) => {
-                    // Dict pre-materializes entries because `sort_keys` and
-                    // `skipkeys` need to mutate the entries vector before
-                    // output.
-                    let entries = self.collect_dict_entries(&dict);
-                    let this = self;
-                    defer_drop_mut!(entries, this);
-                    // Need to explicitly acquire a recursion token for the dict as we don't go
-                    // via the default dict iterator.
-                    let token = this.vm.recursion_token()?;
-                    defer_drop!(token, this);
-                    this.with_entered_container(*heap_id, |enc| enc.serialize_dict(entries, depth))
-                }
-                _ => Err(ExcType::json_not_serializable_error(&value.py_type_name(self.vm))),
-            },
             _ => Err(ExcType::json_not_serializable_error(&value.py_type_name(self.vm))),
         }
     }
@@ -763,9 +734,9 @@ fn skip_disallowed_dict_keys(entries: &mut Vec<(Value, Value)>, vm: &mut VM<'_>)
 /// coerces the non-string cases to JSON strings during output.
 fn is_json_key_allowed(value: &Value, vm: &VM<'_>) -> bool {
     matches!(
-        value,
-        Value::None | Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::InternString(_)
-    ) || matches!(value, Value::Ref(heap_id) if matches!(vm.heap.get(*heap_id), HeapData::Str(_) | HeapData::LongInt(_)))
+        value.py_value(vm),
+        PyValue::None | PyValue::Bool(_) | PyValue::Int(_) | PyValue::Float(_) | PyValue::Str(_)
+    )
 }
 
 /// Serializes a dict key by applying CPython's JSON key coercions.
@@ -774,23 +745,17 @@ fn is_json_key_allowed(value: &Value, vm: &VM<'_>) -> bool {
 /// then escaped as a JSON string token.
 fn write_json_key(key: &Value, out: &mut String, config: &JsonDumpsConfig, vm: &VM<'_>) -> RunResult<()> {
     let ensure_ascii = config.ensure_ascii();
-    match key {
-        Value::None => write_json_ascii_key("null", out),
-        Value::Bool(true) => write_json_ascii_key("true", out),
-        Value::Bool(false) => write_json_ascii_key("false", out),
-        Value::Int(value) => write_json_display_key(value, out),
-        Value::Float(value) => {
-            serialize_float_key(*value, out, config)?;
+    match key.py_value(vm) {
+        PyValue::None => write_json_ascii_key("null", out),
+        PyValue::Bool(true) => write_json_ascii_key("true", out),
+        PyValue::Bool(false) => write_json_ascii_key("false", out),
+        PyValue::Int(integer) => {
+            out.push('"');
+            integer.write_decimal(out, vm)?;
+            out.push('"');
         }
-        Value::InternString(string_id) => write_json_string(vm.interns.get_str(*string_id), out, ensure_ascii),
-        Value::Ref(heap_id) => match vm.heap.get(*heap_id) {
-            HeapData::Str(string) => write_json_string(string.as_str(), out, ensure_ascii),
-            HeapData::LongInt(long_int) => {
-                long_int.check_str_digits_limit()?;
-                write_json_display_key(long_int.inner(), out);
-            }
-            _ => return Err(ExcType::json_invalid_key_error(&key.py_type_name(vm))),
-        },
+        PyValue::Float(value) => serialize_float_key(value, out, config)?,
+        PyValue::Str(value) => write_json_string(value.as_str(vm), out, ensure_ascii),
         _ => return Err(ExcType::json_invalid_key_error(&key.py_type_name(vm))),
     }
     Ok(())
@@ -805,16 +770,6 @@ fn write_json_key(key: &Value, out: &mut String, config: &JsonDumpsConfig, vm: &
 fn write_json_ascii_key(value: &str, out: &mut String) {
     out.push('"');
     out.push_str(value);
-    out.push('"');
-}
-
-/// Writes a displayable value as a quoted JSON object key.
-///
-/// The caller is responsible for ensuring the formatted output is ASCII-safe
-/// and does not require JSON string escaping.
-fn write_json_display_key(value: impl Display, out: &mut String) {
-    out.push('"');
-    write!(out, "{value}").expect("writing to String cannot fail");
     out.push('"');
 }
 

@@ -667,6 +667,7 @@ impl MontyTypeExt for MontyType {
             Self::Partial => Type::Partial,
             Self::GenericAlias => Type::GenericAlias,
             Self::Union => Type::Union,
+            Self::LruCacheWrapper => Type::LruCacheWrapper,
             Self::Tuple => Type::Tuple,
             Self::NamedTuple => Type::NamedTuple,
             Self::Dict => Type::Dict,
@@ -763,6 +764,7 @@ impl MontyTypeExt for MontyType {
             Type::Partial => Self::Partial,
             Type::GenericAlias => Self::GenericAlias,
             Type::Union => Self::Union,
+            Type::LruCacheWrapper => Self::LruCacheWrapper,
             Type::Random
             | Type::HashlibHash
             | Type::HashlibHashXof
@@ -1100,7 +1102,7 @@ fn intern_host_class_type(
     match vm.heap.resolve_host_type(&type_id) {
         Some(class_id) => {
             vm.heap.inc_ref(class_id);
-            let HeapReadOutput::HostClassType(mut ty) = vm.heap.read(class_id) else {
+            let HeapReadOutput::HostClassType(ty) = vm.heap.read(class_id) else {
                 unreachable!("host_type_index points at a non-host-class-type entry");
             };
             let replaced = (!attrs.is_empty()).then_some(attrs);

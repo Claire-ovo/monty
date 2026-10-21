@@ -9,11 +9,39 @@ use crate::{
     defer_drop,
     exception_private::{ExcType, ExcTypeExt, ExceptionRaise, RawStackFrame, RunError, RunResult, SimpleException},
     expressions::CmpOperator,
-    heap::{DropGuard, HeapData},
+    heap::{ContainsHeap, DropGuard, DropWithContext, HeapData},
     intern::{StaticStrings, StringId},
     types::{LazyHeapSet, PyTrait, Type},
     value::Value,
 };
+
+/// An active exception, preserving its traceback across invisible implementation handlers.
+/// Ordinary entries keep the existing serialized `Value` shape for upstream dump compatibility.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub(super) enum CaughtException {
+    /// An exception handled by user code, retaining its existing dump representation.
+    Value(Value),
+    /// An internal handler must not replace the original traceback when its match fails.
+    Frozen { value: Value, error: Box<ExceptionRaise> },
+}
+
+impl CaughtException {
+    /// Borrows the exception object without exposing its internal traceback metadata.
+    fn value(&self) -> &Value {
+        match self {
+            Self::Value(value) | Self::Frozen { value, .. } => value,
+        }
+    }
+}
+
+impl<C: ContainsHeap> DropWithContext<C> for CaughtException {
+    fn drop_with(self, ctx: &mut C) {
+        match self {
+            Self::Value(value) | Self::Frozen { value, .. } => value.drop_with(ctx),
+        }
+    }
+}
 
 /// Whether exception handling finished or must continue in a newly activated task.
 enum ExceptionHandlingResult {
@@ -53,6 +81,13 @@ impl VM<'_> {
         frame
     }
 
+    /// Returns whether the active frame implements a builtin in frozen Python.
+    pub(super) fn current_frame_is_frozen(&self) -> bool {
+        self.current_frame()
+            .function_id
+            .is_some_and(|id| self.interns.is_internal_function(id))
+    }
+
     /// Attaches initial frame information to an error if it doesn't have any.
     ///
     /// Only sets the innermost frame if the exception doesn't already have one.
@@ -64,7 +99,7 @@ impl VM<'_> {
     fn attach_frame_to_error(&self, error: RunError) -> RunError {
         match error {
             RunError::Exc(mut exc) => {
-                if exc.frame.is_none() {
+                if exc.frame.is_none() && !self.current_frame_is_frozen() {
                     let mut frame = self.make_stack_frame();
                     // Use the hide_caret flag from the error (set by error creators)
                     frame.hide_caret = exc.hide_caret;
@@ -73,7 +108,7 @@ impl VM<'_> {
                 RunError::Exc(exc)
             }
             RunError::UncatchableExc(mut exc) => {
-                if exc.frame.is_none() {
+                if exc.frame.is_none() && !self.current_frame_is_frozen() {
                     let mut frame = self.make_stack_frame();
                     frame.hide_caret = exc.hide_caret;
                     exc.frame = Some(Box::new(frame));
@@ -107,15 +142,38 @@ impl VM<'_> {
             _ => SimpleException::new_msg(ExcType::TypeError, "exceptions must derive from BaseException"),
         };
 
-        let mut frame = self.make_stack_frame();
-        frame.hide_caret = is_raise;
+        let frame = (!self.current_frame_is_frozen()).then(|| {
+            let mut frame = self.make_stack_frame();
+            frame.hide_caret = is_raise;
+            Box::new(frame)
+        });
 
         RunError::Exc(ExceptionRaise {
             exc: simple_exc,
-            frame: Some(Box::new(frame)),
+            frame,
             snippet_frame: None,
             hide_caret: false,
         })
+    }
+
+    /// Re-raises the active exception without replacing a user traceback with an internal handler.
+    pub(super) fn reraise_exception(&mut self) -> (RunError, Option<Value>) {
+        if let Some(caught) = self.exception_stack.last() {
+            let raised = caught.value().clone_with_heap(self.heap);
+            let error = if self.current_frame_is_frozen()
+                && let CaughtException::Frozen { error, .. } = caught
+            {
+                RunError::Exc((**error).clone())
+            } else {
+                self.make_exception(&raised, true)
+            };
+            (error, Some(raised))
+        } else {
+            (
+                SimpleException::new_msg(ExcType::RuntimeError, "No active exception to reraise").into(),
+                None,
+            )
+        }
     }
 
     /// Runs fused bare `assert test`.
@@ -228,11 +286,14 @@ impl VM<'_> {
 
     /// Creates an `AssertionError` raised at the current source position.
     fn assertion_error(&self, msg: Option<String>) -> RunError {
-        let mut frame = self.make_stack_frame();
-        frame.hide_caret = true;
+        let frame = (!self.current_frame_is_frozen()).then(|| {
+            let mut frame = self.make_stack_frame();
+            frame.hide_caret = true;
+            Box::new(frame)
+        });
         RunError::Exc(ExceptionRaise {
             exc: SimpleException::new(ExcType::AssertionError, msg),
-            frame: Some(Box::new(frame)),
+            frame,
             snippet_frame: None,
             hide_caret: false,
         })
@@ -341,7 +402,18 @@ impl VM<'_> {
                 // Push exception onto the exception_stack for bare raise.
                 // This allows nested except handlers to restore outer
                 // exception context.
-                this.exception_stack.push(exc_value);
+                let caught = if this.current_frame_is_frozen() {
+                    let RunError::Exc(error) = error else {
+                        unreachable!("only catchable exceptions enter handlers")
+                    };
+                    CaughtException::Frozen {
+                        value: exc_value,
+                        error: Box::new(error),
+                    }
+                } else {
+                    CaughtException::Value(exc_value)
+                };
+                this.exception_stack.push(caught);
 
                 // Jump to handler
                 this.current_frame_mut().ip = handler_offset;
@@ -382,7 +454,9 @@ impl VM<'_> {
             // Add caller frame info to traceback (if we have a call site).
             // Resolve the offset now — against the caller, which is the current
             // frame after the pop above.
-            if let Some(off) = call_offset {
+            if let Some(off) = call_offset
+                && !this.current_frame_is_frozen()
+            {
                 let frame = this.stack_frame_at(off as usize);
                 match &mut error {
                     RunError::Exc(exc) | RunError::UncatchableExc(exc) => exc.add_caller_frame(frame),
@@ -410,7 +484,9 @@ impl VM<'_> {
 
             // Add caller frame info to traceback. Resolve the offset against the
             // caller, which is the current frame after the pop above.
-            if let Some(off) = call_offset {
+            if let Some(off) = call_offset
+                && !self.current_frame_is_frozen()
+            {
                 let frame = self.stack_frame_at(off as usize);
                 match &mut error {
                     RunError::Exc(exc) | RunError::UncatchableExc(exc) => exc.add_caller_frame(frame),

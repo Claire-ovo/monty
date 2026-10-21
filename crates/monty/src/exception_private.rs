@@ -14,6 +14,7 @@ use crate::{
     heap::{DropWithContext, HeapData, HeapRead},
     intern::{Interns, StaticStrings, StringId},
     parse::CodeRange,
+    py_value::PyValue,
     source_map::{ResolvedLocation, SourceMap, StackFrameExt},
     types::{
         PyTrait, Type, allocate_tuple,
@@ -1117,18 +1118,6 @@ pub(crate) trait ExcTypeExt: Sized {
         SimpleException::new_msg(ExcType::TypeError, format!("cannot create '{type_}' instances")).into()
     }
 
-    /// Creates a TypeError for repeating a sequence by a non-integer count.
-    ///
-    /// Matches CPython's format: `TypeError: can't multiply sequence by non-int of type '{type}'`
-    #[must_use]
-    fn type_error_multiply_sequence(type_: &str) -> RunError {
-        SimpleException::new_msg(
-            ExcType::TypeError,
-            format!("can't multiply sequence by non-int of type '{type_}'"),
-        )
-        .into()
-    }
-
     /// Creates a TypeError for calling a non-callable object.
     ///
     /// Matches CPython's format: `TypeError: '{type}' object is not callable`
@@ -1229,20 +1218,6 @@ pub(crate) trait ExcTypeExt: Sized {
         Self::value_error("Step for islice() must be a positive integer or None.")
     }
 
-    /// Creates the TypeError `functools.reduce` raises when the iterable is
-    /// empty and no `initial` was given, so there is nothing to return.
-    #[must_use]
-    fn reduce_empty_iterable() -> RunError {
-        Self::type_error("reduce() of empty iterable with no initial value")
-    }
-
-    /// Creates the TypeError `functools.reduce` raises for a second argument
-    /// that cannot be iterated, replacing the generic not-iterable wording.
-    #[must_use]
-    fn reduce_not_iterable() -> RunError {
-        Self::type_error("reduce() arg 2 must support iteration")
-    }
-
     /// Creates the TypeError `functools.partial()` raises when called with no
     /// positional argument, so there is no callable to wrap.
     #[must_use]
@@ -1336,6 +1311,24 @@ pub(crate) trait ExcTypeExt: Sized {
             format!("int() argument must be a string, a bytes-like object or a real number, not '{type_}'"),
         )
         .into()
+    }
+
+    /// Reports an absent rounding or truncation hook without coercing the operand.
+    #[must_use]
+    fn type_error_missing_numeric_dunder(type_: &str, dunder: &str) -> RunError {
+        Self::type_error(format!("type {type_} doesn't define {dunder} method"))
+    }
+
+    /// Reports an invalid result from an integer conversion hook.
+    #[must_use]
+    fn type_error_non_int_return(dunder: &str, type_: &str) -> RunError {
+        Self::type_error(format!("{dunder} returned non-int (type {type_})"))
+    }
+
+    /// Reports a non-numeric argument to a real-valued math function.
+    #[must_use]
+    fn type_error_not_real_number(type_: &str) -> RunError {
+        Self::type_error(format!("must be real number, not {type_}"))
     }
 
     /// Creates a TypeError for float() constructor with invalid type.
@@ -1622,6 +1615,12 @@ pub(crate) trait ExcTypeExt: Sized {
         SimpleException::new_msg(ExcType::NotImplementedError, msg)
     }
 
+    /// Reports a host call rejected by a synchronous VM boundary; the traceback identifies the caller.
+    #[must_use]
+    fn not_implemented_synchronous_call(kind: &str, name: &str) -> SimpleException {
+        Self::not_implemented(format!("{kind} '{name}' cannot suspend in this synchronous context"))
+    }
+
     /// Creates a ZeroDivisionError for division by zero.
     ///
     /// Matches CPython 3.14's format: `ZeroDivisionError('division by zero')`
@@ -1834,6 +1833,12 @@ pub(crate) trait ExcTypeExt: Sized {
             format!("unsupported operand type(s) for {op}: '{lhs_name}' and '{rhs_name}'")
         };
         SimpleException::new_msg(ExcType::TypeError, message).into()
+    }
+
+    /// Reports an invalid repetition count after both multiplication implementations decline.
+    #[must_use]
+    fn type_error_sequence_repeat(type_name: impl Display) -> RunError {
+        Self::type_error(format!("can't multiply sequence by non-int of type '{type_name}'"))
     }
 
     /// Float power slots reject a modulus before coercing the other operands.
@@ -2503,31 +2508,14 @@ pub(crate) trait ExcTypeExt: Sized {
 }
 
 impl ExcTypeExt for ExcType {
-    /// Creates an exception instance from an exception type and arguments.
-    ///
-    /// Handles exception constructors like `ValueError('message')`.
+    /// Allocates an exception for constructors like `ValueError('message')`.
     /// Currently supports zero or one string argument.
-    ///
-    /// The `interns` parameter provides access to interned string content.
-    /// Returns a heap-allocated exception value.
     fn call(self, vm: &mut VM<'_>, args: ArgValues) -> RunResult<Value> {
         defer_drop!(args, vm);
         let exc = match args {
             ArgValues::Empty => Ok(SimpleException::new_none(self)),
-            ArgValues::One(value) => match value {
-                Value::InternString(string_id) => Ok(SimpleException::new_msg(
-                    self,
-                    vm.interns.get_str(*string_id).to_owned(),
-                )),
-                Value::Ref(heap_id) => {
-                    if let HeapData::Str(s) = vm.heap.get(*heap_id) {
-                        Ok(SimpleException::new_msg(self, s.as_str().to_owned()))
-                    } else {
-                        Err(RunError::internal(
-                            "exceptions can only be called with zero or one string argument",
-                        ))
-                    }
-                }
+            ArgValues::One(value) => match value.py_value(vm) {
+                PyValue::Str(string) => Ok(SimpleException::new_msg(self, string.as_str(vm))),
                 _ => Err(RunError::internal(
                     "exceptions can only be called with zero or one string argument",
                 )),
