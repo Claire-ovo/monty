@@ -1278,10 +1278,15 @@ class OSAccess(AbstractOS):
             return StatResult.dir_stat()
 
     def path_rename(self, path: PurePosixPath, target: PurePosixPath) -> None:
-        """Rename a file or directory; moving a directory into its subtree raises `OSError`."""
+        """Rename a file or directory.
+
+        Renaming a path to itself is a no-op; moving a directory into its own subtree raises `OSError`.
+        """
         src_entry = self._get_entry(path)
         if src_entry is None:
             raise FileNotFoundError(f'[Errno 2] No such file or directory: {str(path)!r} -> {str(target)!r}')
+        if PurePosixPath(path) == PurePosixPath(target):
+            return
 
         parent_dir = self._parent_entry(path)
         assert _is_dir(parent_dir), f'Expected parent of a file to always be a directory, got {parent_dir}'
