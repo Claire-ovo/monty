@@ -51,6 +51,21 @@ def test_file_nested_within_file_rejected():
     )
 
 
+def test_file_replacing_directory_rejected_in_any_order():
+    """A file cannot replace a directory that holds another file, whichever order they appear in."""
+    with pytest.raises(ValueError) as exc_info:
+        OSAccess(
+            [
+                MemoryFile('/test/dir/nested.txt', content='inner'),
+                MemoryFile('/test/dir', content='outer'),
+            ]
+        )
+    assert str(exc_info.value) == snapshot(
+        "Cannot put file MemoryFile(path=/test/dir, content='...', permissions=420) "
+        "at path of directory {'nested.txt': MemoryFile(path=/test/dir/nested.txt, content='...', permissions=420)}"
+    )
+
+
 def test_empty_initialization(monty_run: RunMonty):
     """OSAccess can be initialized with no files."""
     fs = OSAccess()

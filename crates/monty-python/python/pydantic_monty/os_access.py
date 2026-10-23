@@ -1082,6 +1082,9 @@ class OSAccess(AbstractOS):
                 else:
                     raise ValueError(f'Cannot put file {file} within sub-directory of file {entry}')
 
+            entry = subtree.get(name)
+            if _is_dir(entry):
+                raise ValueError(f'Cannot put file {file} at path of directory {entry}')
             subtree[name] = file
 
     def __repr__(self) -> str:
