@@ -1566,7 +1566,8 @@ class AsyncFutureSnapshot:
         """Wait for one or more coroutine externals spawned by earlier
         `resume_auto` calls to settle, deliver them, and return the next
         snapshot. Raises if there are no pending coroutines to await (e.g. a
-        snapshot restored via `load_snapshot`)."""
+        snapshot restored via `load_snapshot`) without consuming the snapshot;
+        resolve it manually with `resume({call_id: ...})`."""
 
     def dump(self) -> bytes: ...
     def __repr__(self) -> str: ...

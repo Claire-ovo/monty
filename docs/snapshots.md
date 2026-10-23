@@ -372,6 +372,7 @@ Calling a loader after a feed or a previous load is rejected before restoration,
     Any `'overlay'` writes made before the dump are gone — the restored overlay starts empty.
 - **A restored [`FutureSnapshot`][pydantic_monty.FutureSnapshot] cannot be driven with `resume_auto()`.** Its pending coroutines lived in the previous
     process.
+    In Python, this rejection leaves the snapshot available for manual resolution.
     Resolve them by hand with `resume({call_id: ...})`.
 - **A dump is your own session state, not untrusted input.** Loading checks the magic, the version, the size cap and the
     structural invariants the interpreter relies on (function metadata, for one), but it is not a security boundary:
