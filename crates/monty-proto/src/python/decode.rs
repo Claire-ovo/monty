@@ -51,6 +51,7 @@ impl DecodedArena {
             store,
             built: Vec::with_capacity(graph.len()),
             namedtuple_types: HashMap::new(),
+            instance_classes: HashMap::new(),
         };
         for node in graph.nodes() {
             let obj = decoder.decode(node)?;
@@ -75,6 +76,9 @@ struct Decoder<'a, 'py> {
     built: Vec<Py<PyAny>>,
     /// Namedtuple types built for this arena, by `(type_name, field_names)`.
     namedtuple_types: HashMap<(String, Vec<String>), Py<PyAny>>,
+    /// Hidden class metadata shared by instance proxies, keyed by arena node.
+    /// Keep it separate from the mutable attrs exposed by a class-type proxy.
+    instance_classes: HashMap<NodeId, (ClassHeader, Py<PyDict>)>,
 }
 
 impl Decoder<'_, '_> {
@@ -165,14 +169,12 @@ impl Decoder<'_, '_> {
                 if let Some(wrapper) = self.store.get(py, instance_id)? {
                     wrapper.bind(py).getattr("value").map(Bound::unbind)
                 } else {
-                    let MontyNode::ClassType(class) = self.graph.node(*class_type) else {
-                        unreachable!("the arena's validation makes class_type a ClassType node")
-                    };
+                    let (class_type, class_attributes) = self.instance_class(*class_type)?;
                     let proxy = PyMontyClassProxy {
-                        class_type: class_header(class),
+                        class_type,
                         instance_id: *instance_id,
                         attributes: self.attrs_dict(attrs)?,
-                        class_attributes: self.attrs_dict(&class.attrs)?,
+                        class_attributes,
                     };
                     Ok(Py::new(py, proxy)?.into_any())
                 }
@@ -193,6 +195,21 @@ impl Decoder<'_, '_> {
             // an output value decodes to its name
             MontyNode::Function { name, .. } => Ok(PyString::new(py, name).into_any().unbind()),
         }
+    }
+
+    /// Materializes class metadata once for all proxies of one arena class node.
+    fn instance_class(&mut self, id: NodeId) -> PyResult<(ClassHeader, Py<PyDict>)> {
+        if let Some((header, attrs)) = self.instance_classes.get(&id) {
+            return Ok((header.clone(), attrs.clone_ref(self.py)));
+        }
+        let MontyNode::ClassType(class) = self.graph.node(id) else {
+            unreachable!("the arena's validation makes class_type a ClassType node")
+        };
+        let header = class_header(class);
+        let attrs = self.attrs_dict(&class.attrs)?;
+        self.instance_classes
+            .insert(id, (header.clone(), attrs.clone_ref(self.py)));
+        Ok((header, attrs))
     }
 
     /// The object built for a child node.
@@ -256,7 +273,7 @@ fn std_type_proxy(py: Python<'_>, inner: StdTypeRef) -> PyResult<Py<PyAny>> {
 /// which the proxy keeps as a Python dict.
 fn class_header(class: &ClassTypeNode) -> ClassHeader {
     ClassHeader {
-        name: class.name.clone(),
+        name: class.name.as_str().into(),
         id: class.id,
         host_defined: class.host_defined,
         is_dataclass: class.is_dataclass,

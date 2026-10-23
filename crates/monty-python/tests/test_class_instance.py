@@ -1309,3 +1309,37 @@ def test_same_qualname_distinct_classes(monty_run: RunMonty):
         'b': ClassInstance(second(), eager_attrs='all', class_type=pydantic_monty.ClassType(second, id=uuid4())),
     }
     assert monty_run('(type(a) == type(b), a == b)', inputs=inputs) == snapshot((False, False))
+
+
+def test_large_class_name_shared_across_many_instances(session: MontySession):
+    name = 'C' + 'x' * 6000
+    code = f'class {name}:\n    def __init__(self, value):\n        self.value = value\nitems = [{name}(i) for i in range(40000)]\nitems'
+    result = session.feed_run(code)
+    assert len(result) == snapshot(40000)
+    assert result[0].name == name
+    assert result[-1].name == name
+    assert result[0].attributes == snapshot({'value': 0})
+    result[0].attributes['value'] = -1
+    assert result[-1].attributes == snapshot({'value': 39999})
+    assert result[0].id != result[-1].id
+    assert session.feed_run('back is items[-1]', inputs={'back': result[-1]}) is True
+
+
+def test_public_class_attributes_remain_mutable_and_decode_local(pool: Monty):
+    class Marker:
+        marker = 42
+
+    with pool.checkout() as session:
+        session.feed_run('C = cls', inputs={'cls': ClassType(Marker, eager_attrs={'marker'})})
+        blob = session.dump()
+    with pool.checkout() as session:
+        session.load_session(blob)
+        cls = session.feed_run('C')
+        assert isinstance(cls, MontyClassTypeProxy)
+        assert cls.attributes == snapshot({'marker': 42})
+        cls.attributes['marker'] = 99
+        assert cls.attributes == snapshot({'marker': 99})
+        later = session.feed_run('C')
+        assert isinstance(later, MontyClassTypeProxy)
+        assert later.attributes == snapshot({'marker': 42})
+        assert later.attributes is not cls.attributes
