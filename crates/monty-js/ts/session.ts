@@ -1086,6 +1086,11 @@ class SnapshotDriver {
     return this.advance(next)
   }
 
+  /** Whether this feed registered host promises for automatic resolution. */
+  get hasPendingFutures(): boolean {
+    return this.answerer.futures.size > 0
+  }
+
   // resume primitives — each runs one turn, then advances to the next snapshot
 
   async resumeReturn(value: unknown): Promise<Snapshot> {
@@ -1164,7 +1169,7 @@ class SingleUse {
   }
 
   /** Rejects operations on a suspension the caller has already answered. */
-  private ensureUnused(): void {
+  protected ensureUnused(): void {
     if (this.used) {
       throw new Error('snapshot has already been resumed')
     }
@@ -1354,13 +1359,17 @@ export class FutureSnapshot extends SingleUse {
   }
 
   /**
-   * Waits for one or more of the pending promises registered by earlier
-   * `resumeAuto` calls to settle, delivers them, and resolves to the next
-   * snapshot. Throws if there are no tracked promises for these ids — e.g. on a
-   * snapshot restored via `loadSnapshot`, whose promises lived in the previous
-   * process (resolve those manually with `resume([...])`). Resumes at most once.
+   * Waits for registered host promises, delivers their outcomes, and returns
+   * the next snapshot. With no registered promises (e.g. after `loadSnapshot`),
+   * rejects without consuming the snapshot or invalidating the session;
+   * use `resume([...])` instead. Once automatic resolution starts, the snapshot
+   * is consumed even if it fails.
    */
   resumeAuto(): Promise<Snapshot> {
+    this.ensureUnused()
+    if (this.turn.pendingCallIds.length > 0 && !this.driver.hasPendingFutures) {
+      return Promise.reject(new Error('no pending host promises to resume; use resume([...])'))
+    }
     this.claim()
     return this.driver.resumeAuto(this.turn)
   }
