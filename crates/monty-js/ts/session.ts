@@ -1086,7 +1086,7 @@ class SnapshotDriver {
     return this.advance(next)
   }
 
-  /** Whether this feed registered host promises for automatic resolution. */
+  /** Whether host promises remain for automatic resolution. */
   get hasPendingFutures(): boolean {
     return this.answerer.futures.size > 0
   }
@@ -1133,7 +1133,11 @@ class SnapshotDriver {
   }
 
   async resolveFutures(results: NativeFutureResult[]): Promise<Snapshot> {
-    return this.advance((await this.native.resolveFutures(results, this.onPrint)) as NativeTurn)
+    const next = (await this.native.resolveFutures(results, this.onPrint)) as NativeTurn
+    for (const result of results) {
+      this.answerer.futures.delete(result.callId)
+    }
+    return this.advance(next)
   }
 
   async dump(): Promise<Buffer> {
